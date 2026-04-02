@@ -317,12 +317,6 @@ enum PolicyScope {
   MAILBOX
 }
 
-enum ConfigScopeType {
-  ORGANIZATION
-  CLIENT
-  INDUSTRY
-}
-
 model Organization {
   id                  String               @id @default(cuid())
   slug                String               @unique
@@ -352,6 +346,8 @@ model Organization {
   accounts            Account[]
   contacts            Contact[]
   leads               Lead[]
+  outreachMessages    OutreachMessage[]
+  replies             Reply[]
   meetings            Meeting[]
   sendingDomains      SendingDomain[]
   mailboxes           Mailbox[]
@@ -364,6 +360,16 @@ model Organization {
   notes               Note[]
   templates           Template[]
   policySettings      PolicySetting[]
+  clientIndustryProfiles ClientIndustryProfile[]
+  extensionRecords    ExtensionRecord[]
+  customFieldDefinitions CustomFieldDefinition[]
+  customFieldValues   CustomFieldValue[]
+  pipelineDefinitions PipelineDefinition[]
+  objectStageStates   ObjectStageState[]
+  workflowPolicies    WorkflowPolicy[]
+  automationRules     AutomationRule[]
+  tagDefinitions      TagDefinition[]
+  tagAssignments      TagAssignment[]
 }
 
 model User {
@@ -383,7 +389,7 @@ model User {
   createdInvoices     Invoice[]            @relation("InvoiceCreatedBy")
   createdActivities   ActivityEvent[]      @relation("ActivityActor")
   auditEntries        AuditLog[]           @relation("AuditActor")
-  notes               Note[]
+  notesAuthored       Note[]               @relation("NoteAuthor")
   alertsResolved      Alert[]              @relation("AlertResolvedBy")
 }
 
@@ -428,17 +434,35 @@ model Client {
   createdBy           User?                @relation("ClientCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   subscriptions       Subscription[]
   invoices            Invoice[]
+  payments            Payment[]
   icps                IdealCustomerProfile[]
   segments            Segment[]
   campaigns           Campaign[]
+  sequences           Sequence[]
   leadSources         LeadSource[]
   accounts            Account[]
   contacts            Contact[]
   leads               Lead[]
+  outreachMessages    OutreachMessage[]
+  replies             Reply[]
   meetings            Meeting[]
+  sendingDomains      SendingDomain[]
   mailboxes           Mailbox[]
   sendPolicies        SendPolicy[]
+  suppressions        SuppressionEntry[]
+  jobs                Job[]
+  activities          ActivityEvent[]
+  alerts              Alert[]
   notes               Note[]
+  templates           Template[]
+  policySettings      PolicySetting[]
+  clientIndustryProfiles ClientIndustryProfile[]
+  extensionRecords    ExtensionRecord[]
+  customFieldDefinitions CustomFieldDefinition[]
+  pipelineDefinitions PipelineDefinition[]
+  workflowPolicies    WorkflowPolicy[]
+  automationRules     AutomationRule[]
+  tagDefinitions      TagDefinition[]
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
@@ -632,9 +656,15 @@ model Campaign {
   sequences           Sequence[]
   leadSources         LeadSource[]
   leads               Lead[]
+  outreachMessages    OutreachMessage[]
+  replies             Reply[]
   meetings            Meeting[]
+  jobs                Job[]
+  activities          ActivityEvent[]
+  alerts              Alert[]
   templates           Template[]
   notes               Note[]
+  policySettings      PolicySetting[]
 
   @@unique([clientId, name])
   @@index([organizationId, status])
@@ -968,6 +998,7 @@ model Mailbox {
   replies             Reply[]
   bounces             BounceEvent[]
   complaints          ComplaintEvent[]
+  policySettings      PolicySetting[]
 
   @@index([organizationId, status])
   @@index([clientId, status])
@@ -1246,10 +1277,6 @@ model PolicySetting {
   @@index([organizationId, scope, isActive])
 }
 
-// =========================
-// V2 EXTENSION + CUSTOMIZATION LAYER
-// =========================
-
 enum CoreObjectType {
   ORGANIZATION
   CLIENT
@@ -1257,14 +1284,8 @@ enum CoreObjectType {
   ACCOUNT
   CONTACT
   LEAD
-  REPLY
   MEETING
   INVOICE
-  SEQUENCE
-  SEQUENCE_STEP
-  MAILBOX
-  SUBSCRIPTION
-  PAYMENT
   EXTENSION_RECORD
 }
 
@@ -1416,8 +1437,6 @@ model CustomFieldDefinition {
   organizationId      String
   clientId            String?
   industryPackId      String?
-  scopeType           ConfigScopeType      @default(ORGANIZATION)
-  scopeRefId          String?
   objectType          CoreObjectType
   fieldKey            String
   label               String
@@ -1433,10 +1452,9 @@ model CustomFieldDefinition {
   industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
   values              CustomFieldValue[]
 
+  @@unique([organizationId, clientId, industryPackId, objectType, fieldKey])
   @@index([organizationId, objectType, isActive])
   @@index([clientId, objectType, isActive])
-  @@index([industryPackId, objectType, isActive])
-  @@unique([organizationId, scopeType, scopeRefId, objectType, fieldKey])
 }
 
 model CustomFieldValue {
@@ -1466,8 +1484,6 @@ model PipelineDefinition {
   organizationId      String
   clientId            String?
   industryPackId      String?
-  scopeType           ConfigScopeType      @default(ORGANIZATION)
-  scopeRefId          String?
   objectType          CoreObjectType
   name                String
   key                 String
@@ -1482,10 +1498,9 @@ model PipelineDefinition {
   stages              PipelineStage[]
   stageStates         ObjectStageState[]
 
+  @@unique([organizationId, clientId, industryPackId, objectType, key])
   @@index([organizationId, objectType])
   @@index([clientId, objectType])
-  @@index([industryPackId, objectType])
-  @@unique([organizationId, scopeType, scopeRefId, objectType, key])
 }
 
 model PipelineStage {
@@ -1526,7 +1541,6 @@ model ObjectStageState {
   stage               PipelineStage        @relation(fields: [pipelineStageId], references: [id], onDelete: Cascade)
 
   @@index([organizationId, objectType, objectId])
-  @@index([organizationId, objectType, objectId, isCurrent])
   @@index([pipelineDefinitionId, isCurrent])
   @@index([pipelineStageId, isCurrent])
 }
@@ -1536,8 +1550,6 @@ model WorkflowPolicy {
   organizationId      String
   clientId            String?
   industryPackId      String?
-  scopeType           ConfigScopeType      @default(ORGANIZATION)
-  scopeRefId          String?
   objectType          CoreObjectType?
   key                 String
   label               String
@@ -1551,10 +1563,8 @@ model WorkflowPolicy {
   industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
   automationRules     AutomationRule[]
 
+  @@unique([organizationId, clientId, industryPackId, key])
   @@index([organizationId, isActive])
-  @@index([clientId, isActive])
-  @@index([industryPackId, isActive])
-  @@unique([organizationId, scopeType, scopeRefId, key])
 }
 
 model AutomationRule {
@@ -1583,8 +1593,6 @@ model TagDefinition {
   organizationId      String
   clientId            String?
   industryPackId      String?
-  scopeType           ConfigScopeType      @default(ORGANIZATION)
-  scopeRefId          String?
   objectType          CoreObjectType?
   key                 String
   label               String
@@ -1598,10 +1606,8 @@ model TagDefinition {
   industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
   assignments         TagAssignment[]
 
+  @@unique([organizationId, clientId, industryPackId, objectType, key])
   @@index([organizationId, isActive])
-  @@index([clientId, isActive])
-  @@index([industryPackId, isActive])
-  @@unique([organizationId, scopeType, scopeRefId, objectType, key])
 }
 
 model TagAssignment {
