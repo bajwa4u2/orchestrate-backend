@@ -1,0 +1,1620 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OrganizationType {
+  PLATFORM
+  INTERNAL
+  CLIENT_ACCOUNT
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  OPERATOR
+  ANALYST
+  BILLING
+  VIEWER
+}
+
+enum ClientStatus {
+  LEAD
+  ACTIVE
+  PAUSED
+  CHURNED
+  ARCHIVED
+}
+
+enum PlanInterval {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  CUSTOM
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  PAUSED
+  CANCELED
+  EXPIRED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  PARTIALLY_PAID
+  VOID
+  OVERDUE
+  WRITTEN_OFF
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentMethodType {
+  MANUAL
+  STRIPE
+  ACH
+  CARD
+  WIRE
+  CASH
+  OTHER
+}
+
+enum ICPStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum SegmentStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum CampaignStatus {
+  DRAFT
+  READY
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum SequenceStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum SequenceStepType {
+  EMAIL
+  WAIT
+  TASK
+  CONDITIONAL
+}
+
+enum SequenceStepStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum LeadSourceType {
+  MANUAL
+  CSV_IMPORT
+  GOOGLE_MAPS
+  DIRECTORY
+  API
+  INTERNAL_GROWTH
+  REFERRAL
+  OTHER
+}
+
+enum LeadStatus {
+  NEW
+  ENRICHED
+  QUALIFIED
+  CONTACTED
+  FOLLOWED_UP
+  REPLIED
+  INTERESTED
+  BOOKED
+  CLOSED_LOST
+  SUPPRESSED
+}
+
+enum QualificationStatus {
+  UNREVIEWED
+  ACCEPTED
+  REJECTED
+  NEEDS_REVIEW
+}
+
+enum ContactEmailStatus {
+  UNVERIFIED
+  VERIFIED
+  RISKY
+  INVALID
+  BOUNCED
+}
+
+enum EnrollmentStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  PAUSED
+  FAILED
+  STOPPED
+}
+
+enum MessageDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum MessageChannel {
+  EMAIL
+}
+
+enum MessageStatus {
+  QUEUED
+  SCHEDULED
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  REPLIED
+  BOUNCED
+  FAILED
+  CANCELED
+}
+
+enum ReplyIntent {
+  INTERESTED
+  NOT_NOW
+  NOT_RELEVANT
+  REFERRAL
+  UNSUBSCRIBE
+  OOO
+  BOUNCE
+  UNCLEAR
+  HUMAN_REVIEW
+}
+
+enum MeetingStatus {
+  PROPOSED
+  BOOKED
+  COMPLETED
+  CANCELED
+  NO_SHOW
+}
+
+enum DomainStatus {
+  PENDING
+  ACTIVE
+  PAUSED
+  BLOCKED
+}
+
+enum MailboxProvider {
+  GOOGLE
+  MICROSOFT
+  SMTP
+  IMAP_SMTP
+  OTHER
+}
+
+enum MailboxStatus {
+  CONNECTING
+  ACTIVE
+  WARMING
+  PAUSED
+  ERROR
+  DISCONNECTED
+}
+
+enum MailboxHealthStatus {
+  HEALTHY
+  WATCH
+  DEGRADED
+  CRITICAL
+}
+
+enum WarmupStatus {
+  NOT_STARTED
+  RUNNING
+  PAUSED
+  COMPLETED
+}
+
+enum SuppressionType {
+  UNSUBSCRIBE
+  HARD_BOUNCE
+  COMPLAINT
+  MANUAL_BLOCK
+}
+
+enum JobType {
+  LEAD_IMPORT
+  LEAD_ENRICHMENT
+  LEAD_SCORING
+  MESSAGE_GENERATION
+  FIRST_SEND
+  FOLLOWUP_SEND
+  INBOX_SYNC
+  REPLY_CLASSIFICATION
+  MEETING_HANDOFF
+  INVOICE_GENERATION
+  ALERT_EVALUATION
+  MAILBOX_HEALTH_CHECK
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELED
+  RETRY_SCHEDULED
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  MUTED
+}
+
+enum ActivityKind {
+  CLIENT_CREATED
+  CAMPAIGN_CREATED
+  LEAD_IMPORTED
+  LEAD_UPDATED
+  MESSAGE_SENT
+  REPLY_RECEIVED
+  MEETING_BOOKED
+  INVOICE_ISSUED
+  PAYMENT_RECEIVED
+  SYSTEM_ALERT
+  NOTE_ADDED
+}
+
+enum TemplateType {
+  OUTREACH
+  FOLLOW_UP
+  REPLY
+  INTERNAL
+}
+
+enum PolicyScope {
+  GLOBAL
+  ORGANIZATION
+  CLIENT
+  CAMPAIGN
+  MAILBOX
+}
+
+enum ConfigScopeType {
+  ORGANIZATION
+  CLIENT
+  INDUSTRY
+}
+
+model Organization {
+  id                  String               @id @default(cuid())
+  slug                String               @unique
+  legalName           String
+  displayName         String
+  type                OrganizationType     @default(CLIENT_ACCOUNT)
+  isInternal          Boolean              @default(false)
+  isActive            Boolean              @default(true)
+  timezone            String?
+  countryCode         String?
+  currencyCode        String               @default("USD")
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  members             WorkspaceMember[]
+  clients             Client[]
+  plans               Plan[]
+  subscriptions       Subscription[]
+  invoices            Invoice[]
+  payments            Payment[]
+  icps                IdealCustomerProfile[]
+  segments            Segment[]
+  campaigns           Campaign[]
+  sequences           Sequence[]
+  leadSources         LeadSource[]
+  accounts            Account[]
+  contacts            Contact[]
+  leads               Lead[]
+  meetings            Meeting[]
+  sendingDomains      SendingDomain[]
+  mailboxes           Mailbox[]
+  sendPolicies        SendPolicy[]
+  suppressions        SuppressionEntry[]
+  jobs                Job[]
+  activities          ActivityEvent[]
+  auditLogs           AuditLog[]
+  alerts              Alert[]
+  notes               Note[]
+  templates           Template[]
+  policySettings      PolicySetting[]
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  fullName            String
+  passwordHash        String?
+  isActive            Boolean              @default(true)
+  lastLoginAt         DateTime?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  memberships         WorkspaceMember[]
+  createdClients      Client[]             @relation("ClientCreatedBy")
+  createdCampaigns    Campaign[]           @relation("CampaignCreatedBy")
+  createdInvoices     Invoice[]            @relation("InvoiceCreatedBy")
+  createdActivities   ActivityEvent[]      @relation("ActivityActor")
+  auditEntries        AuditLog[]           @relation("AuditActor")
+  notes               Note[]
+  alertsResolved      Alert[]              @relation("AlertResolvedBy")
+}
+
+model WorkspaceMember {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  userId              String
+  role                MemberRole
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+model Client {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  createdById         String?
+  code                String?
+  legalName           String
+  displayName         String
+  status              ClientStatus         @default(LEAD)
+  industry            String?
+  websiteUrl          String?
+  bookingUrl          String?
+  primaryTimezone     String?
+  currencyCode        String               @default("USD")
+  outboundOffer       String?
+  notesText           String?
+  metadataJson        Json?
+  isInternal          Boolean              @default(false)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  archivedAt          DateTime?
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy           User?                @relation("ClientCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  subscriptions       Subscription[]
+  invoices            Invoice[]
+  icps                IdealCustomerProfile[]
+  segments            Segment[]
+  campaigns           Campaign[]
+  leadSources         LeadSource[]
+  accounts            Account[]
+  contacts            Contact[]
+  leads               Lead[]
+  meetings            Meeting[]
+  mailboxes           Mailbox[]
+  sendPolicies        SendPolicy[]
+  notes               Note[]
+
+  @@unique([organizationId, displayName])
+  @@index([organizationId, status])
+}
+
+model Plan {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  code                String
+  name                String
+  description         String?
+  amountCents         Int
+  currencyCode        String               @default("USD")
+  interval            PlanInterval
+  isActive            Boolean              @default(true)
+  featuresJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  subscriptions       Subscription[]
+
+  @@unique([organizationId, code])
+}
+
+model Subscription {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  planId              String?
+  externalRef         String?
+  status              SubscriptionStatus   @default(TRIALING)
+  amountCents         Int
+  currencyCode        String               @default("USD")
+  billingAnchorAt     DateTime?
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
+  canceledAt          DateTime?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  plan                Plan?                @relation(fields: [planId], references: [id], onDelete: SetNull)
+  invoices            Invoice[]
+
+  @@index([organizationId, status])
+  @@index([clientId, status])
+}
+
+model Invoice {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  subscriptionId      String?
+  createdById         String?
+  invoiceNumber       String
+  status              InvoiceStatus        @default(DRAFT)
+  currencyCode        String               @default("USD")
+  subtotalCents       Int                  @default(0)
+  taxCents            Int                  @default(0)
+  totalCents          Int                  @default(0)
+  amountPaidCents     Int                  @default(0)
+  issuedAt            DateTime?
+  dueAt               DateTime?
+  paidAt              DateTime?
+  notesText           String?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  subscription        Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  createdBy           User?                @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  payments            Payment[]
+
+  @@unique([organizationId, invoiceNumber])
+  @@index([clientId, status, dueAt])
+}
+
+model Payment {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  invoiceId           String?
+  externalRef         String?
+  method              PaymentMethodType
+  status              PaymentStatus        @default(PENDING)
+  currencyCode        String               @default("USD")
+  amountCents         Int
+  receivedAt          DateTime?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  invoice             Invoice?             @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  attempts            PaymentAttempt[]
+
+  @@index([clientId, status, receivedAt])
+}
+
+model PaymentAttempt {
+  id                  String               @id @default(cuid())
+  paymentId           String
+  attemptedAt         DateTime             @default(now())
+  status              PaymentStatus        @default(PENDING)
+  gatewayMessage      String?
+  metadataJson        Json?
+
+  payment             Payment              @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId, attemptedAt])
+}
+
+model IdealCustomerProfile {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  name                String
+  status              ICPStatus            @default(DRAFT)
+  industryTags        String[]
+  geoTargets          String[]
+  companySizeMin      Int?
+  companySizeMax      Int?
+  titleKeywords       String[]
+  exclusionKeywords   String[]
+  rulesJson           Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  segments            Segment[]
+  campaigns           Campaign[]
+
+  @@index([clientId, status])
+}
+
+model Segment {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  icpId               String?
+  name                String
+  status              SegmentStatus        @default(DRAFT)
+  filterJson          Json?
+  notesText           String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  icp                 IdealCustomerProfile? @relation(fields: [icpId], references: [id], onDelete: SetNull)
+  campaigns           Campaign[]
+
+  @@index([clientId, status])
+}
+
+model Campaign {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  icpId               String?
+  segmentId           String?
+  createdById         String?
+  code                String?
+  name                String
+  status              CampaignStatus       @default(DRAFT)
+  channel             MessageChannel       @default(EMAIL)
+  objective           String?
+  offerSummary        String?
+  bookingUrlOverride  String?
+  dailySendCap        Int?
+  timezone            String?
+  startAt             DateTime?
+  endAt               DateTime?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  archivedAt          DateTime?
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  icp                 IdealCustomerProfile? @relation(fields: [icpId], references: [id], onDelete: SetNull)
+  segment             Segment?             @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+  createdBy           User?                @relation("CampaignCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  sequences           Sequence[]
+  leadSources         LeadSource[]
+  leads               Lead[]
+  meetings            Meeting[]
+  templates           Template[]
+  notes               Note[]
+
+  @@unique([clientId, name])
+  @@index([organizationId, status])
+  @@index([clientId, status])
+}
+
+model Sequence {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  campaignId          String
+  name                String
+  status              SequenceStatus       @default(DRAFT)
+  description         String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign            Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  steps               SequenceStep[]
+  enrollments         LeadEnrollment[]
+
+  @@index([campaignId, status])
+}
+
+model SequenceStep {
+  id                  String               @id @default(cuid())
+  sequenceId          String
+  orderIndex          Int
+  type                SequenceStepType
+  status              SequenceStepStatus   @default(ACTIVE)
+  waitDays            Int?
+  subjectTemplate     String?
+  bodyTemplate        String?
+  instructionText     String?
+  variantPolicyJson   Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  sequence            Sequence             @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  messages            OutreachMessage[]
+
+  @@unique([sequenceId, orderIndex])
+}
+
+model LeadSource {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  campaignId          String?
+  name                String
+  type                LeadSourceType
+  sourceRef           String?
+  configJson          Json?
+  importedAt          DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  leads               Lead[]
+
+  @@index([clientId, type])
+}
+
+model Account {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  domain              String?
+  companyName         String
+  industry            String?
+  employeeCount       Int?
+  city                String?
+  region              String?
+  countryCode         String?
+  websiteUrl          String?
+  linkedinUrl         String?
+  qualificationStatus QualificationStatus  @default(UNREVIEWED)
+  score               Decimal?             @db.Decimal(5,2)
+  enrichmentJson      Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  contacts            Contact[]
+  leads               Lead[]
+
+  @@index([clientId, qualificationStatus])
+  @@index([domain])
+}
+
+model Contact {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  accountId           String?
+  firstName           String?
+  lastName            String?
+  fullName            String
+  title               String?
+  email               String?
+  emailStatus         ContactEmailStatus   @default(UNVERIFIED)
+  phone               String?
+  linkedinUrl         String?
+  timezone            String?
+  city                String?
+  region              String?
+  countryCode         String?
+  qualificationStatus QualificationStatus  @default(UNREVIEWED)
+  score               Decimal?             @db.Decimal(5,2)
+  enrichmentJson      Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  account             Account?             @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  leads               Lead[]
+  suppressions        SuppressionEntry[]
+
+  @@index([clientId, qualificationStatus])
+  @@index([email])
+}
+
+model Lead {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  campaignId          String
+  leadSourceId        String?
+  accountId           String?
+  contactId           String?
+  status              LeadStatus           @default(NEW)
+  score               Decimal?             @db.Decimal(5,2)
+  priority            Int                  @default(0)
+  firstContactAt      DateTime?
+  lastContactAt       DateTime?
+  lastReplyAt         DateTime?
+  bookedAt            DateTime?
+  suppressionReason   String?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign            Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadSource          LeadSource?          @relation(fields: [leadSourceId], references: [id], onDelete: SetNull)
+  account             Account?             @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  contact             Contact?             @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  enrollments         LeadEnrollment[]
+  messages            OutreachMessage[]
+  replies             Reply[]
+  meetings            Meeting[]
+  notes               Note[]
+
+  @@unique([campaignId, contactId])
+  @@index([clientId, status])
+  @@index([campaignId, status])
+  @@index([lastReplyAt])
+}
+
+model LeadEnrollment {
+  id                  String               @id @default(cuid())
+  leadId              String
+  sequenceId          String
+  status              EnrollmentStatus     @default(PENDING)
+  currentStepOrder    Int?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  stoppedReason       String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  lead                Lead                 @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sequence            Sequence             @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  messages            OutreachMessage[]
+
+  @@unique([leadId, sequenceId])
+  @@index([status, startedAt])
+}
+
+model OutreachMessage {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  campaignId          String
+  leadId              String
+  enrollmentId        String?
+  sequenceStepId      String?
+  mailboxId           String?
+  direction           MessageDirection
+  channel             MessageChannel       @default(EMAIL)
+  status              MessageStatus        @default(QUEUED)
+  externalMessageId   String?
+  threadKey           String?
+  subjectLine         String?
+  bodyText            String?
+  sentAt              DateTime?
+  deliveredAt         DateTime?
+  openedAt            DateTime?
+  clickedAt           DateTime?
+  failedAt            DateTime?
+  errorMessage        String?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign            Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead                Lead                 @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  enrollment          LeadEnrollment?      @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  sequenceStep        SequenceStep?        @relation(fields: [sequenceStepId], references: [id], onDelete: SetNull)
+  mailbox             Mailbox?             @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  replies             Reply[]
+
+  @@index([campaignId, status, sentAt])
+  @@index([leadId, direction, sentAt])
+  @@index([externalMessageId])
+}
+
+model Reply {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  campaignId          String
+  leadId              String
+  messageId           String?
+  mailboxId           String?
+  intent              ReplyIntent          @default(UNCLEAR)
+  confidence          Decimal?             @db.Decimal(5,2)
+  fromEmail           String?
+  subjectLine         String?
+  bodyText            String?
+  receivedAt          DateTime
+  requiresHumanReview Boolean              @default(false)
+  handledAt           DateTime?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign            Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead                Lead                 @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  message             OutreachMessage?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  mailbox             Mailbox?             @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  meeting             Meeting?
+
+  @@index([campaignId, intent, receivedAt])
+  @@index([leadId, receivedAt])
+}
+
+model Meeting {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  campaignId          String?
+  leadId              String?
+  replyId             String?              @unique
+  status              MeetingStatus        @default(PROPOSED)
+  title               String?
+  bookingUrl          String?
+  externalRef         String?
+  scheduledAt         DateTime?
+  completedAt         DateTime?
+  notesText           String?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  lead                Lead?                @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  reply               Reply?               @relation(fields: [replyId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, status, scheduledAt])
+}
+
+model SendingDomain {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  domain              String
+  status              DomainStatus         @default(PENDING)
+  dnsVerifiedAt       DateTime?
+  warmupRecommended   Boolean              @default(true)
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  mailboxes           Mailbox[]
+
+  @@unique([organizationId, domain])
+}
+
+model Mailbox {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  domainId            String?
+  label               String
+  emailAddress        String               @unique
+  provider            MailboxProvider
+  status              MailboxStatus        @default(CONNECTING)
+  dailySendCap        Int                  @default(30)
+  hourlySendCap       Int?
+  warmupStatus        WarmupStatus         @default(NOT_STARTED)
+  lastSyncedAt        DateTime?
+  healthStatus        MailboxHealthStatus  @default(HEALTHY)
+  healthScore         Decimal?             @db.Decimal(5,2)
+  credentialsJson     Json?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  domain              SendingDomain?       @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  sendPolicies        SendPolicy[]
+  healthEvents        MailboxHealthEvent[]
+  messages            OutreachMessage[]
+  replies             Reply[]
+  bounces             BounceEvent[]
+  complaints          ComplaintEvent[]
+
+  @@index([organizationId, status])
+  @@index([clientId, status])
+}
+
+model MailboxHealthEvent {
+  id                  String               @id @default(cuid())
+  mailboxId           String
+  status              MailboxHealthStatus
+  sentCount           Int                  @default(0)
+  replyCount          Int                  @default(0)
+  bounceCount         Int                  @default(0)
+  complaintCount      Int                  @default(0)
+  score               Decimal?             @db.Decimal(5,2)
+  observedAt          DateTime             @default(now())
+  metadataJson        Json?
+
+  mailbox             Mailbox              @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, observedAt])
+}
+
+model SendPolicy {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  mailboxId           String?
+  scope               PolicyScope
+  name                String
+  timezone            String?
+  dailyCap            Int?
+  hourlyCap           Int?
+  minDelaySeconds     Int?
+  maxDelaySeconds     Int?
+  allowedWeekdays     Int[]
+  activeFromHour      Int?
+  activeToHour        Int?
+  stopOnBounceRate    Decimal?             @db.Decimal(5,2)
+  stopOnComplaintRate Decimal?             @db.Decimal(5,2)
+  isActive            Boolean              @default(true)
+  configJson          Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  mailbox             Mailbox?             @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, scope, isActive])
+}
+
+model SuppressionEntry {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  contactId           String?
+  emailAddress        String?
+  domain              String?
+  type                SuppressionType
+  reason              String?
+  source              String?
+  createdAt           DateTime             @default(now())
+  expiresAt           DateTime?
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  contact             Contact?             @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, type])
+  @@index([emailAddress])
+  @@index([domain])
+}
+
+model BounceEvent {
+  id                  String               @id @default(cuid())
+  mailboxId           String
+  messageId           String?
+  bouncedEmail        String
+  bounceType          String?
+  reason              String?
+  occurredAt          DateTime             @default(now())
+  metadataJson        Json?
+
+  mailbox             Mailbox              @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, occurredAt])
+}
+
+model ComplaintEvent {
+  id                  String               @id @default(cuid())
+  mailboxId           String
+  messageId           String?
+  complainedEmail     String
+  reason              String?
+  occurredAt          DateTime             @default(now())
+  metadataJson        Json?
+
+  mailbox             Mailbox              @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, occurredAt])
+}
+
+model Job {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  type                JobType
+  status              JobStatus            @default(QUEUED)
+  queueName           String
+  dedupeKey           String?
+  scheduledFor        DateTime?
+  startedAt           DateTime?
+  finishedAt          DateTime?
+  attemptCount        Int                  @default(0)
+  maxAttempts         Int                  @default(3)
+  lastError           String?
+  payloadJson         Json?
+  resultJson          Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  runs                JobRun[]
+
+  @@index([queueName, status, scheduledFor])
+  @@index([organizationId, type, status])
+  @@index([dedupeKey])
+}
+
+model JobRun {
+  id                  String               @id @default(cuid())
+  jobId               String
+  runNumber           Int
+  status              JobStatus
+  startedAt           DateTime             @default(now())
+  finishedAt          DateTime?
+  errorMessage        String?
+  logJson             Json?
+
+  job                 Job                  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, runNumber])
+}
+
+model ActivityEvent {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  actorUserId         String?
+  kind                ActivityKind
+  subjectType         String
+  subjectId           String
+  summary             String
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  actor               User?                @relation("ActivityActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([clientId, createdAt])
+  @@index([campaignId, createdAt])
+}
+
+model AuditLog {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  actorUserId         String?
+  action              String
+  entityType          String
+  entityId            String
+  beforeJson          Json?
+  afterJson           Json?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor               User?                @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model Alert {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  resolvedById        String?
+  severity            AlertSeverity
+  status              AlertStatus          @default(OPEN)
+  category            String
+  title               String
+  bodyText            String?
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  resolvedAt          DateTime?
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  resolvedBy          User?                @relation("AlertResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, severity])
+  @@index([clientId, status])
+}
+
+model Note {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  leadId              String?
+  authorUserId        String?
+  bodyText            String
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  lead                Lead?                @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  author              User?                @relation("NoteAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([clientId, createdAt])
+}
+
+model Template {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  type                TemplateType
+  name                String
+  subjectTemplate     String?
+  bodyTemplate        String?
+  variablesJson       Json?
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, type, isActive])
+}
+
+model PolicySetting {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  mailboxId           String?
+  scope               PolicyScope
+  key                 String
+  valueJson           Json
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign            Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  mailbox             Mailbox?             @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, scope, key, clientId, campaignId, mailboxId])
+  @@index([organizationId, scope, isActive])
+}
+
+// =========================
+// V2 EXTENSION + CUSTOMIZATION LAYER
+// =========================
+
+enum CoreObjectType {
+  ORGANIZATION
+  CLIENT
+  CAMPAIGN
+  ACCOUNT
+  CONTACT
+  LEAD
+  REPLY
+  MEETING
+  INVOICE
+  SEQUENCE
+  SEQUENCE_STEP
+  MAILBOX
+  SUBSCRIPTION
+  PAYMENT
+  EXTENSION_RECORD
+}
+
+enum ExtensionRecordStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum CustomFieldDataType {
+  TEXT
+  LONG_TEXT
+  NUMBER
+  DECIMAL
+  BOOLEAN
+  DATE
+  DATETIME
+  SINGLE_SELECT
+  MULTI_SELECT
+  JSON
+}
+
+enum PipelineStageType {
+  DEFAULT
+  ENTRY
+  ACTIVE
+  HOLD
+  SUCCESS
+  LOSS
+  CLOSED
+}
+
+enum WorkflowTriggerType {
+  LEAD_CREATED
+  LEAD_UPDATED
+  LEAD_STAGE_CHANGED
+  MESSAGE_SENT
+  MESSAGE_BOUNCED
+  REPLY_RECEIVED
+  REPLY_CLASSIFIED
+  MEETING_BOOKED
+  INVOICE_ISSUED
+  PAYMENT_RECEIVED
+  SCHEDULE
+  MANUAL
+}
+
+enum WorkflowActionType {
+  CREATE_JOB
+  UPDATE_STATUS
+  APPLY_TAG
+  REMOVE_TAG
+  ADVANCE_STAGE
+  SEND_MESSAGE
+  PAUSE_CAMPAIGN
+  CREATE_ALERT
+  CREATE_NOTE
+  ASSIGN_REVIEW
+  UPDATE_POLICY
+}
+
+model IndustryPack {
+  id                  String               @id @default(cuid())
+  slug                String               @unique
+  name                String
+  description         String?
+  isActive            Boolean              @default(true)
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  clientProfiles      ClientIndustryProfile[]
+  objectDefinitions   ExtensionObjectDefinition[]
+  extensionRecords    ExtensionRecord[]
+  customFieldDefs     CustomFieldDefinition[]
+  pipelineDefs        PipelineDefinition[]
+  workflowPolicies    WorkflowPolicy[]
+  tagDefinitions      TagDefinition[]
+}
+
+model ClientIndustryProfile {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  industryPackId      String
+  isPrimary           Boolean              @default(false)
+  complianceProfileJson Json?
+  workflowProfileJson Json?
+  settingsJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  industryPack        IndustryPack         @relation(fields: [industryPackId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, industryPackId])
+  @@index([organizationId, clientId])
+  @@index([industryPackId, isPrimary])
+}
+
+model ExtensionObjectDefinition {
+  id                  String               @id @default(cuid())
+  industryPackId      String
+  objectKey           String
+  label               String
+  description         String?
+  linkedCoreObjectType CoreObjectType
+  schemaJson          Json?
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  industryPack        IndustryPack         @relation(fields: [industryPackId], references: [id], onDelete: Cascade)
+  extensionRecords    ExtensionRecord[]
+
+  @@unique([industryPackId, objectKey])
+  @@index([industryPackId, isActive])
+}
+
+model ExtensionRecord {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String
+  industryPackId      String
+  extensionObjectDefinitionId String
+  linkedObjectType    CoreObjectType
+  linkedObjectId      String
+  title               String?
+  status              ExtensionRecordStatus @default(ACTIVE)
+  payloadJson         Json
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  industryPack        IndustryPack         @relation(fields: [industryPackId], references: [id], onDelete: Cascade)
+  definition          ExtensionObjectDefinition @relation(fields: [extensionObjectDefinitionId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, clientId])
+  @@index([industryPackId, extensionObjectDefinitionId])
+  @@index([linkedObjectType, linkedObjectId])
+  @@index([clientId, status])
+}
+
+model CustomFieldDefinition {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  industryPackId      String?
+  scopeType           ConfigScopeType      @default(ORGANIZATION)
+  scopeRefId          String?
+  objectType          CoreObjectType
+  fieldKey            String
+  label               String
+  dataType            CustomFieldDataType
+  configJson          Json?
+  isRequired          Boolean              @default(false)
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
+  values              CustomFieldValue[]
+
+  @@index([organizationId, objectType, isActive])
+  @@index([clientId, objectType, isActive])
+  @@index([industryPackId, objectType, isActive])
+  @@unique([organizationId, scopeType, scopeRefId, objectType, fieldKey])
+}
+
+model CustomFieldValue {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  customFieldDefinitionId String
+  objectType          CoreObjectType
+  objectId            String
+  valueString         String?
+  valueNumber         Int?
+  valueDecimal        Decimal?             @db.Decimal(12, 4)
+  valueBoolean        Boolean?
+  valueDateTime       DateTime?
+  valueJson           Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  definition          CustomFieldDefinition @relation(fields: [customFieldDefinitionId], references: [id], onDelete: Cascade)
+
+  @@unique([customFieldDefinitionId, objectType, objectId])
+  @@index([organizationId, objectType, objectId])
+}
+
+model PipelineDefinition {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  industryPackId      String?
+  scopeType           ConfigScopeType      @default(ORGANIZATION)
+  scopeRefId          String?
+  objectType          CoreObjectType
+  name                String
+  key                 String
+  isDefault           Boolean              @default(false)
+  configJson          Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
+  stages              PipelineStage[]
+  stageStates         ObjectStageState[]
+
+  @@index([organizationId, objectType])
+  @@index([clientId, objectType])
+  @@index([industryPackId, objectType])
+  @@unique([organizationId, scopeType, scopeRefId, objectType, key])
+}
+
+model PipelineStage {
+  id                  String               @id @default(cuid())
+  pipelineDefinitionId String
+  key                 String
+  label               String
+  stageOrder          Int
+  stageType           PipelineStageType    @default(DEFAULT)
+  configJson          Json?
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  pipeline            PipelineDefinition   @relation(fields: [pipelineDefinitionId], references: [id], onDelete: Cascade)
+  stageStates         ObjectStageState[]
+
+  @@unique([pipelineDefinitionId, key])
+  @@unique([pipelineDefinitionId, stageOrder])
+  @@index([pipelineDefinitionId, isActive])
+}
+
+model ObjectStageState {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  pipelineDefinitionId String
+  pipelineStageId     String
+  objectType          CoreObjectType
+  objectId            String
+  enteredAt           DateTime             @default(now())
+  exitedAt            DateTime?
+  isCurrent           Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pipeline            PipelineDefinition   @relation(fields: [pipelineDefinitionId], references: [id], onDelete: Cascade)
+  stage               PipelineStage        @relation(fields: [pipelineStageId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, objectType, objectId])
+  @@index([organizationId, objectType, objectId, isCurrent])
+  @@index([pipelineDefinitionId, isCurrent])
+  @@index([pipelineStageId, isCurrent])
+}
+
+model WorkflowPolicy {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  industryPackId      String?
+  scopeType           ConfigScopeType      @default(ORGANIZATION)
+  scopeRefId          String?
+  objectType          CoreObjectType?
+  key                 String
+  label               String
+  configJson          Json
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
+  automationRules     AutomationRule[]
+
+  @@index([organizationId, isActive])
+  @@index([clientId, isActive])
+  @@index([industryPackId, isActive])
+  @@unique([organizationId, scopeType, scopeRefId, key])
+}
+
+model AutomationRule {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  workflowPolicyId    String?
+  triggerType         WorkflowTriggerType
+  triggerConfigJson   Json?
+  actionType          WorkflowActionType
+  actionConfigJson    Json
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  workflowPolicy      WorkflowPolicy?      @relation(fields: [workflowPolicyId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, triggerType, isActive])
+  @@index([clientId, triggerType, isActive])
+}
+
+model TagDefinition {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  industryPackId      String?
+  scopeType           ConfigScopeType      @default(ORGANIZATION)
+  scopeRefId          String?
+  objectType          CoreObjectType?
+  key                 String
+  label               String
+  color               String?
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  industryPack        IndustryPack?        @relation(fields: [industryPackId], references: [id], onDelete: SetNull)
+  assignments         TagAssignment[]
+
+  @@index([organizationId, isActive])
+  @@index([clientId, isActive])
+  @@index([industryPackId, isActive])
+  @@unique([organizationId, scopeType, scopeRefId, objectType, key])
+}
+
+model TagAssignment {
+  id                  String               @id @default(cuid())
+  organizationId      String
+  tagDefinitionId     String
+  objectType          CoreObjectType
+  objectId            String
+  createdAt           DateTime             @default(now())
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tag                 TagDefinition        @relation(fields: [tagDefinitionId], references: [id], onDelete: Cascade)
+
+  @@unique([tagDefinitionId, objectType, objectId])
+  @@index([organizationId, objectType, objectId])
+}

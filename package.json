@@ -1,0 +1,14 @@
+{
+  "name": "orchestrate_backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orchestrate backend",
+  "scripts": {
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.6.0",
+    "dotenv": "^17.4.0",
+    "prisma": "^7.6.0"
+  }
+}
