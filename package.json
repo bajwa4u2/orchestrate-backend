@@ -5,7 +5,7 @@
   "description": "Orchestrate backend operator, revenue, email, and notification foundation",
   "license": "UNLICENSED",
   "scripts": {
-    "build": "nest build",
+    "build": "npm run prisma:generate && nest build",
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
