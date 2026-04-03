@@ -14,6 +14,9 @@ export class HealthService {
       phase: 'execution-core',
       timestamp: now,
       database: db?.[0]?.ok === 1 ? 'connected' : 'unknown',
+      domain: process.env.APP_BASE_URL ?? 'https://orchestrateops.com',
+      emailDeliveryMode: process.env.EMAIL_DELIVERY_MODE ?? 'log',
+      mailFromAddress: process.env.MAIL_FROM_ADDRESS ?? 'hello@orchestrateops.com',
     };
   }
 }

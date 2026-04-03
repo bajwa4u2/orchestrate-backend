@@ -1,8 +1,8 @@
 {
   "name": "orchestrate-backend",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Orchestrate backend execution and deliverability foundation",
+  "description": "Orchestrate backend operator, revenue, email, and notification foundation",
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
