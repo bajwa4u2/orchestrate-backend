@@ -18,6 +18,7 @@ import { MeetingsModule } from './meetings/meetings.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { OperatorModule } from './operator/operator.module';
 import { OrganizationsModule } from './organizations/organizations.module';
+import { PublicModule } from './public/public.module';
 import { RemindersModule } from './reminders/reminders.module';
 import { RepliesModule } from './replies/replies.module';
 import { StatementsModule } from './statements/statements.module';
@@ -31,6 +32,7 @@ import { UsersModule } from './users/users.module';
     DatabaseModule,
     AccessContextModule,
     HealthModule,
+    PublicModule,
     AuthModule,
     OrganizationsModule,
     UsersModule,
