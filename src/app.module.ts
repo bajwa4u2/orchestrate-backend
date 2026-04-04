@@ -25,6 +25,7 @@ import { StatementsModule } from './statements/statements.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { TemplatesModule } from './templates/templates.module';
 import { UsersModule } from './users/users.module';
+import { InvoicesModule } from './invoices/invoices.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { UsersModule } from './users/users.module';
     TemplatesModule,
     OperatorModule,
     ClientPortalModule,
+    InvoicesModule,
   ],
 })
 export class AppModule {}

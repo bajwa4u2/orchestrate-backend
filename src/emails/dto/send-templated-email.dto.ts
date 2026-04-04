@@ -1,4 +1,4 @@
-import { IsBoolean, IsEmail, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class SendTemplatedEmailDto {
   @IsString()
@@ -24,4 +24,17 @@ export class SendTemplatedEmailDto {
   @IsOptional()
   @IsBoolean()
   createNotification?: boolean;
+
+  @IsOptional()
+  @IsIn(['support', 'billing', 'legal', 'hello', 'no-reply'])
+  emailCategory?: 'support' | 'billing' | 'legal' | 'hello' | 'no-reply';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  emailEvent?: string;
+
+  @IsOptional()
+  @IsEmail()
+  replyToEmail?: string;
 }

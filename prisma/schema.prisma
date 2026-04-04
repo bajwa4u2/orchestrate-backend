@@ -48,11 +48,39 @@ enum SubscriptionStatus {
 enum InvoiceStatus {
   DRAFT
   ISSUED
+  SENT
+  VIEWED
   PAID
   PARTIALLY_PAID
   VOID
   OVERDUE
   WRITTEN_OFF
+}
+
+enum InvoiceLineType {
+  SERVICE
+  SUBSCRIPTION
+  USAGE
+  ADJUSTMENT
+  DISCOUNT
+  TAX
+  OTHER
+}
+
+enum InvoiceAccessEventType {
+  EMAIL_SENT
+  EMAIL_DELIVERED
+  EMAIL_OPENED
+  LINK_OPENED
+  PDF_VIEWED
+  PDF_DOWNLOADED
+  PORTAL_VIEWED
+}
+
+enum InvoiceActorType {
+  CLIENT
+  OPERATOR
+  SYSTEM
 }
 
 enum PaymentStatus {
@@ -366,6 +394,86 @@ enum DocumentDispatchStatus {
   FAILED
 }
 
+enum EmailCategory {
+  SUPPORT
+  BILLING
+  LEGAL
+  HELLO
+  NO_REPLY
+}
+
+enum EmailEventType {
+  ACCOUNT_WELCOME
+  ACCOUNT_EMAIL_VERIFICATION
+  ACCOUNT_PASSWORD_RESET
+  ACCOUNT_SECURITY_ALERT
+  ACCOUNT_APPROVED
+  ACCOUNT_REJECTED
+  CONTACT_ACKNOWLEDGEMENT
+  DEMO_ACKNOWLEDGEMENT
+  EARLY_ACCESS_CONFIRMATION
+  OUTREACH_REPLY_ACKNOWLEDGEMENT
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_RENEWED
+  SUBSCRIPTION_CANCELED
+  INVOICE_ISSUED
+  INVOICE_PAYMENT_DUE_REMINDER
+  INVOICE_PAYMENT_OVERDUE_REMINDER
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  REFUND_ISSUED
+  STATEMENT_ISSUED
+  STATEMENT_READY_REMINDER
+  AGREEMENT_SENT
+  AGREEMENT_SIGNATURE_REQUEST
+  AGREEMENT_SIGNED
+  AGREEMENT_REVISION_SENT
+  TERMS_UPDATED
+  COMPLIANCE_REQUEST
+  CLIENT_ONBOARDING_STARTED
+  CLIENT_ONBOARDING_COMPLETED
+  CAMPAIGN_LAUNCHED
+  LEAD_DELIVERY_NOTICE
+  MEETING_BOOKED_NOTICE
+  SERVICE_ISSUE_ALERT
+  SERVICE_SETUP_REMINDER
+  SYSTEM_STATUS_NOTICE
+  SECURE_LINK_DELIVERY
+  SECURE_LINK_EXPIRING
+}
+
+enum DeliveryChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+  INTERNAL
+  WEBHOOK
+}
+
+enum EmailDeliveryProvider {
+  RESEND
+  SMTP
+  MANUAL
+  INTERNAL
+}
+
+enum EmailDeliveryMode {
+  RESEND
+  LOG
+  DISABLED
+  MANUAL
+}
+
+enum MailboxRole {
+  PRIMARY_OUTREACH
+  SUPPORT
+  BILLING
+  LEGAL
+  HELLO
+  NO_REPLY
+  GENERAL
+}
+
 enum PolicyScope {
   GLOBAL
   ORGANIZATION
@@ -435,6 +543,7 @@ model Organization {
   automationRules        AutomationRule[]
   tagDefinitions         TagDefinition[]
   tagAssignments         TagAssignment[]
+  invoiceAccessEvents    InvoiceAccessEvent[]
 }
 
 model User {
@@ -478,25 +587,33 @@ model WorkspaceMember {
 }
 
 model Client {
-  id              String       @id @default(cuid())
-  organizationId  String
-  createdById     String?
-  code            String?
-  legalName       String
-  displayName     String
-  status          ClientStatus @default(LEAD)
-  industry        String?
-  websiteUrl      String?
-  bookingUrl      String?
-  primaryTimezone String?
-  currencyCode    String       @default("USD")
-  outboundOffer   String?
-  notesText       String?
-  metadataJson    Json?
-  isInternal      Boolean      @default(false)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  archivedAt      DateTime?
+  id                 String       @id @default(cuid())
+  organizationId     String
+  createdById        String?
+  code               String?
+  legalName          String
+  displayName        String
+  status             ClientStatus @default(LEAD)
+  industry           String?
+  websiteUrl         String?
+  bookingUrl         String?
+  primaryTimezone    String?
+  currencyCode       String       @default("USD")
+  primaryEmail       String?
+  billingEmail       String?
+  legalEmail         String?
+  opsEmail           String?
+  primaryContactName String?
+  billingContactName String?
+  legalContactName   String?
+  opsContactName     String?
+  outboundOffer      String?
+  notesText          String?
+  metadataJson       Json?
+  isInternal         Boolean      @default(false)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  archivedAt         DateTime?
 
   organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdBy              User?                   @relation("ClientCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
@@ -539,9 +656,13 @@ model Client {
   workflowPolicies       WorkflowPolicy[]
   automationRules        AutomationRule[]
   tagDefinitions         TagDefinition[]
+  invoiceAccessEvents    InvoiceAccessEvent[]
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
+  @@index([organizationId, primaryEmail])
+  @@index([organizationId, billingEmail])
+  @@index([organizationId, legalEmail])
 }
 
 model Plan {
@@ -592,26 +713,36 @@ model Subscription {
 }
 
 model Invoice {
-  id               String        @id @default(cuid())
-  organizationId   String
-  clientId         String
-  subscriptionId   String?
-  billingProfileId String?
-  createdById      String?
-  invoiceNumber    String
-  status           InvoiceStatus @default(DRAFT)
-  currencyCode     String        @default("USD")
-  subtotalCents    Int           @default(0)
-  taxCents         Int           @default(0)
-  totalCents       Int           @default(0)
-  amountPaidCents  Int           @default(0)
-  issuedAt         DateTime?
-  dueAt            DateTime?
-  paidAt           DateTime?
-  notesText        String?
-  metadataJson     Json?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  id                 String        @id @default(cuid())
+  organizationId     String
+  clientId           String
+  subscriptionId     String?
+  billingProfileId   String?
+  createdById        String?
+  invoiceNumber      String
+  status             InvoiceStatus @default(DRAFT)
+  currencyCode       String        @default("USD")
+  billingPeriodStart DateTime?
+  billingPeriodEnd   DateTime?
+  subtotalCents      Int           @default(0)
+  discountCents      Int           @default(0)
+  taxCents           Int           @default(0)
+  totalCents         Int           @default(0)
+  amountPaidCents    Int           @default(0)
+  balanceDueCents    Int           @default(0)
+  issuedAt           DateTime?
+  dueAt              DateTime?
+  lastSentAt         DateTime?
+  viewedAt           DateTime?
+  paidAt             DateTime?
+  pdfFileKey         String?
+  pdfFileUrl         String?
+  pdfGeneratedAt     DateTime?
+  termsText          String?
+  notesText          String?
+  metadataJson       Json?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
   organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client                 @relation(fields: [clientId], references: [id], onDelete: Cascade)
@@ -626,8 +757,10 @@ model Invoice {
   statementLinks     StatementInvoiceLink[]
   documentDispatches DocumentDispatch[]
   reminderArtifacts  ReminderArtifact[]
+  accessEvents       InvoiceAccessEvent[]
 
   @@unique([organizationId, invoiceNumber])
+  @@index([organizationId, status, createdAt])
   @@index([clientId, status, dueAt])
 }
 
@@ -641,6 +774,7 @@ model Payment {
   status         PaymentStatus     @default(PENDING)
   currencyCode   String            @default("USD")
   amountCents    Int
+  noteText       String?
   receivedAt     DateTime?
   metadataJson   Json?
   createdAt      DateTime          @default(now())
@@ -1064,7 +1198,10 @@ model Mailbox {
   clientId        String?
   domainId        String?
   label           String
+  role            MailboxRole         @default(GENERAL)
   emailAddress    String              @unique
+  fromName        String?
+  replyToAddress  String?
   provider        MailboxProvider
   status          MailboxStatus       @default(CONNECTING)
   dailySendCap    Int                 @default(30)
@@ -1078,19 +1215,22 @@ model Mailbox {
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
 
-  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  client         Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  domain         SendingDomain?       @relation(fields: [domainId], references: [id], onDelete: SetNull)
-  sendPolicies   SendPolicy[]
-  healthEvents   MailboxHealthEvent[]
-  messages       OutreachMessage[]
-  replies        Reply[]
-  bounces        BounceEvent[]
-  complaints     ComplaintEvent[]
-  policySettings PolicySetting[]
+  organization       Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client             Client?              @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  domain             SendingDomain?       @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  sendPolicies       SendPolicy[]
+  healthEvents       MailboxHealthEvent[]
+  messages           OutreachMessage[]
+  replies            Reply[]
+  bounces            BounceEvent[]
+  complaints         ComplaintEvent[]
+  policySettings     PolicySetting[]
+  documentDispatches DocumentDispatch[]
 
   @@index([organizationId, status])
+  @@index([organizationId, role, status])
   @@index([clientId, status])
+  @@index([clientId, role, status])
 }
 
 model MailboxHealthEvent {
@@ -1324,18 +1464,27 @@ model Note {
 }
 
 model Template {
-  id              String       @id @default(cuid())
-  organizationId  String
-  clientId        String?
-  campaignId      String?
-  type            TemplateType
-  name            String
-  subjectTemplate String?
-  bodyTemplate    String?
-  variablesJson   Json?
-  isActive        Boolean      @default(true)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  id                   String          @id @default(cuid())
+  organizationId       String
+  clientId             String?
+  campaignId           String?
+  type                 TemplateType
+  name                 String
+  defaultEmailCategory EmailCategory?
+  defaultEmailEvent    EmailEventType?
+  deliveryChannel      DeliveryChannel @default(EMAIL)
+  subjectLinePrefix    String?
+  fromNameOverride     String?
+  fromEmailOverride    String?
+  replyToEmailOverride String?
+  legalFooterRequired  Boolean         @default(false)
+  transactionalOnly    Boolean         @default(false)
+  subjectTemplate      String?
+  bodyTemplate         String?
+  variablesJson        Json?
+  isActive             Boolean         @default(true)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
   organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client?            @relation(fields: [clientId], references: [id], onDelete: SetNull)
@@ -1343,6 +1492,8 @@ model Template {
   documentDispatches DocumentDispatch[]
 
   @@index([organizationId, type, isActive])
+  @@index([organizationId, defaultEmailCategory, isActive])
+  @@index([organizationId, defaultEmailEvent, isActive])
 }
 
 model PolicySetting {
@@ -1739,21 +1890,50 @@ model BillingProfile {
 }
 
 model InvoiceLine {
-  id               String   @id @default(cuid())
+  id               String          @id @default(cuid())
   invoiceId        String
+  type             InvoiceLineType @default(SERVICE)
+  title            String?
   description      String
   serviceCategory  String?
-  quantity         Int      @default(1)
+  quantity         Int             @default(1)
   unitAmountCents  Int
+  subtotalCents    Int?
+  taxCents         Int             @default(0)
   totalAmountCents Int
-  sortOrder        Int      @default(0)
+  sortOrder        Int             @default(0)
   metadataJson     Json?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
   @@index([invoiceId, sortOrder])
+}
+
+model InvoiceAccessEvent {
+  id                 String                 @id @default(cuid())
+  organizationId     String
+  clientId           String?
+  invoiceId          String
+  documentDispatchId String?
+  eventType          InvoiceAccessEventType
+  actorType          InvoiceActorType       @default(SYSTEM)
+  actorId            String?
+  occurredAt         DateTime               @default(now())
+  ipAddress          String?
+  userAgent          String?
+  metadataJson       Json?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client       Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  invoice      Invoice      @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, eventType, occurredAt])
+  @@index([invoiceId, eventType, occurredAt])
+  @@index([documentDispatchId])
 }
 
 model Receipt {
@@ -1939,29 +2119,40 @@ model ReminderArtifact {
 }
 
 model DocumentDispatch {
-  id                String                 @id @default(cuid())
-  organizationId    String
-  clientId          String?
-  templateId        String?
-  invoiceId         String?
-  statementId       String?
-  agreementId       String?
-  receiptId         String?
-  reminderId        String?
-  kind              TemplateType
-  status            DocumentDispatchStatus @default(RENDERED)
-  deliveryChannel   String                 @default("EMAIL")
-  recipientEmail    String?
-  recipientName     String?
-  subjectLine       String?
-  bodyText          String?
-  payloadJson       Json?
-  externalMessageId String?
-  failureMessage    String?
-  renderedAt        DateTime               @default(now())
-  deliveredAt       DateTime?
-  createdAt         DateTime               @default(now())
-  updatedAt         DateTime               @updatedAt
+  id                    String                 @id @default(cuid())
+  organizationId        String
+  clientId              String?
+  templateId            String?
+  invoiceId             String?
+  statementId           String?
+  agreementId           String?
+  receiptId             String?
+  reminderId            String?
+  mailboxId             String?
+  kind                  TemplateType
+  emailCategory         EmailCategory?
+  emailEvent            EmailEventType?
+  status                DocumentDispatchStatus @default(RENDERED)
+  deliveryChannel       DeliveryChannel        @default(EMAIL)
+  deliveryProvider      EmailDeliveryProvider?
+  deliveryMode          EmailDeliveryMode?
+  recipientEmail        String?
+  recipientName         String?
+  fromEmail             String?
+  replyToEmail          String?
+  subjectLine           String?
+  bodyText              String?
+  payloadJson           Json?
+  transportMetadataJson Json?
+  externalMessageId     String?
+  failureMessage        String?
+  attemptCount          Int                    @default(0)
+  renderedAt            DateTime               @default(now())
+  lastAttemptAt         DateTime?
+  deliveredAt           DateTime?
+  failedAt              DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
   organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
@@ -1971,8 +2162,14 @@ model DocumentDispatch {
   agreement    ServiceAgreement? @relation(fields: [agreementId], references: [id], onDelete: SetNull)
   receipt      Receipt?          @relation(fields: [receiptId], references: [id], onDelete: SetNull)
   reminder     ReminderArtifact? @relation(fields: [reminderId], references: [id], onDelete: SetNull)
+  mailbox      Mailbox?          @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, kind, status])
+  @@index([organizationId, deliveryChannel, status])
+  @@index([organizationId, emailCategory, createdAt])
+  @@index([organizationId, emailEvent, createdAt])
   @@index([clientId, kind, createdAt])
   @@index([recipientEmail, createdAt])
+  @@index([mailboxId, createdAt])
+  @@index([status, lastAttemptAt])
 }

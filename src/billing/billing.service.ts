@@ -2,12 +2,16 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InvoiceStatus, PaymentStatus, Prisma } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
+import { EmailsService } from '../emails/emails.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 
 @Injectable()
 export class BillingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly emailsService: EmailsService,
+  ) {}
 
   async overview(organizationId: string, clientId?: string) {
     const where = { organizationId, ...(clientId ? { clientId } : {}) };
@@ -78,7 +82,7 @@ export class BillingService {
     const taxCents = dto.taxCents ?? 0;
     const totalCents = subtotalCents + taxCents;
 
-    return this.prisma.invoice.create({
+    const invoice = await this.prisma.invoice.create({
       data: {
         organizationId,
         clientId: dto.clientId,
@@ -109,6 +113,12 @@ export class BillingService {
       },
       include: { lines: true, client: true },
     });
+
+    if (invoice.status === InvoiceStatus.ISSUED) {
+      await this.sendInvoiceIssuedEmail(organizationId, invoice);
+    }
+
+    return invoice;
   }
 
   async recordPayment(organizationId: string, actorUserId: string | undefined, dto: RecordPaymentDto) {
@@ -131,7 +141,7 @@ export class BillingService {
     if (dto.invoiceId && (dto.status ?? PaymentStatus.SUCCEEDED) === PaymentStatus.SUCCEEDED) {
       const invoice = await this.prisma.invoice.findFirst({
         where: { id: dto.invoiceId, organizationId },
-        select: { id: true, totalCents: true, amountPaidCents: true },
+        select: { id: true, totalCents: true, amountPaidCents: true, invoiceNumber: true },
       });
 
       if (invoice) {
@@ -145,7 +155,7 @@ export class BillingService {
           },
         });
 
-        await this.prisma.receipt.create({
+        const receipt = await this.prisma.receipt.create({
           data: {
             organizationId,
             clientId: dto.clientId,
@@ -158,10 +168,88 @@ export class BillingService {
             metadataJson: { source: 'payment-recorded' } as Prisma.InputJsonValue,
           },
         });
+
+        await this.sendPaymentReceivedEmail(organizationId, {
+          clientId: payment.clientId,
+          invoiceNumber: invoice.invoiceNumber,
+          receiptNumber: receipt.receiptNumber,
+          amountCents: payment.amountCents,
+          currencyCode: payment.currencyCode,
+          receivedAt: payment.receivedAt ?? new Date(),
+        });
       }
     }
 
     return payment;
+  }
+
+  private async sendInvoiceIssuedEmail(
+    organizationId: string,
+    invoice: { clientId: string; client?: { displayName?: string | null } | null; invoiceNumber: string; totalCents: number; currencyCode: string; dueAt?: Date | null },
+  ) {
+    const recipient = await this.emailsService.resolveClientRecipient(organizationId, invoice.clientId);
+    if (!recipient?.email) return;
+
+    try {
+      await this.emailsService.sendDirectEmail({
+        emailEvent: 'invoice_issued',
+        toEmail: recipient.email,
+        toName: recipient.name,
+        subject: `Invoice ${invoice.invoiceNumber} from Orchestrate`,
+        bodyText: [
+          `Your invoice ${invoice.invoiceNumber} is ready.`,
+          `Amount: ${this.formatMoney(invoice.totalCents, invoice.currencyCode)}.`,
+          invoice.dueAt ? `Due date: ${invoice.dueAt.toISOString()}.` : null,
+          `Reply to this email if you need billing support.`,
+          `Orchestrate is a product of Aura Platform LLC.`,
+        ].filter(Boolean).join('\n\n'),
+      });
+    } catch (error) {
+      console.warn('[billing] Failed to send invoice email', {
+        organizationId,
+        clientId: invoice.clientId,
+        invoiceNumber: invoice.invoiceNumber,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+
+  private async sendPaymentReceivedEmail(
+    organizationId: string,
+    input: { clientId: string; invoiceNumber?: string | null; receiptNumber: string; amountCents: number; currencyCode: string; receivedAt: Date },
+  ) {
+    const recipient = await this.emailsService.resolveClientRecipient(organizationId, input.clientId);
+    if (!recipient?.email) return;
+
+    try {
+      await this.emailsService.sendDirectEmail({
+        emailEvent: 'payment_received',
+        toEmail: recipient.email,
+        toName: recipient.name,
+        subject: `Payment received${input.invoiceNumber ? ` for ${input.invoiceNumber}` : ''}`,
+        bodyText: [
+          `Payment received. Thank you.`,
+          `Receipt number: ${input.receiptNumber}.`,
+          `Amount: ${this.formatMoney(input.amountCents, input.currencyCode)}.`,
+          `Received: ${input.receivedAt.toISOString()}.`,
+          `Orchestrate is a product of Aura Platform LLC.`,
+        ].join('\n\n'),
+      });
+    } catch (error) {
+      console.warn('[billing] Failed to send payment receipt email', {
+        organizationId,
+        clientId: input.clientId,
+        receiptNumber: input.receiptNumber,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+
+  private formatMoney(amountCents: number, currencyCode: string) {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currencyCode || 'USD',
+    }).format((amountCents || 0) / 100);
   }
 
   private async generateInvoiceNumber(organizationId: string) {
