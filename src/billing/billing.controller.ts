@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Headers, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
+import { ReceiptDeliveryService } from './receipt-delivery.service';
 import { BillingService } from './billing.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
@@ -8,6 +9,7 @@ import { RecordPaymentDto } from './dto/record-payment.dto';
 export class BillingController {
   constructor(
     private readonly billingService: BillingService,
+    private readonly receiptDeliveryService: ReceiptDeliveryService,
     private readonly accessContextService: AccessContextService,
   ) {}
 
@@ -21,6 +23,24 @@ export class BillingController {
   async listInvoices(@Headers() headers: Record<string, unknown>, @Query('clientId') clientId?: string) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.billingService.listInvoices(context.organizationId!, clientId);
+  }
+
+  @Get('receipts')
+  async listReceipts(@Headers() headers: Record<string, unknown>, @Query('clientId') clientId?: string) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.billingService.listReceipts(context.organizationId!, clientId);
+  }
+
+  @Get('receipts/:receiptId/render')
+  async renderReceipt(@Headers() headers: Record<string, unknown>, @Param('receiptId') receiptId: string) {
+    await this.accessContextService.requireOperator(headers);
+    return this.receiptDeliveryService.renderReceipt(receiptId);
+  }
+
+  @Post('receipts/:receiptId/send')
+  async sendReceipt(@Headers() headers: Record<string, unknown>, @Param('receiptId') receiptId: string) {
+    await this.accessContextService.requireOperator(headers);
+    return this.receiptDeliveryService.sendReceiptEmail(receiptId);
   }
 
   @Post('invoices')

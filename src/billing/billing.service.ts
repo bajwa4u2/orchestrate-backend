@@ -3,6 +3,8 @@ import { InvoiceStatus, PaymentStatus, Prisma } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
+import { formatMoney } from '../financial-documents/document-formatting';
+import { ORCHESTRATE_LEGAL_IDENTITY } from '../financial-documents/legal-identity';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 
@@ -25,14 +27,18 @@ export class BillingService {
       paymentsSucceeded,
       totalInvoiced,
       totalCollected,
+      receiptCount,
+      creditTotal,
     ] = await Promise.all([
       this.prisma.invoice.count({ where: { ...where, status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] } } }),
       this.prisma.invoice.count({ where: { ...where, dueAt: { lt: now }, status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.PARTIALLY_PAID, InvoiceStatus.OVERDUE] } } }),
       this.prisma.statement.count({ where: { ...where, status: { in: ['DRAFT', 'ISSUED'] } } }),
       this.prisma.subscription.count({ where: { ...where, status: { in: ['TRIALING', 'ACTIVE', 'PAST_DUE'] } } }),
       this.prisma.payment.count({ where: { ...where, status: PaymentStatus.SUCCEEDED } }),
-      this.prisma.invoice.aggregate({ where, _sum: { totalCents: true, amountPaidCents: true } }),
+      this.prisma.invoice.aggregate({ where, _sum: { totalCents: true, amountPaidCents: true, balanceDueCents: true } }),
       this.prisma.payment.aggregate({ where: { ...where, status: PaymentStatus.SUCCEEDED }, _sum: { amountCents: true } }),
+      this.prisma.receipt.count({ where }),
+      this.prisma.creditNote.aggregate({ where, _sum: { amountCents: true } }),
     ]);
 
     return {
@@ -42,10 +48,15 @@ export class BillingService {
         overdue: overdueInvoices,
         totalInvoicedCents: totalInvoiced._sum.totalCents ?? 0,
         totalPaidAgainstInvoicesCents: totalInvoiced._sum.amountPaidCents ?? 0,
+        totalBalanceDueCents: totalInvoiced._sum.balanceDueCents ?? 0,
       },
       collections: {
         succeededPayments: paymentsSucceeded,
         collectedCents: totalCollected._sum.amountCents ?? 0,
+        receiptCount,
+      },
+      adjustments: {
+        creditedCents: creditTotal._sum.amountCents ?? 0,
       },
       subscriptions: {
         active: activeSubscriptions,
@@ -67,6 +78,19 @@ export class BillingService {
         creditNotes: { orderBy: { issuedAt: 'desc' } },
       },
       orderBy: [{ createdAt: 'desc' }],
+    });
+  }
+
+  async listReceipts(organizationId: string, clientId?: string) {
+    return this.prisma.receipt.findMany({
+      where: { organizationId, ...(clientId ? { clientId } : {}) },
+      include: {
+        client: true,
+        invoice: { select: { invoiceNumber: true, totalCents: true, amountPaidCents: true, balanceDueCents: true } },
+        payment: { select: { method: true, externalRef: true, receivedAt: true, status: true } },
+        documentDispatches: { orderBy: { createdAt: 'desc' }, take: 5 },
+      },
+      orderBy: [{ issuedAt: 'desc' }, { createdAt: 'desc' }],
     });
   }
 
@@ -95,6 +119,7 @@ export class BillingService {
         subtotalCents,
         taxCents,
         totalCents,
+        balanceDueCents: totalCents,
         issuedAt: dto.issuedAt,
         dueAt: dto.dueAt,
         notesText: dto.notesText,
@@ -105,6 +130,7 @@ export class BillingService {
             serviceCategory: line.serviceCategory,
             quantity: line.quantity ?? 1,
             unitAmountCents: line.unitAmountCents,
+            subtotalCents: (line.quantity ?? 1) * line.unitAmountCents,
             totalAmountCents: (line.quantity ?? 1) * line.unitAmountCents,
             sortOrder: line.sortOrder ?? index,
             metadataJson: toPrismaJson(line.metadataJson),
@@ -146,10 +172,12 @@ export class BillingService {
 
       if (invoice) {
         const amountPaidCents = invoice.amountPaidCents + dto.amountCents;
+        const balanceDueCents = Math.max(invoice.totalCents - amountPaidCents, 0);
         await this.prisma.invoice.update({
           where: { id: invoice.id },
           data: {
             amountPaidCents,
+            balanceDueCents,
             paidAt: amountPaidCents >= invoice.totalCents ? new Date() : undefined,
             status: amountPaidCents >= invoice.totalCents ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID,
           },
@@ -165,7 +193,7 @@ export class BillingService {
             currencyCode: payment.currencyCode,
             amountCents: payment.amountCents,
             issuedAt: payment.receivedAt ?? new Date(),
-            metadataJson: { source: 'payment-recorded' } as Prisma.InputJsonValue,
+            metadataJson: { source: 'payment-recorded', actorUserId } as Prisma.InputJsonValue,
           },
         });
 
@@ -195,13 +223,13 @@ export class BillingService {
         emailEvent: 'invoice_issued',
         toEmail: recipient.email,
         toName: recipient.name,
-        subject: `Invoice ${invoice.invoiceNumber} from Orchestrate`,
+        subject: `Invoice ${invoice.invoiceNumber} from ${ORCHESTRATE_LEGAL_IDENTITY.brandName}`,
         bodyText: [
           `Your invoice ${invoice.invoiceNumber} is ready.`,
-          `Amount: ${this.formatMoney(invoice.totalCents, invoice.currencyCode)}.`,
+          `Amount: ${formatMoney(invoice.totalCents, invoice.currencyCode)}.`,
           invoice.dueAt ? `Due date: ${invoice.dueAt.toISOString()}.` : null,
           `Reply to this email if you need billing support.`,
-          `Orchestrate is a product of Aura Platform LLC.`,
+          ORCHESTRATE_LEGAL_IDENTITY.relationshipStatement,
         ].filter(Boolean).join('\n\n'),
       });
     } catch (error) {
@@ -230,9 +258,9 @@ export class BillingService {
         bodyText: [
           `Payment received. Thank you.`,
           `Receipt number: ${input.receiptNumber}.`,
-          `Amount: ${this.formatMoney(input.amountCents, input.currencyCode)}.`,
+          `Amount: ${formatMoney(input.amountCents, input.currencyCode)}.`,
           `Received: ${input.receivedAt.toISOString()}.`,
-          `Orchestrate is a product of Aura Platform LLC.`,
+          ORCHESTRATE_LEGAL_IDENTITY.relationshipStatement,
         ].join('\n\n'),
       });
     } catch (error) {
@@ -245,20 +273,15 @@ export class BillingService {
     }
   }
 
-  private formatMoney(amountCents: number, currencyCode: string) {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: currencyCode || 'USD',
-    }).format((amountCents || 0) / 100);
-  }
-
-  private async generateInvoiceNumber(organizationId: string) {
+  private async generateInvoiceNumber(organizationId: string): Promise<string> {
+    const year = new Date().getFullYear();
     const count = await this.prisma.invoice.count({ where: { organizationId } });
-    return `INV-${String(count + 1).padStart(5, '0')}`;
+    return `INV-${year}-${String(count + 1).padStart(4, '0')}`;
   }
 
-  private async generateReceiptNumber(organizationId: string) {
+  private async generateReceiptNumber(organizationId: string): Promise<string> {
+    const year = new Date().getFullYear();
     const count = await this.prisma.receipt.count({ where: { organizationId } });
-    return `RCT-${String(count + 1).padStart(5, '0')}`;
+    return `RCT-${year}-${String(count + 1).padStart(4, '0')}`;
   }
 }
