@@ -51,7 +51,9 @@ export class AuthService {
       where: { id: context.userId },
       include: {
         memberships: {
-          where: context.organizationId ? { organizationId: context.organizationId, isActive: true } : { isActive: true },
+          where: context.organizationId
+            ? { organizationId: context.organizationId, isActive: true }
+            : { isActive: true },
           include: { organization: true },
           orderBy: { createdAt: 'asc' },
         },
@@ -79,14 +81,14 @@ export class AuthService {
         surface: context.surface,
       },
       workspace: membership
-          ? {
-              organizationId: membership.organizationId,
-              displayName: membership.organization.displayName,
-              legalName: membership.organization.legalName,
-              role: membership.role,
-              type: membership.organization.type,
-            }
-          : null,
+        ? {
+            organizationId: membership.organizationId,
+            displayName: membership.organization.displayName,
+            legalName: membership.organization.legalName,
+            role: membership.role,
+            type: membership.organization.type,
+          }
+        : null,
     };
   }
 
@@ -218,7 +220,9 @@ export class AuthService {
       throw new UnauthorizedException('Email or password is incorrect');
     }
 
-    const membership = user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ?? user.memberships[0];
+    const membership =
+      user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
+      user.memberships[0];
     if (!membership) throw new UnauthorizedException('No client workspace is available for this account');
 
     const clientId = await this.resolveClientId(user.id, membership.organizationId);
@@ -257,7 +261,11 @@ export class AuthService {
       include: { memberships: { include: { organization: true }, where: { isActive: true } } },
     });
 
-    if (existing?.memberships.some((item) => this.isOperatorOrganization(item.organization.type, item.organization.isInternal))) {
+    if (
+      existing?.memberships.some((item) =>
+        this.isOperatorOrganization(item.organization.type, item.organization.isInternal),
+      )
+    ) {
       throw new BadRequestException('Operator access already exists for this account');
     }
 
@@ -327,7 +335,9 @@ export class AuthService {
       throw new UnauthorizedException('Email or password is incorrect');
     }
 
-    const membership = user.memberships.find((item) => this.isOperatorOrganization(item.organization.type, item.organization.isInternal));
+    const membership = user.memberships.find((item) =>
+      this.isOperatorOrganization(item.organization.type, item.organization.isInternal),
+    );
     if (!membership) throw new UnauthorizedException('Operator access is not available for this account');
 
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
@@ -403,7 +413,11 @@ export class AuthService {
       organizationId: membership?.organizationId,
       clientId,
       memberRole: membership?.role,
-      surface: membership && this.isOperatorOrganization(membership.organization.type, membership.organization.isInternal) ? 'operator' : 'client',
+      surface:
+        membership &&
+        this.isOperatorOrganization(membership.organization.type, membership.organization.isInternal)
+          ? 'operator'
+          : 'client',
       fullName: user.fullName,
       exp: this.expiresInSeconds(48 * 3600),
     });
@@ -454,6 +468,9 @@ export class AuthService {
       templateVariables: {
         verifyUrl: input.verificationUrl,
         verify_url: input.verificationUrl,
+        actionUrl: input.verificationUrl,
+        action_url: input.verificationUrl,
+      },
     });
   }
 
@@ -469,6 +486,12 @@ export class AuthService {
         `Open this link to choose a new password: ${input.resetUrl}`,
         `If you did not request this, you can ignore this email.`,
       ].join('\n\n'),
+      templateVariables: {
+        resetUrl: input.resetUrl,
+        reset_url: input.resetUrl,
+        actionUrl: input.resetUrl,
+        action_url: input.resetUrl,
+      },
     });
   }
 
@@ -481,6 +504,14 @@ export class AuthService {
       toName: input.name,
       subject: `Welcome to ${brandName}`,
       bodyText: [`Your ${brandName} account is active.`, `Open ${appUrl} to continue.`].join('\n\n'),
+      templateVariables: {
+        dashboardUrl: appUrl,
+        dashboard_url: appUrl,
+        portal_url: appUrl,
+        app_url: appUrl,
+        name: input.name,
+        client_name: input.name,
+      },
     });
   }
 
@@ -541,7 +572,15 @@ export class AuthService {
       return clientAccess.defaultClientId.trim();
     }
     const client = await this.prisma.client.findFirst({
-      where: { organizationId, OR: [{ primaryEmail: user?.email }, { billingEmail: user?.email }, { legalEmail: user?.email }, { opsEmail: user?.email }] },
+      where: {
+        organizationId,
+        OR: [
+          { primaryEmail: user?.email },
+          { billingEmail: user?.email },
+          { legalEmail: user?.email },
+          { opsEmail: user?.email },
+        ],
+      },
       select: { id: true },
       orderBy: { createdAt: 'asc' },
     });
@@ -614,7 +653,9 @@ export class AuthService {
   }
 
   private asObject(value: unknown): Record<string, any> {
-    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, any>) } : {};
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(value as Record<string, any>) }
+      : {};
   }
 
   private isOperatorOrganization(type: OrganizationType, isInternal?: boolean) {
