@@ -451,6 +451,9 @@ export class AuthService {
         `Open this link to verify your account: ${input.verificationUrl}`,
         `If you did not request this, you can ignore this email.`,
       ].join('\n\n'),
+      templateVariables: {
+        verifyUrl: input.verificationUrl,
+        verify_url: input.verificationUrl,
     });
   }
 
