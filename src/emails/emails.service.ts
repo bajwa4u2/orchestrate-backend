@@ -770,6 +770,7 @@ export class EmailsService {
           contactAcknowledgementTemplate({
             name: v.name ?? v.client_name ?? v.toName,
             inquiryTypeLabel: v.inquiryTypeLabel ?? v.inquiry_type_label,
+            responseEmail: v.responseEmail ?? v.response_email,
           }),
         );
 

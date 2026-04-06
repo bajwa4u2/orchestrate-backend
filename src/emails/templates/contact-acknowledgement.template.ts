@@ -3,6 +3,7 @@ import { renderBaseEmail } from './base.template';
 type ContactAcknowledgementParams = {
   name: string;
   inquiryTypeLabel: string;
+  responseEmail?: string | null;
 };
 
 function escapeHtml(value: unknown) {
@@ -17,6 +18,7 @@ function escapeHtml(value: unknown) {
 export function contactAcknowledgementTemplate(params: ContactAcknowledgementParams) {
   const name = params.name?.trim() ? params.name.trim() : 'there';
   const inquiry = params.inquiryTypeLabel?.trim() ? params.inquiryTypeLabel.trim() : 'inquiry';
+  const responseEmail = params.responseEmail?.trim() ? params.responseEmail.trim() : 'hello@orchestrateops.com';
 
   return renderBaseEmail({
     title: 'We received your inquiry',
@@ -25,7 +27,7 @@ export function contactAcknowledgementTemplate(params: ContactAcknowledgementPar
       <h1>We received your inquiry</h1>
       <p>Hi ${escapeHtml(name)},</p>
       <p>Thank you for reaching out. We received your ${escapeHtml(inquiry.toLowerCase())} inquiry and added it to our intake queue.</p>
-      <p>We will review it and continue the conversation from <a href="mailto:hello@orchestrateops.com" style="color:#111827; text-decoration:none;">hello@orchestrateops.com</a> or <a href="mailto:support@orchestrateops.com" style="color:#111827; text-decoration:none;">support@orchestrateops.com</a>.</p>
+      <p>We will review it and continue the conversation from <a href="mailto:${escapeHtml(responseEmail)}" style="color:#111827; text-decoration:none;">${escapeHtml(responseEmail)}</a>.</p>
       <p>You do not need to submit it again unless something important has changed.</p>
       <p style="margin-top:20px;">Thank you,<br/>Orchestrate</p>
     `,

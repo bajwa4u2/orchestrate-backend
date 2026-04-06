@@ -49,13 +49,13 @@ export class PublicService {
       },
     });
 
-    const notificationRecipients = this.getNotificationRecipients();
+    const contactRoute = this.resolveContactRoute(normalized.inquiryType);
     const notificationResults = await Promise.allSettled(
-      notificationRecipients.map((toEmail) =>
+      contactRoute.to.map((toEmail) =>
         this.emailsService.sendDirectEmail({
           toEmail,
           toName: 'Orchestrate',
-          category: 'support',
+          category: contactRoute.category,
           emailEvent: 'contact_inquiry_notification',
           replyToEmail: normalized.email,
           subject: `New inquiry — ${this.inquiryTypeLabel(normalized.inquiryType)} — ${normalized.name}`,
@@ -78,6 +78,7 @@ export class PublicService {
             company: normalized.company ?? '',
             message: normalized.message,
             submitted_at: new Date().toISOString(),
+            routed_to: contactRoute.to.join(', '),
           },
         }),
       ),
@@ -90,15 +91,16 @@ export class PublicService {
       await this.emailsService.sendDirectEmail({
         toEmail: normalized.email,
         toName: normalized.name,
-        category: 'hello',
+        category: contactRoute.category,
         emailEvent: 'contact_acknowledgement',
-        replyToEmail: process.env.EMAIL_REPLY_TO_HELLO?.trim() || 'hello@orchestrateops.com',
+        replyToEmail: contactRoute.replyTo,
         subject: 'We received your inquiry',
-        bodyText: this.buildAcknowledgementText(normalized.name, normalized.inquiryType),
-        bodyHtml: this.textToHtml(this.buildAcknowledgementText(normalized.name, normalized.inquiryType)),
+        bodyText: this.buildAcknowledgementText(normalized.name, normalized.inquiryType, contactRoute.replyTo),
+        bodyHtml: this.textToHtml(this.buildAcknowledgementText(normalized.name, normalized.inquiryType, contactRoute.replyTo)),
         templateVariables: {
           name: normalized.name,
           inquiry_type_label: this.inquiryTypeLabel(normalized.inquiryType),
+          response_email: contactRoute.replyTo,
         },
       });
       acknowledged = true;
@@ -126,9 +128,9 @@ export class PublicService {
       inquiryId: inquiry.id,
       status: nextStatus,
       notification: {
-        recipients: notificationRecipients,
+        recipients: contactRoute.to,
         deliveredCount: deliveredNotifications,
-        queuedCount: notificationRecipients.length - deliveredNotifications,
+        queuedCount: contactRoute.to.length - deliveredNotifications,
       },
       acknowledgement: {
         sent: acknowledged,
@@ -140,13 +142,29 @@ export class PublicService {
     };
   }
 
-  private getNotificationRecipients() {
-    const configured = (process.env.PUBLIC_CONTACT_NOTIFY_TO || '')
-      .split(',')
-      .map((value) => value.trim())
-      .filter(Boolean);
+  private resolveContactRoute(inquiryType: PublicInquiryTypeDto) {
+    const hello = process.env.CONTACT_EMAIL_HELLO?.trim() || process.env.EMAIL_REPLY_TO_HELLO?.trim() || 'hello@orchestrateops.com';
+    const support = process.env.CONTACT_EMAIL_SUPPORT?.trim() || process.env.EMAIL_REPLY_TO_SUPPORT?.trim() || 'support@orchestrateops.com';
 
-    return configured.length ? configured : ['support@orchestrateops.com', 'hello@orchestrateops.com'];
+    switch (inquiryType) {
+      case PublicInquiryTypeDto.BILLING_SUPPORT:
+      case PublicInquiryTypeDto.ONBOARDING:
+        return {
+          to: [support],
+          replyTo: support,
+          category: 'support' as const,
+        };
+      case PublicInquiryTypeDto.SERVICE_FIT:
+      case PublicInquiryTypeDto.PRICING:
+      case PublicInquiryTypeDto.PARTNERSHIP:
+      case PublicInquiryTypeDto.GENERAL_INQUIRY:
+      default:
+        return {
+          to: [hello],
+          replyTo: hello,
+          category: 'hello' as const,
+        };
+    }
   }
 
   private inquiryTypeLabel(type: PublicInquiryTypeDto) {
@@ -184,13 +202,13 @@ export class PublicService {
     ].join('\n');
   }
 
-  private buildAcknowledgementText(name: string, inquiryType: PublicInquiryTypeDto) {
+  private buildAcknowledgementText(name: string, inquiryType: PublicInquiryTypeDto, responseEmail: string) {
     return [
       `Hi ${name},`,
       '',
       `We received your ${this.inquiryTypeLabel(inquiryType).toLowerCase()} inquiry and added it to our intake queue.`,
       '',
-      'Someone from Orchestrate will review it and continue the conversation from hello@orchestrateops.com or support@orchestrateops.com.',
+      `Someone from Orchestrate will review it and continue the conversation from ${responseEmail}.`,
       '',
       'Thank you,',
       'Orchestrate',
