@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import Stripe = require('stripe');
+const Stripe = require('stripe');
 
 type CreateCustomerInput = {
   email?: string;
@@ -20,7 +20,7 @@ type CreatePortalSessionInput = {
 
 @Injectable()
 export class StripeService {
-  private readonly stripe: Stripe;
+  private readonly stripe: any;
 
   constructor() {
     const secretKey = process.env.STRIPE_SECRET_KEY?.trim();

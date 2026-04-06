@@ -1,6 +1,5 @@
 import { BadRequestException, Controller, Headers, Post, Req } from '@nestjs/common';
 import { Request } from 'express';
-import Stripe = require('stripe');
 import { BillingService } from '../billing.service';
 import { StripeService } from './stripe.service';
 
@@ -30,7 +29,7 @@ export class WebhookController {
       throw new BadRequestException('Missing raw request body for Stripe webhook verification');
     }
 
-    let event: Stripe.Event;
+    let event: any;
 
     try {
       event = this.stripeService
@@ -44,17 +43,17 @@ export class WebhookController {
 
     switch (event.type) {
       case 'invoice.paid':
-        await this.billingService.handleInvoicePaid(event.data.object as Stripe.Invoice);
+        await this.billingService.handleInvoicePaid(event.data.object);
         break;
 
       case 'invoice.payment_failed':
-        await this.billingService.handlePaymentFailed(event.data.object as Stripe.Invoice);
+        await this.billingService.handlePaymentFailed(event.data.object);
         break;
 
       case 'customer.subscription.updated':
       case 'customer.subscription.created':
       case 'customer.subscription.deleted':
-        await this.billingService.handleSubscriptionUpdated(event.data.object as Stripe.Subscription);
+        await this.billingService.handleSubscriptionUpdated(event.data.object);
         break;
 
       default:

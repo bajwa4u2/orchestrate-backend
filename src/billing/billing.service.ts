@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InvoiceStatus, PaymentMethodType, PaymentStatus, Prisma, SubscriptionStatus } from '@prisma/client';
-import Stripe = require('stripe');
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
@@ -414,7 +413,7 @@ export class BillingService {
     }
 
     const clientMetadata = this.asObject(client.metadataJson);
-    const billingMetadata = this.asObject((clientMetadata as any).billing);
+    const billingMetadata = this.asObject((clientMetadata as Record<string, unknown>).billing as Prisma.JsonValue);
     const stripeCustomerId = this.readString(billingMetadata.stripeCustomerId);
 
     if (!stripeCustomerId) {
@@ -429,7 +428,7 @@ export class BillingService {
     return { url: session.url };
   }
 
-  async handleInvoicePaid(invoice: Stripe.Invoice) {
+  async handleInvoicePaid(invoice: any) {
     const stripeSubscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
     if (!stripeSubscriptionId) return { ok: true };
 
@@ -444,8 +443,8 @@ export class BillingService {
       where: { id: subscription.id },
       data: {
         status: SubscriptionStatus.ACTIVE,
-        currentPeriodStart: this.readUnixTimestamp((invoice as any).period_start) ?? subscription.currentPeriodStart,
-        currentPeriodEnd: this.readUnixTimestamp((invoice as any).period_end) ?? subscription.currentPeriodEnd,
+        currentPeriodStart: this.readUnixTimestamp(invoice.period_start) ?? subscription.currentPeriodStart,
+        currentPeriodEnd: this.readUnixTimestamp(invoice.period_end) ?? subscription.currentPeriodEnd,
         metadataJson: toPrismaJson({
           ...this.asObject(subscription.metadataJson),
           latestStripeInvoiceId: invoice.id,
@@ -486,7 +485,7 @@ export class BillingService {
     return { ok: true };
   }
 
-  async handlePaymentFailed(invoice: Stripe.Invoice) {
+  async handlePaymentFailed(invoice: any) {
     const stripeSubscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
     if (!stripeSubscriptionId) return { ok: true };
 
@@ -519,7 +518,7 @@ export class BillingService {
     return { ok: true };
   }
 
-  async handleSubscriptionUpdated(stripeSubscription: Stripe.Subscription) {
+  async handleSubscriptionUpdated(stripeSubscription: any) {
     const subscription = await this.prisma.subscription.findFirst({
       where: { externalRef: stripeSubscription.id },
     });
@@ -530,8 +529,8 @@ export class BillingService {
       where: { id: subscription.id },
       data: {
         status: this.mapStripeSubscriptionStatus(stripeSubscription.status),
-        currentPeriodStart: this.readUnixTimestamp((stripeSubscription as any).current_period_start) ?? subscription.currentPeriodStart,
-        currentPeriodEnd: this.readUnixTimestamp((stripeSubscription as any).current_period_end) ?? subscription.currentPeriodEnd,
+        currentPeriodStart: this.readUnixTimestamp(stripeSubscription.current_period_start) ?? subscription.currentPeriodStart,
+        currentPeriodEnd: this.readUnixTimestamp(stripeSubscription.current_period_end) ?? subscription.currentPeriodEnd,
         canceledAt: stripeSubscription.canceled_at
           ? this.readUnixTimestamp(stripeSubscription.canceled_at) ?? new Date()
           : null,
@@ -606,17 +605,17 @@ export class BillingService {
     return priceId;
   }
 
-  private extractPaymentIntent(subscription: Stripe.Subscription): Stripe.PaymentIntent | null {
-    const latestInvoice = subscription.latest_invoice as Stripe.Invoice | null | undefined;
+  private extractPaymentIntent(subscription: any): any {
+    const latestInvoice = subscription.latest_invoice as any;
     if (!latestInvoice) return null;
 
-    const paymentIntent = latestInvoice.payment_intent as Stripe.PaymentIntent | string | null | undefined;
+    const paymentIntent = latestInvoice.payment_intent as any;
     if (!paymentIntent || typeof paymentIntent === 'string') return null;
 
     return paymentIntent;
   }
 
-  private mapStripeSubscriptionStatus(status: Stripe.Subscription.Status): SubscriptionStatus {
+  private mapStripeSubscriptionStatus(status: any): SubscriptionStatus {
     switch (status) {
       case 'trialing':
         return SubscriptionStatus.TRIALING;
