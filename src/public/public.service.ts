@@ -49,6 +49,24 @@ export class PublicService {
       },
     });
 
+    await this.prisma.inquiryThread.create({
+      data: {
+        inquiryId: inquiry.id,
+        messages: {
+          create: {
+            type: 'USER',
+            bodyText: normalized.message,
+            metadataJson: {
+              source: 'public_contact_form',
+              email: normalized.email,
+              name: normalized.name,
+              company: normalized.company,
+            },
+          },
+        },
+      },
+    });
+
     const contactRoute = this.resolveContactRoute(normalized.inquiryType);
     const notificationResults = await Promise.allSettled(
       contactRoute.to.map((toEmail) =>
@@ -108,18 +126,18 @@ export class PublicService {
       console.error('[public.contact] acknowledgement delivery failed', error);
     }
 
-    const nextStatus = acknowledged
-      ? 'ACKNOWLEDGED'
-      : deliveredNotifications > 0
-        ? 'NOTIFIED'
-        : 'RECEIVED';
+    const nextStatus = 'NEW';
 
     await this.prisma.publicInquiry.update({
       where: { id: inquiry.id },
       data: {
         status: nextStatus as any,
         notifiedAt: deliveredNotifications > 0 ? new Date() : undefined,
-        acknowledgedAt: acknowledged ? new Date() : undefined,
+        metadataJson: {
+          route: '/contact',
+          origin: 'public_web',
+          acknowledgementSent: acknowledged,
+        },
       },
     });
 
@@ -137,8 +155,8 @@ export class PublicService {
       },
       message:
         deliveredNotifications > 0
-          ? 'Your inquiry has been received and routed.'
-          : 'Your inquiry has been received and saved for follow-up.',
+          ? 'Your message is in and the right team has been notified.'
+          : 'Your message is in and ready for operator follow-up.',
     };
   }
 
