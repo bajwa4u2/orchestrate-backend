@@ -60,4 +60,45 @@ export class OperatorService {
       emailDispatches,
     };
   }
+
+  async listPublicInquiries(limitInput?: string) {
+    const parsedLimit = Number.parseInt(limitInput ?? '', 10);
+    const take = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 20) : 8;
+
+    const [items, receivedCount, notifiedCount, acknowledgedCount, closedCount, spamCount] = await Promise.all([
+      this.prisma.publicInquiry.findMany({
+        orderBy: { submittedAt: 'desc' },
+        take,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          company: true,
+          inquiryType: true,
+          status: true,
+          message: true,
+          submittedAt: true,
+          notifiedAt: true,
+          acknowledgedAt: true,
+        },
+      }),
+      this.prisma.publicInquiry.count({ where: { status: 'RECEIVED' } }),
+      this.prisma.publicInquiry.count({ where: { status: 'NOTIFIED' } }),
+      this.prisma.publicInquiry.count({ where: { status: 'ACKNOWLEDGED' } }),
+      this.prisma.publicInquiry.count({ where: { status: 'CLOSED' } }),
+      this.prisma.publicInquiry.count({ where: { status: 'SPAM' } }),
+    ]);
+
+    return {
+      items,
+      summary: {
+        totalOpen: receivedCount + notifiedCount + acknowledgedCount,
+        received: receivedCount,
+        notified: notifiedCount,
+        acknowledged: acknowledgedCount,
+        closed: closedCount,
+        spam: spamCount,
+      },
+    };
+  }
 }

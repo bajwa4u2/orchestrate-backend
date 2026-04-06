@@ -1,4 +1,4 @@
-import { Controller, Get, Headers } from '@nestjs/common';
+import { Controller, Get, Headers, Query } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { OperatorService } from './operator.service';
 
@@ -25,5 +25,14 @@ export class OperatorController {
   async recordsOverview(@Headers() headers: Record<string, unknown>) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.operatorService.recordsOverview(context.organizationId!);
+  }
+
+  @Get('inquiries')
+  async inquiries(
+    @Headers() headers: Record<string, unknown>,
+    @Query('limit') limit?: string,
+  ) {
+    await this.accessContextService.requireOperator(headers);
+    return this.operatorService.listPublicInquiries(limit);
   }
 }
