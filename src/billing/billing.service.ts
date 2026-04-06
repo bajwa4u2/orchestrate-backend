@@ -335,7 +335,7 @@ export class BillingService {
     }
 
     const stripeSubscription = await this.stripeService.createSubscription({
-      customerId: stripeCustomerId,
+      customerId: stripeCustomerId!,
       priceId: this.resolveStripePriceId(input.plan),
       metadata: {
         organizationId: input.organizationId,
@@ -414,7 +414,7 @@ export class BillingService {
     }
 
     const clientMetadata = this.asObject(client.metadataJson);
-    const billingMetadata = this.asObject(clientMetadata.billing);
+    const billingMetadata = this.asObject((clientMetadata as any).billing);
     const stripeCustomerId = this.readString(billingMetadata.stripeCustomerId);
 
     if (!stripeCustomerId) {
