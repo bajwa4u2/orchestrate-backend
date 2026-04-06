@@ -182,6 +182,23 @@ enum ContactEmailStatus {
   BOUNCED
 }
 
+enum PublicInquiryType {
+  SERVICE_FIT
+  PRICING
+  BILLING_SUPPORT
+  ONBOARDING
+  PARTNERSHIP
+  GENERAL_INQUIRY
+}
+
+enum PublicInquiryStatus {
+  RECEIVED
+  NOTIFIED
+  ACKNOWLEDGED
+  CLOSED
+  SPAM
+}
+
 enum EnrollmentStatus {
   PENDING
   ACTIVE
@@ -2172,4 +2189,26 @@ model DocumentDispatch {
   @@index([recipientEmail, createdAt])
   @@index([mailboxId, createdAt])
   @@index([status, lastAttemptAt])
+}
+
+model PublicInquiry {
+  id             String              @id @default(cuid())
+  inquiryType    PublicInquiryType
+  status         PublicInquiryStatus @default(RECEIVED)
+  source         String              @default("public_contact_form")
+  name           String
+  email          String
+  company        String?
+  message        String
+  metadataJson   Json?
+  submittedAt    DateTime            @default(now())
+  notifiedAt     DateTime?
+  acknowledgedAt DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@index([status, submittedAt])
+  @@index([email])
+  @@index([inquiryType, submittedAt])
 }
