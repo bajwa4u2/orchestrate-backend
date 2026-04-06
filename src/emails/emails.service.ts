@@ -14,6 +14,8 @@ import { agreementRevisionSentTemplate } from './templates/agreement-revision-se
 import { agreementSentTemplate } from './templates/agreement-sent.template';
 import { agreementSignedTemplate } from './templates/agreement-signed.template';
 import { campaignStartedTemplate } from './templates/campaign-started.template';
+import { contactAcknowledgementTemplate } from './templates/contact-acknowledgement.template';
+import { contactInquiryNotificationTemplate } from './templates/contact-inquiry-notification.template';
 import { clientOnboardingCompletedTemplate } from './templates/client-onboarding-completed.template';
 import { clientOnboardingStartedTemplate } from './templates/client-onboarding-started.template';
 import { complianceRequestSentTemplate } from './templates/compliance-request-sent.template';
@@ -44,6 +46,7 @@ type EmailEvent =
   | 'account_security_notice'
   | 'account_approved'
   | 'account_on_hold'
+  | 'contact_inquiry_notification'
   | 'contact_acknowledgement'
   | 'demo_acknowledgement'
   | 'newsletter_confirmation'
@@ -451,6 +454,20 @@ export class EmailsService {
           }),
         );
 
+      case 'contact_inquiry_notification':
+        return this.toRendered(
+          subject,
+          contactInquiryNotificationTemplate({
+            inquiryId: v.inquiryId ?? v.inquiry_id,
+            inquiryTypeLabel: v.inquiryTypeLabel ?? v.inquiry_type_label,
+            senderName: v.senderName ?? v.sender_name ?? v.name ?? v.toName,
+            senderEmail: v.senderEmail ?? v.sender_email ?? v.recipient_email,
+            company: v.company,
+            message: v.message,
+            submittedAt: v.submittedAt ?? v.submitted_at,
+          }),
+        );
+
       case 'subscription_created':
         return this.toRendered(
           subject,
@@ -748,6 +765,14 @@ export class EmailsService {
         );
 
       case 'contact_acknowledgement':
+        return this.toRendered(
+          subject,
+          contactAcknowledgementTemplate({
+            name: v.name ?? v.client_name ?? v.toName,
+            inquiryTypeLabel: v.inquiryTypeLabel ?? v.inquiry_type_label,
+          }),
+        );
+
       case 'demo_acknowledgement':
       case 'newsletter_confirmation':
       default:
@@ -780,6 +805,10 @@ export class EmailsService {
         return 'Your account has been approved';
       case 'account_on_hold':
         return 'Action needed for your account';
+      case 'contact_inquiry_notification':
+        return variables.inquiry_type_label && variables.sender_name
+          ? `New inquiry — ${variables.inquiry_type_label} — ${variables.sender_name}`
+          : 'New contact inquiry';
       case 'subscription_created':
         return 'Subscription confirmed';
       case 'subscription_renewed':
@@ -928,6 +957,7 @@ export class EmailsService {
     if (/(agreement|contract|terms)/.test(haystack)) return 'agreement_sent';
     if (/(privacy)/.test(haystack)) return 'privacy_update_notice';
     if (/(compliance|legal notice)/.test(haystack)) return 'formal_legal_notice';
+    if (/(new inquiry|contact inquiry|public inquiry)/.test(haystack)) return 'contact_inquiry_notification';
     if (/(hello|contact|intro|outreach|demo)/.test(haystack)) return 'contact_acknowledgement';
     if (/(do not reply|no-reply)/.test(haystack)) return 'system_status_notice';
 
@@ -943,6 +973,7 @@ export class EmailsService {
       'account_security_notice',
       'account_approved',
       'account_on_hold',
+      'contact_inquiry_notification',
       'contact_acknowledgement',
       'demo_acknowledgement',
       'newsletter_confirmation',
@@ -993,6 +1024,9 @@ export class EmailsService {
       case 'newsletter_confirmation':
       case 'account_welcome':
         return 'hello';
+
+      case 'contact_inquiry_notification':
+        return 'support';
 
       case 'subscription_created':
       case 'subscription_renewed':

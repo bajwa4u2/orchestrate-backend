@@ -56,8 +56,9 @@ export class PublicService {
           toEmail,
           toName: 'Orchestrate',
           category: 'support',
+          emailEvent: 'contact_inquiry_notification',
           replyToEmail: normalized.email,
-          subject: `New contact inquiry: ${this.inquiryTypeLabel(normalized.inquiryType)}`,
+          subject: `New inquiry — ${this.inquiryTypeLabel(normalized.inquiryType)} — ${normalized.name}`,
           bodyText: this.buildInternalNotificationText({
             inquiryId: inquiry.id,
             ...normalized,
@@ -76,6 +77,7 @@ export class PublicService {
             sender_email: normalized.email,
             company: normalized.company ?? '',
             message: normalized.message,
+            submitted_at: new Date().toISOString(),
           },
         }),
       ),
@@ -91,7 +93,7 @@ export class PublicService {
         category: 'hello',
         emailEvent: 'contact_acknowledgement',
         replyToEmail: process.env.EMAIL_REPLY_TO_HELLO?.trim() || 'hello@orchestrateops.com',
-        subject: 'We received your message',
+        subject: 'We received your inquiry',
         bodyText: this.buildAcknowledgementText(normalized.name, normalized.inquiryType),
         bodyHtml: this.textToHtml(this.buildAcknowledgementText(normalized.name, normalized.inquiryType)),
         templateVariables: {

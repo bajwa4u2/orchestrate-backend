@@ -7,6 +7,8 @@ export function renderBaseEmail(params: {
     process.env.EMAIL_LOGO_URL ||
     'https://orchestrateops.com/orchestrate-logo.png';
 
+  const brandName = process.env.EMAIL_BRAND_NAME || 'Orchestrate';
+
   return `
   <!DOCTYPE html>
   <html>
@@ -20,7 +22,7 @@ export function renderBaseEmail(params: {
         padding: 0;
         background-color: #f6f7f9;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        color: #111;
+        color: #111827;
       }
       .preheader {
         display: none !important;
@@ -36,48 +38,79 @@ export function renderBaseEmail(params: {
         max-width: 560px;
         margin: 40px auto;
         background: #ffffff;
-        border-radius: 12px;
+        border-radius: 16px;
         padding: 32px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+        box-shadow: 0 2px 10px rgba(15,23,42,0.05);
       }
-      .logo {
-        text-align: center;
-        margin-bottom: 24px;
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 28px;
       }
-      .logo img {
+      .brand-mark {
+        width: 40px;
+        height: 40px;
+        border-radius: 999px;
+        border: 1px solid #e5e7eb;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background: #ffffff;
+      }
+      .brand-mark img {
         display: block;
-        margin: 0 auto;
+        width: 28px;
+        height: 28px;
+      }
+      .brand-text {
+        font-size: 18px;
+        line-height: 1.2;
+        font-weight: 700;
+        color: #0f172a;
+        letter-spacing: -0.02em;
       }
       h1 {
-        font-size: 20px;
-        margin-bottom: 16px;
-        font-weight: 600;
+        font-size: 24px;
+        line-height: 1.2;
+        margin: 0 0 16px 0;
+        font-weight: 700;
+        color: #111827;
+        letter-spacing: -0.02em;
       }
       p {
         font-size: 14px;
-        line-height: 1.6;
+        line-height: 1.7;
         margin: 12px 0;
+        color: #374151;
       }
       .button {
         display: inline-block;
         margin-top: 20px;
         padding: 12px 20px;
-        background: #111;
-        color: #fff !important;
+        background: #111827;
+        color: #ffffff !important;
         text-decoration: none;
-        border-radius: 8px;
+        border-radius: 10px;
         font-size: 14px;
       }
       .footer {
         margin-top: 32px;
         font-size: 12px;
-        color: #666;
-        line-height: 1.5;
+        color: #667085;
+        line-height: 1.7;
       }
       .divider {
         margin: 24px 0;
         height: 1px;
-        background: #eee;
+        background: #e5e7eb;
+      }
+      @media only screen and (max-width: 600px) {
+        .container {
+          margin: 16px;
+          padding: 24px;
+        }
       }
     </style>
   </head>
@@ -85,13 +118,17 @@ export function renderBaseEmail(params: {
     <div class="preheader">${params.previewText || ''}</div>
 
     <div class="container">
-      <div class="logo">
-        <img
-          src="${logoUrl}"
-          alt="Orchestrate"
-          width="140"
-          style="display:block; margin:0 auto;"
-        />
+      <div class="brand">
+        <div class="brand-mark">
+          <img
+            src="${logoUrl}"
+            alt="${brandName}"
+            width="28"
+            height="28"
+            style="display:block;"
+          />
+        </div>
+        <div class="brand-text">${brandName}</div>
       </div>
 
       ${params.contentHtml}
