@@ -1,6 +1,6 @@
 import { BadRequestException, Controller, Headers, Post, Req } from '@nestjs/common';
 import { Request } from 'express';
-import Stripe from 'stripe';
+import Stripe = require('stripe');
 import { BillingService } from '../billing.service';
 import { StripeService } from './stripe.service';
 
