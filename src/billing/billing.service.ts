@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InvoiceStatus, PaymentMethodType, PaymentStatus, Prisma, SubscriptionStatus } from '@prisma/client';
-import Stripe from 'stripe';
+import Stripe = require('stripe');
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
@@ -302,7 +302,7 @@ export class BillingService {
 
     const plan = await this.resolvePlan(input.organizationId, input.plan);
     const clientMetadata = this.asObject(client.metadataJson);
-    const billingMetadata = this.asObject(clientMetadata.billing);
+    const billingMetadata = this.asObject((clientMetadata as Record<string, unknown>).billing as Prisma.JsonValue);
 
     let stripeCustomerId = this.readString(billingMetadata.stripeCustomerId);
 
