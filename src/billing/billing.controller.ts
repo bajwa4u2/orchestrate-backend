@@ -54,4 +54,28 @@ export class BillingController {
     const context = await this.accessContextService.requireOperator(headers);
     return this.billingService.recordPayment(context.organizationId!, context.userId, dto);
   }
+
+  @Post('subscribe')
+  async subscribe(
+    @Headers() headers: Record<string, unknown>,
+    @Body() body: { plan: 'OPPORTUNITY' | 'REVENUE' },
+  ) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.billingService.createSubscriptionIntent({
+      organizationId: context.organizationId!,
+      clientId: context.clientId!,
+      userId: context.userId!,
+      email: context.email,
+      plan: body.plan,
+    });
+  }
+
+  @Post('portal')
+  async createPortal(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.billingService.createPortalSession({
+      organizationId: context.organizationId!,
+      clientId: context.clientId!,
+    });
+  }
 }

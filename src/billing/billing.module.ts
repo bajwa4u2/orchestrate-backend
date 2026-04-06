@@ -6,11 +6,19 @@ import { BillingService } from './billing.service';
 import { ReceiptDocumentBuilder } from './dto/receipt-document.builder';
 import { ReceiptHtmlRenderer } from './dto/receipt-html.renderer';
 import { ReceiptDeliveryService } from './receipt-delivery.service';
+import { StripeService } from './stripe/stripe.service';
+import { WebhookController } from './stripe/webhook.controller';
 
 @Module({
   imports: [AccessContextModule, EmailsModule],
-  controllers: [BillingController],
-  providers: [BillingService, ReceiptDocumentBuilder, ReceiptHtmlRenderer, ReceiptDeliveryService],
-  exports: [BillingService, ReceiptDeliveryService],
+  controllers: [BillingController, WebhookController],
+  providers: [
+    BillingService,
+    ReceiptDocumentBuilder,
+    ReceiptHtmlRenderer,
+    ReceiptDeliveryService,
+    StripeService,
+  ],
+  exports: [BillingService, ReceiptDeliveryService, StripeService],
 })
 export class BillingModule {}
