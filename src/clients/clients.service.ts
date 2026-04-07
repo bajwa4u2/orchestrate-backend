@@ -15,8 +15,8 @@ import { ListClientsDto } from './dto/list-clients.dto';
 @Injectable()
 export class ClientsService {
   constructor(
-    private readonly prisma: PrismaService,
     private readonly accessContextService: AccessContextService,
+    private readonly prisma: PrismaService,
   ) {}
 
   create(dto: CreateClientDto) {
@@ -70,144 +70,142 @@ export class ClientsService {
     return { items, meta: { page, limit, total } };
   }
 
-  async getMySetup(headers: Record<string, unknown>) {
-    const context = await this.accessContextService.buildFromHeaders(headers);
-    if (!context.userId || context.surface !== 'client') {
-      throw new UnauthorizedException('Client session is required');
-    }
-
-    const client = await this.resolveClientFromContext(context.userId, context.organizationId, context.clientId);
-    const subscription = await this.prisma.subscription.findFirst({
-      where: { clientId: client.id },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        status: true,
-        amountCents: true,
-        currencyCode: true,
-      },
-    });
+  async getSetup(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
 
     return {
       clientId: client.id,
       organizationId: client.organizationId,
       emailVerified: true,
       setupCompleted: Boolean(client.setupCompletedAt),
-      setupCompletedAt: client.setupCompletedAt?.toISOString() ?? null,
-      selectedPlan: client.selectedPlan ?? null,
-      subscriptionStatus: subscription?.status?.toString().toLowerCase() ?? 'none',
-      subscriptionAmount: subscription?.amountCents ?? null,
-      subscriptionInterval: null,
+      setupCompletedAt: client.setupCompletedAt,
+      selectedPlan: client.selectedPlan,
+      subscriptionStatus: await this.resolveSubscriptionStatus(client.id),
       setup: client.setupCompletedAt
         ? {
-            country: client.country ?? null,
-            area: client.area ?? null,
-            industry: client.industry ?? null,
-            scope: Array.isArray(client.scopeJson)
-              ? client.scopeJson.map((item) => String(item))
-              : [],
+            country: client.country,
+            area: client.area,
+            industry: client.industry,
+            scope: this.readScope(client.scopeJson),
           }
         : null,
     };
   }
 
-  async saveMySetup(headers: Record<string, unknown>, dto: CreateClientSetupDto) {
-    const context = await this.accessContextService.buildFromHeaders(headers);
-    if (!context.userId || context.surface !== 'client') {
-      throw new UnauthorizedException('Client session is required');
-    }
+  async saveSetup(headers: Record<string, unknown>, dto: CreateClientSetupDto) {
+    const client = await this.resolveClientForRequest(headers);
 
-    const client = await this.resolveClientFromContext(context.userId, context.organizationId, context.clientId);
-
+    const country = dto.country.trim();
+    const area = dto.area.trim();
+    const industry = dto.industry.trim();
     const normalizedScope = dto.scope
       .map((item) => item.trim())
-      .filter((item) => typeof item === 'string' && item.trim().length > 0
+      .filter((item) => item.length > 0);
 
-    if (!normalizedScope.length) {
-      throw new BadRequestException('At least one scope is required');
+    if (!country.length) {
+      throw new BadRequestException('Country is required');
     }
+    if (!area.length) {
+      throw new BadRequestException('Target area is required');
+    }
+    if (!industry.length) {
+      throw new BadRequestException('Industry is required');
+    }
+    if (!normalizedScope.length) {
+      throw new BadRequestException('Select at least one scope');
+    }
+
+    const selectedPlan =
+      typeof dto.selectedPlan === 'string' && dto.selectedPlan.trim().length > 0
+        ? dto.selectedPlan.trim()
+        : client.selectedPlan;
 
     const updated = await this.prisma.client.update({
       where: { id: client.id },
       data: {
-        country: dto.country.trim(),
-        area: dto.area.trim(),
-        industry: dto.industry.trim(),
-        scopeJson: normalizedScope,
-        selectedPlan: dto.selectedPlan?.trim() || client.selectedPlan || null,
+        country,
+        area,
+        industry,
+        scopeJson: toPrismaJson(normalizedScope),
+        selectedPlan,
         setupCompletedAt: new Date(),
       },
     });
 
-    const selectedPlan = updated.selectedPlan ?? null;
-    const nextRoute = selectedPlan != null && selectedPlan.length > 0
-      ? `/client/subscribe?plan=${selectedPlan}`
-      : '/client/workspace';
+    const subscriptionStatus = await this.resolveSubscriptionStatus(updated.id);
+    const nextRoute =
+      selectedPlan && selectedPlan.length > 0
+        ? `/client/subscribe?plan=${selectedPlan}`
+        : '/client/workspace';
 
     return {
       success: true,
       client: {
         clientId: updated.id,
+        organizationId: updated.organizationId,
         emailVerified: true,
         setupCompleted: true,
-        setupCompletedAt: updated.setupCompletedAt?.toISOString() ?? null,
-        selectedPlan,
-        subscriptionStatus: 'none',
+        setupCompletedAt: updated.setupCompletedAt,
+        selectedPlan: updated.selectedPlan,
+        subscriptionStatus,
         setup: {
-          country: updated.country ?? null,
-          area: updated.area ?? null,
-          industry: updated.industry ?? null,
-          scope: Array.isArray(updated.scopeJson)
-            ? updated.scopeJson.map((item) => String(item))
-            : [],
+          country: updated.country,
+          area: updated.area,
+          industry: updated.industry,
+          scope: this.readScope(updated.scopeJson),
         },
       },
       nextRoute,
     };
   }
 
-  private async resolveClientFromContext(
-    userId: string,
-    organizationId?: string,
-    clientId?: string,
-  ) {
-    if (clientId) {
+  private async resolveClientForRequest(headers: Record<string, unknown>) {
+    const context = await this.accessContextService.buildFromHeaders(headers);
+
+    if (!context.userId) {
+      throw new UnauthorizedException('No active session');
+    }
+
+    if (context.surface !== 'client') {
+      throw new UnauthorizedException('Client access is required');
+    }
+
+    if (context.clientId) {
       const client = await this.prisma.client.findUnique({
-        where: { id: clientId },
+        where: { id: context.clientId },
       });
-      if (!client) {
-        throw new NotFoundException('Client account not found');
+      if (client) {
+        return client;
       }
-      return client;
     }
 
-    if (!organizationId) {
-      throw new UnauthorizedException('Client organization context is missing');
+    if (context.organizationId) {
+      const client = await this.prisma.client.findFirst({
+        where: { organizationId: context.organizationId },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (client) {
+        return client;
+      }
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { email: true },
+    throw new NotFoundException('Client account not found');
+  }
+
+  private readScope(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0);
+  }
+
+  private async resolveSubscriptionStatus(clientId: string) {
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { clientId },
+      orderBy: { createdAt: 'desc' },
+      select: { status: true },
     });
 
-    const client = await this.prisma.client.findFirst({
-      where: {
-        organizationId,
-        OR: user?.email
-          ? [
-              { primaryEmail: user.email },
-              { billingEmail: user.email },
-              { legalEmail: user.email },
-              { opsEmail: user.email },
-            ]
-          : undefined,
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    if (!client) {
-      throw new NotFoundException('Client account not found');
-    }
-
-    return client;
+    return subscription?.status ?? 'none';
   }
 }

@@ -11,13 +11,14 @@ export class CreateClientSetupDto {
 
   @IsString()
   @Length(2, 120)
+  @MaxLength(120)
   industry!: string;
 
   @IsArray()
+  @IsString({ each: true })
   scope!: string[];
 
   @IsOptional()
   @IsString()
-  @MaxLength(32)
   selectedPlan?: string;
 }
