@@ -69,6 +69,16 @@ export class BillingController {
       plan: body.plan,
     });
   }
+  
+  @Get('subscription')
+  async getSubscription(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+
+    return this.billingService.getClientSubscription(
+      context.organizationId!,
+      context.clientId!,
+    );
+  }
 
   @Post('portal')
   async createPortal(@Headers() headers: Record<string, unknown>) {

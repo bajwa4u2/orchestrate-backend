@@ -428,6 +428,38 @@ export class BillingService {
     return { url: session.url };
   }
 
+  async getClientSubscription(organizationId: string, clientId: string) {
+  const subscription = await this.prisma.subscription.findFirst({
+    where: {
+      organizationId,
+      clientId,
+      status: {
+        in: [
+          SubscriptionStatus.TRIALING,
+          SubscriptionStatus.ACTIVE,
+          SubscriptionStatus.PAST_DUE,
+        ],
+      },
+    },
+    include: {
+      plan: true,
+    },
+    orderBy: [{ createdAt: 'desc' }],
+  });
+
+  if (!subscription) {
+    return null;
+  }
+
+  return {
+    plan: subscription.plan?.name ?? null,
+    status: subscription.status,
+    amount: subscription.amountCents / 100,
+    currency: subscription.currencyCode,
+    currentPeriodEnd: subscription.currentPeriodEnd,
+  };
+}
+
   async handleInvoicePaid(invoice: any) {
     const stripeSubscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
     if (!stripeSubscriptionId) return { ok: true };
