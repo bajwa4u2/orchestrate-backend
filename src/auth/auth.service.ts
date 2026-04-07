@@ -188,26 +188,10 @@ export class AuthService {
       name: result.user.fullName,
     });
 
-    const sessionToken = this.signToken({
-      typ: 'session',
-      sub: result.user.id,
+    return {
+      requiresVerification: true,
       email,
-      organizationId: result.organization.id,
-      clientId: result.client.id,
-      memberRole: 'OWNER',
-      surface: 'client',
-      fullName: result.user.fullName,
-      exp: this.expiresInSeconds(30 * 24 * 3600),
-    });
-
-    return this.buildSessionResponse({
-      token: sessionToken,
-      user: result.user,
-      organization: result.organization,
-      clientId: result.client.id,
-      memberRole: 'OWNER',
-      surface: 'client',
-    });
+    };
   }
 
   async loginClient(dto: LoginDto) {
