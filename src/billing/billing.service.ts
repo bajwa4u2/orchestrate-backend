@@ -46,18 +46,34 @@ export class BillingService {
       creditTotal,
     ] = await Promise.all([
       this.prisma.invoice.count({
-        where: { ...where, status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] } },
+        where: {
+          ...where,
+          status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+        },
       }),
       this.prisma.invoice.count({
-        where: { ...where, dueAt: { lt: now }, status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.PARTIALLY_PAID, InvoiceStatus.OVERDUE] } },
+        where: {
+          ...where,
+          dueAt: { lt: now },
+          status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.PARTIALLY_PAID, InvoiceStatus.OVERDUE] },
+        },
       }),
       this.prisma.statement.count({ where: { ...where, status: { in: ['DRAFT', 'ISSUED'] } } }),
       this.prisma.subscription.count({
-        where: { ...where, status: { in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE] } },
+        where: {
+          ...where,
+          status: { in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE] },
+        },
       }),
       this.prisma.payment.count({ where: { ...where, status: PaymentStatus.SUCCEEDED } }),
-      this.prisma.invoice.aggregate({ where, _sum: { totalCents: true, amountPaidCents: true, balanceDueCents: true } }),
-      this.prisma.payment.aggregate({ where: { ...where, status: PaymentStatus.SUCCEEDED }, _sum: { amountCents: true } }),
+      this.prisma.invoice.aggregate({
+        where,
+        _sum: { totalCents: true, amountPaidCents: true, balanceDueCents: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: { ...where, status: PaymentStatus.SUCCEEDED },
+        _sum: { amountCents: true },
+      }),
       this.prisma.receipt.count({ where }),
       this.prisma.creditNote.aggregate({ where, _sum: { amountCents: true } }),
     ]);
@@ -283,7 +299,7 @@ export class BillingService {
       return {
         subscriptionId: existingSubscription.id,
         stripeSubscriptionId: existingSubscription.externalRef,
-        clientSecret: null,
+        checkoutUrl: null,
         customerId: this.readString(this.asObject(existingSubscription.metadataJson).stripeCustomerId) ?? null,
         plan: existingSubscription.plan
           ? {
@@ -333,50 +349,46 @@ export class BillingService {
       });
     }
 
-    const stripeSubscription = await this.stripeService.createSubscription({
-      customerId: stripeCustomerId!,
-      priceId: this.resolveStripePriceId(input.plan),
+    const baseUrl =
+      process.env.CLIENT_BASE_URL?.trim() ||
+      process.env.CLIENT_PORTAL_BASE_URL?.trim();
+
+    if (!baseUrl) {
+      throw new BadRequestException('Missing CLIENT_BASE_URL environment variable');
+    }
+
+    const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+
+    const checkoutSession = await this.stripeService.getClient().checkout.sessions.create({
+      mode: 'subscription',
+      customer: stripeCustomerId,
+      line_items: [
+        {
+          price: this.resolveStripePriceId(input.plan),
+          quantity: 1,
+        },
+      ],
+      success_url: `${normalizedBaseUrl}/client/workspace?billing=success`,
+      cancel_url: `${normalizedBaseUrl}/client/subscribe?plan=${input.plan.toLowerCase()}&canceled=1`,
       metadata: {
         organizationId: input.organizationId,
         clientId: input.clientId,
         planCode: plan.code,
       },
-    });
-
-    const paymentIntent = this.extractPaymentIntent(stripeSubscription);
-    if (!paymentIntent?.client_secret) {
-      throw new BadRequestException('Stripe did not return a payment intent client secret');
-    }
-
-    const currentPeriodStart = this.readUnixTimestamp((stripeSubscription as any).current_period_start);
-    const currentPeriodEnd = this.readUnixTimestamp((stripeSubscription as any).current_period_end);
-
-    const localSubscription = await this.prisma.subscription.create({
-      data: {
-        organizationId: input.organizationId,
-        clientId: input.clientId,
-        planId: plan.id,
-        externalRef: stripeSubscription.id,
-        status: SubscriptionStatus.TRIALING,
-        amountCents: plan.amountCents,
-        currencyCode: plan.currencyCode ?? client.currencyCode ?? 'USD',
-        billingAnchorAt: currentPeriodStart ?? new Date(),
-        currentPeriodStart,
-        currentPeriodEnd,
-        metadataJson: toPrismaJson({
-          source: 'stripe',
+      subscription_data: {
+        metadata: {
+          organizationId: input.organizationId,
+          clientId: input.clientId,
           planCode: plan.code,
-          stripeCustomerId,
-          stripeSubscriptionId: stripeSubscription.id,
-          stripePriceId: this.resolveStripePriceId(input.plan),
           createdByUserId: input.userId,
-        }),
+        },
       },
-      include: {
-        plan: true,
-        client: true,
-      },
+      allow_promotion_codes: false,
     });
+
+    if (!checkoutSession.url) {
+      throw new BadRequestException('Stripe did not return a checkout URL');
+    }
 
     await this.sendSubscriptionCreatedEmail(input.organizationId, {
       clientId: input.clientId,
@@ -386,10 +398,8 @@ export class BillingService {
     });
 
     return {
-      subscriptionId: localSubscription.id,
-      stripeSubscriptionId: stripeSubscription.id,
-      clientSecret: paymentIntent.client_secret,
-      customerId: stripeCustomerId,
+      checkoutUrl: checkoutSession.url,
+      alreadyExists: false,
       plan: {
         code: plan.code,
         name: plan.name,
@@ -397,8 +407,6 @@ export class BillingService {
         currencyCode: plan.currencyCode,
         interval: plan.interval,
       },
-      status: localSubscription.status,
-      alreadyExists: false,
     };
   }
 
@@ -429,39 +437,36 @@ export class BillingService {
   }
 
   async getClientSubscription(organizationId: string, clientId: string) {
-  const subscription = await this.prisma.subscription.findFirst({
-    where: {
-      organizationId,
-      clientId,
-      status: {
-        in: [
-          SubscriptionStatus.TRIALING,
-          SubscriptionStatus.ACTIVE,
-          SubscriptionStatus.PAST_DUE,
-        ],
+    const subscription = await this.prisma.subscription.findFirst({
+      where: {
+        organizationId,
+        clientId,
+        status: {
+          in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE],
+        },
       },
-    },
-    include: {
-      plan: true,
-    },
-    orderBy: [{ createdAt: 'desc' }],
-  });
+      include: {
+        plan: true,
+      },
+      orderBy: [{ createdAt: 'desc' }],
+    });
 
-  if (!subscription) {
-    return null;
+    if (!subscription) {
+      return null;
+    }
+
+    return {
+      plan: subscription.plan?.name ?? null,
+      status: subscription.status,
+      amount: subscription.amountCents / 100,
+      currency: subscription.currencyCode,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+    };
   }
 
-  return {
-    plan: subscription.plan?.name ?? null,
-    status: subscription.status,
-    amount: subscription.amountCents / 100,
-    currency: subscription.currencyCode,
-    currentPeriodEnd: subscription.currentPeriodEnd,
-  };
-}
-
   async handleInvoicePaid(invoice: any) {
-    const stripeSubscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+    const stripeSubscriptionId =
+      typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
     if (!stripeSubscriptionId) return { ok: true };
 
     const subscription = await this.prisma.subscription.findFirst({
@@ -518,7 +523,8 @@ export class BillingService {
   }
 
   async handlePaymentFailed(invoice: any) {
-    const stripeSubscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+    const stripeSubscriptionId =
+      typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
     if (!stripeSubscriptionId) return { ok: true };
 
     const subscription = await this.prisma.subscription.findFirst({
@@ -551,18 +557,68 @@ export class BillingService {
   }
 
   async handleSubscriptionUpdated(stripeSubscription: any) {
-    const subscription = await this.prisma.subscription.findFirst({
+    let subscription = await this.prisma.subscription.findFirst({
       where: { externalRef: stripeSubscription.id },
     });
 
-    if (!subscription) return { ok: true };
+    if (!subscription) {
+      const metadata = this.asObject(stripeSubscription.metadata);
+      const organizationId = this.readString(metadata.organizationId);
+      const clientId = this.readString(metadata.clientId);
+      const planCode = this.readString(metadata.planCode);
+
+      if (!organizationId || !clientId || !planCode) {
+        return { ok: true };
+      }
+
+      const plan = await this.prisma.plan.findFirst({
+        where: { organizationId, code: planCode },
+      });
+
+      if (!plan) {
+        return { ok: true };
+      }
+
+      await this.prisma.subscription.create({
+        data: {
+          organizationId,
+          clientId,
+          planId: plan.id,
+          externalRef: stripeSubscription.id,
+          status: this.mapStripeSubscriptionStatus(stripeSubscription.status),
+          amountCents: plan.amountCents,
+          currencyCode: plan.currencyCode ?? 'USD',
+          billingAnchorAt: this.readUnixTimestamp(stripeSubscription.current_period_start) ?? new Date(),
+          currentPeriodStart: this.readUnixTimestamp(stripeSubscription.current_period_start),
+          currentPeriodEnd: this.readUnixTimestamp(stripeSubscription.current_period_end),
+          canceledAt: stripeSubscription.canceled_at
+            ? this.readUnixTimestamp(stripeSubscription.canceled_at) ?? new Date()
+            : null,
+          metadataJson: toPrismaJson({
+            source: 'stripe',
+            planCode: plan.code,
+            stripeCustomerId:
+              typeof stripeSubscription.customer === 'string'
+                ? stripeSubscription.customer
+                : stripeSubscription.customer?.id,
+            stripeSubscriptionId: stripeSubscription.id,
+            stripeSubscriptionStatus: stripeSubscription.status,
+            cancelAtPeriodEnd: Boolean(stripeSubscription.cancel_at_period_end),
+          }),
+        },
+      });
+
+      return { ok: true };
+    }
 
     await this.prisma.subscription.update({
       where: { id: subscription.id },
       data: {
         status: this.mapStripeSubscriptionStatus(stripeSubscription.status),
-        currentPeriodStart: this.readUnixTimestamp(stripeSubscription.current_period_start) ?? subscription.currentPeriodStart,
-        currentPeriodEnd: this.readUnixTimestamp(stripeSubscription.current_period_end) ?? subscription.currentPeriodEnd,
+        currentPeriodStart:
+          this.readUnixTimestamp(stripeSubscription.current_period_start) ?? subscription.currentPeriodStart,
+        currentPeriodEnd:
+          this.readUnixTimestamp(stripeSubscription.current_period_end) ?? subscription.currentPeriodEnd,
         canceledAt: stripeSubscription.canceled_at
           ? this.readUnixTimestamp(stripeSubscription.canceled_at) ?? new Date()
           : null,
@@ -608,7 +664,16 @@ export class BillingService {
             }
           : {
               positioning: 'From meeting to invoice, payment, and record.',
-              scope: ['lead sourcing', 'outreach execution', 'follow-ups', 'meeting booking', 'invoices', 'payment tracking', 'agreements', 'statements'],
+              scope: [
+                'lead sourcing',
+                'outreach execution',
+                'follow-ups',
+                'meeting booking',
+                'invoices',
+                'payment tracking',
+                'agreements',
+                'statements',
+              ],
             },
     };
 
@@ -637,16 +702,6 @@ export class BillingService {
     return priceId;
   }
 
-  private extractPaymentIntent(subscription: any): any {
-    const latestInvoice = subscription.latest_invoice as any;
-    if (!latestInvoice) return null;
-
-    const paymentIntent = latestInvoice.payment_intent as any;
-    if (!paymentIntent || typeof paymentIntent === 'string') return null;
-
-    return paymentIntent;
-  }
-
   private mapStripeSubscriptionStatus(status: any): SubscriptionStatus {
     switch (status) {
       case 'trialing':
@@ -672,7 +727,14 @@ export class BillingService {
 
   private async sendInvoiceIssuedEmail(
     organizationId: string,
-    invoice: { clientId: string; client?: { displayName?: string | null } | null; invoiceNumber: string; totalCents: number; currencyCode: string; dueAt?: Date | null },
+    invoice: {
+      clientId: string;
+      client?: { displayName?: string | null } | null;
+      invoiceNumber: string;
+      totalCents: number;
+      currencyCode: string;
+      dueAt?: Date | null;
+    },
   ) {
     const recipient = await this.emailsService.resolveClientRecipient(organizationId, invoice.clientId);
     if (!recipient?.email) return;
@@ -705,7 +767,14 @@ export class BillingService {
 
   private async sendPaymentReceivedEmail(
     organizationId: string,
-    input: { clientId: string; invoiceNumber?: string | null; receiptNumber: string; amountCents: number; currencyCode: string; receivedAt: Date },
+    input: {
+      clientId: string;
+      invoiceNumber?: string | null;
+      receiptNumber: string;
+      amountCents: number;
+      currencyCode: string;
+      receivedAt: Date;
+    },
   ) {
     const recipient = await this.emailsService.resolveClientRecipient(organizationId, input.clientId);
     if (!recipient?.email) return;
@@ -766,7 +835,13 @@ export class BillingService {
 
   private async sendSubscriptionRenewedEmail(
     organizationId: string,
-    input: { clientId: string; planName: string; amountCents: number; currencyCode: string; currentPeriodEnd?: Date },
+    input: {
+      clientId: string;
+      planName: string;
+      amountCents: number;
+      currencyCode: string;
+      currentPeriodEnd?: Date;
+    },
   ) {
     const recipient = await this.emailsService.resolveClientRecipient(organizationId, input.clientId);
     if (!recipient?.email) return;
