@@ -4,7 +4,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { MemberRole, OrganizationType } from '@prisma/client';
+import { MemberRole, OrganizationType, SubscriptionStatus } from '@prisma/client';
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
 import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
@@ -66,9 +66,10 @@ export class AuthService {
     const metadata = this.asObject(user.metadataJson);
     const auth = this.asObject(metadata.auth);
 
-    const clientState = context.clientId
-      ? await this.loadClientState(context.clientId)
-      : null;
+    const clientSnapshot =
+      context.surface === 'client' && context.clientId
+        ? await this.fetchClientSnapshot(context.clientId)
+        : null;
 
     return {
       authenticated: true,
@@ -77,9 +78,9 @@ export class AuthService {
         email: user.email,
         fullName: user.fullName,
         emailVerified: Boolean(auth.emailVerifiedAt),
-        setupCompleted: clientState?.setupCompleted ?? false,
-        selectedPlan: clientState?.selectedPlan ?? null,
-        subscriptionStatus: clientState?.subscriptionStatus ?? 'none',
+        setupCompleted: clientSnapshot?.setupCompleted ?? false,
+        selectedPlan: clientSnapshot?.selectedPlan ?? null,
+        subscriptionStatus: clientSnapshot?.subscriptionStatus ?? 'none',
       },
       session: {
         organizationId: context.organizationId,
@@ -96,16 +97,13 @@ export class AuthService {
             type: membership.organization.type,
           }
         : null,
-      setup: clientState
+      setup: clientSnapshot
         ? {
-            setupCompleted: clientState.setupCompleted,
-            setupCompletedAt: clientState.setupCompletedAt,
-            selectedPlan: clientState.selectedPlan,
-            subscriptionStatus: clientState.subscriptionStatus,
-            country: clientState.country,
-            area: clientState.area,
-            industry: clientState.industry,
-            scope: clientState.scope,
+            setupCompleted: clientSnapshot.setupCompleted,
+            setupCompletedAt: clientSnapshot.setupCompletedAt,
+            selectedPlan: clientSnapshot.selectedPlan,
+            subscriptionStatus: clientSnapshot.subscriptionStatus,
+            setup: clientSnapshot.setup,
           }
         : null,
     };
@@ -245,7 +243,7 @@ export class AuthService {
       exp: this.expiresInSeconds(30 * 24 * 3600),
     });
 
-    const clientState = await this.loadClientState(clientId);
+    const clientSnapshot = await this.fetchClientSnapshot(clientId);
 
     return this.buildSessionResponse({
       token,
@@ -254,7 +252,7 @@ export class AuthService {
       clientId,
       memberRole: membership.role,
       surface: 'client',
-      clientState,
+      clientSnapshot,
     });
   }
 
@@ -528,19 +526,11 @@ export class AuthService {
     memberRole?: MemberRole;
     clientId?: string;
     surface: SessionSurface;
-    clientState?: {
-      setupCompleted: boolean;
-      setupCompletedAt: string | null;
-      selectedPlan: string | null;
-      subscriptionStatus: string;
-      country: string | null;
-      area: string | null;
-      industry: string | null;
-      scope: string[];
-    } | null;
+    clientSnapshot?: Awaited<ReturnType<AuthService['fetchClientSnapshot']>> | null;
   }) {
     const metadata = this.asObject(input.user.metadataJson);
     const auth = this.asObject(metadata.auth);
+    const snapshot = input.clientSnapshot ?? null;
 
     return {
       token: input.token,
@@ -549,9 +539,9 @@ export class AuthService {
         email: input.user.email,
         fullName: input.user.fullName,
         emailVerified: Boolean(auth.emailVerifiedAt),
-        setupCompleted: input.clientState?.setupCompleted ?? false,
-        selectedPlan: input.clientState?.selectedPlan ?? null,
-        subscriptionStatus: input.clientState?.subscriptionStatus ?? 'none',
+        setupCompleted: snapshot?.setupCompleted ?? false,
+        selectedPlan: snapshot?.selectedPlan ?? null,
+        subscriptionStatus: snapshot?.subscriptionStatus ?? 'none',
       },
       workspace: {
         organizationId: input.organization.id,
@@ -564,54 +554,67 @@ export class AuthService {
         memberRole: input.memberRole,
         clientId: input.clientId,
       },
-      setup: input.clientState
+      setup: snapshot
         ? {
-            setupCompleted: input.clientState.setupCompleted,
-            setupCompletedAt: input.clientState.setupCompletedAt,
-            selectedPlan: input.clientState.selectedPlan,
-            subscriptionStatus: input.clientState.subscriptionStatus,
-            country: input.clientState.country,
-            area: input.clientState.area,
-            industry: input.clientState.industry,
-            scope: input.clientState.scope,
+            setupCompleted: snapshot.setupCompleted,
+            setupCompletedAt: snapshot.setupCompletedAt,
+            selectedPlan: snapshot.selectedPlan,
+            subscriptionStatus: snapshot.subscriptionStatus,
+            setup: snapshot.setup,
           }
         : null,
     };
   }
 
-
-private async loadClientState(clientId: string) {
-  const client = await this.prisma.client.findUnique({
-    where: { id: clientId },
-    select: {
-      id: true,
-      country: true,
-      area: true,
-      industry: true,
-      scopeJson: true,
-      selectedPlan: true,
-      setupCompletedAt: true,
-      subscriptions: {
-        orderBy: { createdAt: 'desc' },
-        take: 1,
-        select: { status: true },
+  private async fetchClientSnapshot(clientId: string) {
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      include: {
+        subscriptions: {
+          include: { plan: true },
+          where: {
+            status: {
+              in: [
+                SubscriptionStatus.INCOMPLETE,
+                SubscriptionStatus.TRIALING,
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.PAST_DUE,
+                SubscriptionStatus.PAUSED,
+              ],
+            },
+          },
+          orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+          take: 1,
+        },
       },
-    },
-  });
+    });
 
-  if (!client) return null;
+    if (!client) return null;
 
-  return {
-    setupCompleted: Boolean(client.setupCompletedAt),
-    setupCompletedAt: client.setupCompletedAt?.toISOString() ?? null,
-    selectedPlan: client.selectedPlan ?? null,
-    subscriptionStatus: client.subscriptions[0]?.status?.toString().toLowerCase() ?? 'none',
-    country: client.country ?? null,
-    area: client.area ?? null,
-    industry: client.industry ?? null,
-    scope: Array.isArray(client.scopeJson) ? client.scopeJson.map((item) => String(item)) : [],
-  };
-}
+    const activeSubscription = client.subscriptions[0] ?? null;
+    const scope = Array.isArray(client.scopeJson)
+      ? client.scopeJson.map((item) => String(item))
+      : [];
+
+    return {
+      clientId: client.id,
+      organizationId: client.organizationId,
+      setupCompleted: Boolean(client.setupCompletedAt),
+      setupCompletedAt: client.setupCompletedAt?.toISOString() ?? null,
+      selectedPlan: client.selectedPlan ?? null,
+      subscriptionStatus: activeSubscription?.status?.toLowerCase() ?? 'none',
+      subscriptionAmount: activeSubscription?.amountCents ?? null,
+      subscriptionInterval: activeSubscription?.plan?.interval?.toLowerCase() ?? null,
+      setup: client.setupCompletedAt
+        ? {
+            country: client.country ?? null,
+            area: client.area ?? null,
+            industry: client.industry ?? null,
+            scope,
+          }
+        : null,
+    };
+  }
 
   private async ensureEmailAvailable(email: string) {
     const existing = await this.prisma.user.findUnique({ where: { email } });

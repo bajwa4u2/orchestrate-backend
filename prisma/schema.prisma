@@ -37,6 +37,7 @@ enum PlanInterval {
 }
 
 enum SubscriptionStatus {
+  INCOMPLETE
   TRIALING
   ACTIVE
   PAST_DUE
@@ -648,6 +649,11 @@ model Client {
   billingContactName String?
   legalContactName   String?
   opsContactName     String?
+  country            String?
+  area               String?
+  scopeJson          Json?
+  selectedPlan       String?
+  setupCompletedAt   DateTime?
   outboundOffer      String?
   notesText          String?
   metadataJson       Json?
@@ -704,6 +710,8 @@ model Client {
   @@index([organizationId, primaryEmail])
   @@index([organizationId, billingEmail])
   @@index([organizationId, legalEmail])
+  @@index([organizationId, selectedPlan])
+  @@index([organizationId, setupCompletedAt])
 }
 
 model Plan {

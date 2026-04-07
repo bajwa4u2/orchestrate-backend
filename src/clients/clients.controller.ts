@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Query } from '@nestjs/common';
 import { ClientsService } from './clients.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
+import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 
 @Controller('clients')
 export class ClientsController {
@@ -15,5 +16,18 @@ export class ClientsController {
   @Get()
   list(@Query() query: ListClientsDto) {
     return this.clientsService.list(query);
+  }
+
+  @Get('me/setup')
+  getMySetup(@Headers() headers: Record<string, unknown>) {
+    return this.clientsService.getMySetup(headers);
+  }
+
+  @Post('me/setup')
+  saveMySetup(
+    @Headers() headers: Record<string, unknown>,
+    @Body() dto: CreateClientSetupDto,
+  ) {
+    return this.clientsService.saveMySetup(headers, dto);
   }
 }
