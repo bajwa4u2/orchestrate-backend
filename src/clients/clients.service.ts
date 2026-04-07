@@ -140,7 +140,7 @@ export class ClientsService {
       where: { id: client.id },
       data: {
         country: countryName,
-        area: localityName != null && localityName.isNotEmpty
+        area: localityName != null && localityName.trim().length > 0
             ? `${regionName} · ${localityName}`
             : regionName,
         industry: industryLabel,
