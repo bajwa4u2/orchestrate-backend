@@ -26,6 +26,38 @@ export class PublicService {
     };
   }
 
+
+  async getPricing() {
+    return {
+      plans: [
+        {
+          code: 'opportunity',
+          name: 'Opportunity',
+          amountCents: 43500,
+          currencyCode: 'USD',
+          interval: 'month',
+          summary: 'Lead generation, outreach, follow-up, and meeting booking.',
+        },
+        {
+          code: 'revenue',
+          name: 'Revenue',
+          amountCents: 87000,
+          currencyCode: 'USD',
+          interval: 'month',
+          summary: 'Everything in Opportunity plus billing and revenue-side operations.',
+        },
+      ],
+      sequence: [
+        'Choose plan',
+        'Create account',
+        'Verify email',
+        'Define operating profile',
+        'Activate subscription',
+        'Begin service',
+      ],
+    };
+  }
+
   async submitContact(dto: CreatePublicContactDto) {
     const normalized = {
       name: dto.name.trim(),

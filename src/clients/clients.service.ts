@@ -12,6 +12,7 @@ import { PrismaService } from '../database/prisma.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
+import { UpdateClientProfileDto } from './dto/update-client-profile.dto';
 
 @Injectable()
 export class ClientsService {
@@ -73,6 +74,10 @@ export class ClientsService {
 
   async getSetup(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
+    const metadata = this.asObject(client.metadataJson);
+    const setup = this.asObject(metadata.setup);
+    const selectedPlan = this.readString(setup.selectedPlan) ?? client.selectedPlan;
+    const subscriptionStatus = await this.resolveSubscriptionStatus(client.id);
 
     return {
       clientId: client.id,
@@ -80,14 +85,25 @@ export class ClientsService {
       emailVerified: true,
       setupCompleted: Boolean(client.setupCompletedAt),
       setupCompletedAt: client.setupCompletedAt,
-      selectedPlan: client.selectedPlan,
-      subscriptionStatus: await this.resolveSubscriptionStatus(client.id),
+      selectedPlan,
+      subscriptionStatus,
       setup: client.setupCompletedAt
         ? {
-            country: client.country,
-            area: client.area,
-            industry: client.industry,
-            scope: this.readScope(client.scopeJson),
+            countryCode: this.readString(setup.countryCode),
+            countryName: this.readString(setup.countryName) ?? client.country,
+            regionType: this.readString(setup.regionType),
+            regionCode: this.readString(setup.regionCode),
+            regionName: this.readString(setup.regionName),
+            localityName: this.readString(setup.localityName),
+            industryCode: this.readString(setup.industryCode),
+            industryLabel: this.readString(setup.industryLabel) ?? client.industry,
+            selectedPlan,
+            scope: this.readScope(setup.scope ?? client.scopeJson),
+            legacy: {
+              country: client.country,
+              area: client.area,
+              industry: client.industry,
+            },
           }
         : null,
     };
@@ -95,49 +111,65 @@ export class ClientsService {
 
   async saveSetup(headers: Record<string, unknown>, dto: CreateClientSetupDto) {
     const client = await this.resolveClientForRequest(headers);
+    const countryCode = dto.countryCode.trim().toUpperCase();
+    const countryName = dto.countryName.trim();
+    const regionType = dto.regionType.trim();
+    const regionCode = dto.regionCode.trim();
+    const regionName = dto.regionName.trim();
+    const localityName = dto.localityName?.trim() || null;
+    const industryCode = dto.industryCode.trim();
+    const industryLabel = dto.industryLabel.trim();
+    const selectedPlan = dto.selectedPlan.trim().toLowerCase();
+    const normalizedScope = this.scopeForPlan(selectedPlan);
 
-    const country = dto.country.trim();
-    const area = dto.area.trim();
-    const industry = dto.industry.trim();
-    const normalizedScope = dto.scope
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-
-    if (!country.length) {
+    if (!countryCode.length || !countryName.length) {
       throw new BadRequestException('Country is required');
     }
-    if (!area.length) {
-      throw new BadRequestException('Target area is required');
+    if (!regionType.length || !regionCode.length || !regionName.length) {
+      throw new BadRequestException('Region is required');
     }
-    if (!industry.length) {
+    if (!industryCode.length || !industryLabel.length) {
       throw new BadRequestException('Industry is required');
     }
-    if (!normalizedScope.length) {
-      throw new BadRequestException('Select at least one scope');
+    if (!selectedPlan.length) {
+      throw new BadRequestException('Plan is required');
     }
 
-    const selectedPlan =
-      typeof dto.selectedPlan === 'string' && dto.selectedPlan.trim().length > 0
-        ? dto.selectedPlan.trim()
-        : client.selectedPlan;
-
+    const metadata = this.asObject(client.metadataJson);
     const updated = await this.prisma.client.update({
       where: { id: client.id },
       data: {
-        country,
-        area,
-        industry,
+        country: countryName,
+        area: localityName != null && localityName.isNotEmpty
+            ? `${regionName} · ${localityName}`
+            : regionName,
+        industry: industryLabel,
         scopeJson: normalizedScope as Prisma.InputJsonValue,
         selectedPlan,
         setupCompletedAt: new Date(),
+        metadataJson: toPrismaJson({
+          ...metadata,
+          setup: {
+            countryCode,
+            countryName,
+            regionType,
+            regionCode,
+            regionName,
+            localityName,
+            industryCode,
+            industryLabel,
+            selectedPlan,
+            scope: normalizedScope,
+          },
+        }),
       },
     });
 
     const subscriptionStatus = await this.resolveSubscriptionStatus(updated.id);
-    const nextRoute =
-      selectedPlan && selectedPlan.length > 0
-        ? `/client/subscribe?plan=${selectedPlan}`
-        : '/client/workspace';
+    const normalizedStatus = subscriptionStatus.toLowerCase();
+    const nextRoute = normalizedStatus === 'active'
+      ? '/client/workspace'
+      : `/client/subscribe?plan=${selectedPlan}`;
 
     return {
       success: true,
@@ -148,15 +180,90 @@ export class ClientsService {
         setupCompleted: true,
         setupCompletedAt: updated.setupCompletedAt,
         selectedPlan: updated.selectedPlan,
-        subscriptionStatus,
+        subscriptionStatus: normalizedStatus,
         setup: {
-          country: updated.country,
-          area: updated.area,
-          industry: updated.industry,
-          scope: this.readScope(updated.scopeJson),
+          countryCode,
+          countryName,
+          regionType,
+          regionCode,
+          regionName,
+          localityName,
+          industryCode,
+          industryLabel,
+          selectedPlan,
+          scope: normalizedScope,
         },
       },
       nextRoute,
+    };
+  }
+
+  async getProfile(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
+    return this.buildProfileResponse(client);
+  }
+
+  async saveProfile(headers: Record<string, unknown>, dto: UpdateClientProfileDto) {
+    const client = await this.resolveClientForRequest(headers);
+    const metadata = this.asObject(client.metadataJson);
+    const branding = this.asObject(metadata.branding);
+
+    const updated = await this.prisma.client.update({
+      where: { id: client.id },
+      data: {
+        displayName: dto.displayName?.trim() || client.displayName,
+        legalName: dto.legalName?.trim() || client.legalName,
+        websiteUrl: dto.websiteUrl?.trim() || null,
+        bookingUrl: dto.bookingUrl?.trim() || null,
+        primaryTimezone: dto.primaryTimezone?.trim() || null,
+        currencyCode: dto.currencyCode?.trim().toUpperCase() || client.currencyCode,
+        metadataJson: toPrismaJson({
+          ...metadata,
+          branding: {
+            ...branding,
+            brandName: dto.brandName?.trim() || this.readString(branding.brandName) || client.displayName,
+            logoUrl: dto.logoUrl?.trim() || null,
+            primaryColor: dto.primaryColor?.trim() || this.readString(branding.primaryColor) || '#111827',
+            accentColor: dto.accentColor?.trim() || this.readString(branding.accentColor) || '#2563eb',
+            welcomeHeadline:
+              dto.welcomeHeadline?.trim() ||
+              this.readString(branding.welcomeHeadline) ||
+              'Your account is configured for active service operations.',
+          },
+        }),
+      },
+    });
+
+    return {
+      success: true,
+      profile: this.buildProfileResponse(updated).profile,
+    };
+  }
+
+  private buildProfileResponse(client: any) {
+    const metadata = this.asObject(client.metadataJson);
+    const branding = this.asObject(metadata.branding);
+
+    return {
+      profile: {
+        displayName: client.displayName,
+        legalName: client.legalName,
+        websiteUrl: client.websiteUrl,
+        bookingUrl: client.bookingUrl,
+        primaryTimezone: client.primaryTimezone,
+        currencyCode: client.currencyCode,
+        primaryEmail: client.primaryEmail,
+        billingEmail: client.billingEmail,
+        branding: {
+          brandName: this.readString(branding.brandName) ?? client.displayName,
+          logoUrl: this.readString(branding.logoUrl),
+          primaryColor: this.readString(branding.primaryColor) ?? '#111827',
+          accentColor: this.readString(branding.accentColor) ?? '#2563eb',
+          welcomeHeadline:
+            this.readString(branding.welcomeHeadline) ??
+            'Your account is configured for active service operations.',
+        },
+      },
     };
   }
 
@@ -193,6 +300,27 @@ export class ClientsService {
     throw new NotFoundException('Client account not found');
   }
 
+  private scopeForPlan(plan: string) {
+    const normalized = plan.trim().toLowerCase();
+    if (normalized == 'revenue') {
+      return ['lead_generation', 'outreach', 'follow_up', 'meeting_booking', 'billing_collections'];
+    }
+    return ['lead_generation', 'outreach', 'follow_up', 'meeting_booking'];
+  }
+
+  private asObject(value: unknown): Record<string, unknown> {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return {};
+  }
+
+  private readString(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const normalized = value.trim();
+    return normalized.length ? normalized : null;
+  }
+
   private readScope(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return value
@@ -207,6 +335,6 @@ export class ClientsService {
       select: { status: true },
     });
 
-    return subscription?.status ?? 'none';
+    return (subscription?.status ?? 'none').toString();
   }
 }

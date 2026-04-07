@@ -11,6 +11,11 @@ export class PublicController {
     return this.publicService.getOverview();
   }
 
+  @Get('pricing')
+  async getPricing() {
+    return this.publicService.getPricing();
+  }
+
   @Post('contact')
   async submitContact(@Body() dto: CreatePublicContactDto) {
     return this.publicService.submitContact(dto);
