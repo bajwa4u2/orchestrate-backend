@@ -120,7 +120,7 @@ export class ClientsService {
 
     const normalizedScope = dto.scope
       .map((item) => item.trim())
-      .filter((item) => item.isNotEmpty);
+      .filter((item) => typeof item === 'string' && item.trim().length > 0
 
     if (!normalizedScope.length) {
       throw new BadRequestException('At least one scope is required');
@@ -139,7 +139,7 @@ export class ClientsService {
     });
 
     const selectedPlan = updated.selectedPlan ?? null;
-    const nextRoute = selectedPlan != null && selectedPlan.isNotEmpty
+    const nextRoute = selectedPlan != null && selectedPlan.length > 0
       ? `/client/subscribe?plan=${selectedPlan}`
       : '/client/workspace';
 
