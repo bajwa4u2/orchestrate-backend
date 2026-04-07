@@ -4,6 +4,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { AccessContextService } from '../access-context/access-context.service';
@@ -126,7 +127,7 @@ export class ClientsService {
         country,
         area,
         industry,
-        scopeJson: toPrismaJson(normalizedScope),
+        scopeJson: normalizedScope as Prisma.InputJsonValue,
         selectedPlan,
         setupCompletedAt: new Date(),
       },
