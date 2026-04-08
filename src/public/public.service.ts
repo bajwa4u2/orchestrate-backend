@@ -28,7 +28,15 @@ export class PublicService {
 
 
   async getPricing() {
+    const configuredTrialDays = (() => {
+      const raw = process.env.STRIPE_TRIAL_DAYS?.trim();
+      if (!raw) return 15;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.min(30, Math.floor(parsed))) : 0;
+    })();
+
     return {
+      trialDays: configuredTrialDays,
       plans: [
         {
           code: 'opportunity',
@@ -36,6 +44,7 @@ export class PublicService {
           amountCents: 43500,
           currencyCode: 'USD',
           interval: 'month',
+          trialDays: configuredTrialDays,
           summary: 'Lead generation, outreach, follow-up, and meeting booking.',
         },
         {
@@ -44,6 +53,7 @@ export class PublicService {
           amountCents: 87000,
           currencyCode: 'USD',
           interval: 'month',
+          trialDays: configuredTrialDays,
           summary: 'Everything in Opportunity plus billing and revenue-side operations.',
         },
       ],

@@ -414,8 +414,21 @@ export class BillingService {
           : null,
         status: existingSubscription.status,
         alreadyExists: true,
+        trial: {
+          eligible: false,
+          applied: existingSubscription.status === SubscriptionStatus.TRIALING,
+          days:
+            this.resolveConfiguredTrialDays() > 0
+              ? this.resolveConfiguredTrialDays()
+              : null,
+        },
       };
     }
+
+    const configuredTrialDays = this.resolveConfiguredTrialDays();
+    const trialEligible =
+      configuredTrialDays > 0 &&
+      (await this.isClientEligibleForTrial(input.organizationId, input.clientId));
 
     const workflow = await this.workflowsService.createWorkflowRun({
       clientId: input.clientId,
@@ -474,38 +487,58 @@ export class BillingService {
 
     const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
 
-    const checkoutSession = await this.stripeService.getClient().checkout.sessions.create({
-      mode: 'subscription',
-      customer: stripeCustomerId,
-      line_items: [
-        {
-          price: this.stripeService.resolvePriceId(input.plan, input.tier),
-          quantity: 1,
-        },
-      ],
-      success_url: `${normalizedBaseUrl}/client/workspace?billing=success`,
-      cancel_url: `${normalizedBaseUrl}/client/subscribe?plan=${input.plan.toLowerCase()}&tier=${input.tier.toLowerCase()}&canceled=1`,
+    const trialDays = trialEligible ? configuredTrialDays : undefined;
+
+    const checkoutSession = await this.stripeService.createCheckoutSession({
+      customerId: stripeCustomerId,
+      priceId: this.stripeService.resolvePriceId(input.plan, input.tier),
+      successUrl: `${normalizedBaseUrl}/client/workspace?billing=success${trialDays ? '&trial=1' : ''}`,
+      cancelUrl: `${normalizedBaseUrl}/client/subscribe?plan=${input.plan.toLowerCase()}&tier=${input.tier.toLowerCase()}&canceled=1`,
       metadata: {
         organizationId: input.organizationId,
         clientId: input.clientId,
         planCode: plan.code,
         tierCode: input.tier,
+        trialApplied: trialDays ? 'true' : 'false',
+        trialDays: trialDays ? String(trialDays) : '0',
       },
-      subscription_data: {
-        metadata: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          planCode: plan.code,
-          tierCode: input.tier,
-          createdByUserId: input.userId,
-        },
+      subscriptionMetadata: {
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        planCode: plan.code,
+        tierCode: input.tier,
+        createdByUserId: input.userId,
+        trialApplied: trialDays ? 'true' : 'false',
+        trialDays: trialDays ? String(trialDays) : '0',
       },
-      allow_promotion_codes: false,
+      trialDays,
     });
 
     if (!checkoutSession.url) {
       throw new BadRequestException('Stripe did not return a checkout URL');
     }
+
+    await this.prisma.client.update({
+      where: { id: client.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...this.asObject(client.metadataJson),
+          billing: {
+            ...billingMetadata,
+            stripeCustomerId,
+            stripeCheckoutSessionId: checkoutSession.id,
+            stripeCheckoutPreparedAt: new Date().toISOString(),
+            trial: {
+              eligible: trialEligible,
+              prepared: Boolean(trialDays),
+              applied: false,
+              days: trialDays ?? 0,
+              lastPreparedAt: new Date().toISOString(),
+            },
+          },
+        }),
+      },
+    });
 
     await this.sendSubscriptionCreatedEmail(input.organizationId, {
       clientId: input.clientId,
@@ -519,6 +552,9 @@ export class BillingService {
       planCode: plan.code,
       tier: input.tier,
       stripeCustomerId,
+      trialEligible,
+      trialApplied: Boolean(trialDays),
+      trialDays: trialDays ?? 0,
     });
 
     return {
@@ -530,6 +566,11 @@ export class BillingService {
         amountCents: plan.amountCents,
         currencyCode: plan.currencyCode,
         interval: plan.interval,
+      },
+      trial: {
+        eligible: trialEligible,
+        applied: Boolean(trialDays),
+        days: trialDays ?? null,
       },
     };
   }
@@ -588,7 +629,17 @@ export class BillingService {
       status: subscription.status,
       amount: subscription.amountCents / 100,
       currency: subscription.currencyCode,
+      currentPeriodStart: subscription.currentPeriodStart,
       currentPeriodEnd: subscription.currentPeriodEnd,
+      isTrialing: subscription.status === SubscriptionStatus.TRIALING,
+      trialStartedAt:
+        subscription.status === SubscriptionStatus.TRIALING ? subscription.currentPeriodStart : null,
+      trialEndsAt:
+        subscription.status === SubscriptionStatus.TRIALING ? subscription.currentPeriodEnd : null,
+      trialDays:
+        this.readNumber(subscriptionMetadata.trialDays) ??
+        this.readNumber(this.asObject(subscriptionMetadata.trial ?? null).days) ??
+        null,
     };
   }
 
@@ -667,13 +718,15 @@ export class BillingService {
       });
     }
 
-    await this.sendSubscriptionRenewedEmail(subscription.organizationId, {
-      clientId: subscription.clientId,
-      planName: subscription.plan?.name ?? 'Subscription',
-      amountCents: subscription.amountCents,
-      currencyCode: subscription.currencyCode,
-      currentPeriodEnd: subscription.currentPeriodEnd ?? undefined,
-    });
+    if ((invoice.amount_paid ?? 0) > 0) {
+      await this.sendSubscriptionRenewedEmail(subscription.organizationId, {
+        clientId: subscription.clientId,
+        planName: subscription.plan?.name ?? 'Subscription',
+        amountCents: subscription.amountCents,
+        currencyCode: subscription.currencyCode,
+        currentPeriodEnd: subscription.currentPeriodEnd ?? undefined,
+      });
+    }
 
     return { ok: true };
   }
@@ -763,9 +816,16 @@ export class BillingService {
           status: this.mapStripeSubscriptionStatus(stripeSubscription.status),
           amountCents: plan.amountCents,
           currencyCode: plan.currencyCode ?? 'USD',
-          billingAnchorAt: this.readUnixTimestamp(stripeSubscription.current_period_start) ?? new Date(),
-          currentPeriodStart: this.readUnixTimestamp(stripeSubscription.current_period_start),
-          currentPeriodEnd: this.readUnixTimestamp(stripeSubscription.current_period_end),
+          billingAnchorAt:
+            this.readUnixTimestamp(stripeSubscription.billing_cycle_anchor) ??
+            this.readUnixTimestamp(stripeSubscription.current_period_start) ??
+            new Date(),
+          currentPeriodStart:
+            this.readUnixTimestamp(stripeSubscription.trial_start) ??
+            this.readUnixTimestamp(stripeSubscription.current_period_start),
+          currentPeriodEnd:
+            this.readUnixTimestamp(stripeSubscription.trial_end) ??
+            this.readUnixTimestamp(stripeSubscription.current_period_end),
           canceledAt: stripeSubscription.canceled_at
             ? this.readUnixTimestamp(stripeSubscription.canceled_at) ?? new Date()
             : null,
@@ -780,6 +840,14 @@ export class BillingService {
             stripeSubscriptionStatus: stripeSubscription.status,
             cancelAtPeriodEnd: Boolean(stripeSubscription.cancel_at_period_end),
             tierCode: tierCode ?? null,
+            trialApplied: Boolean(stripeSubscription.trial_end),
+            trialDays:
+              this.readNumber(this.asObject(stripeSubscription.metadata).trialDays) ??
+              this.resolveTrialDaysFromStripe(stripeSubscription),
+            trialStart:
+              this.readUnixTimestamp(stripeSubscription.trial_start)?.toISOString() ?? null,
+            trialEnd:
+              this.readUnixTimestamp(stripeSubscription.trial_end)?.toISOString() ?? null,
           }),
         },
       });
@@ -792,9 +860,13 @@ export class BillingService {
       data: {
         status: this.mapStripeSubscriptionStatus(stripeSubscription.status),
         currentPeriodStart:
-          this.readUnixTimestamp(stripeSubscription.current_period_start) ?? subscription.currentPeriodStart,
+          this.readUnixTimestamp(stripeSubscription.trial_start) ??
+          this.readUnixTimestamp(stripeSubscription.current_period_start) ??
+          subscription.currentPeriodStart,
         currentPeriodEnd:
-          this.readUnixTimestamp(stripeSubscription.current_period_end) ?? subscription.currentPeriodEnd,
+          this.readUnixTimestamp(stripeSubscription.trial_end) ??
+          this.readUnixTimestamp(stripeSubscription.current_period_end) ??
+          subscription.currentPeriodEnd,
         canceledAt: stripeSubscription.canceled_at
           ? this.readUnixTimestamp(stripeSubscription.canceled_at) ?? new Date()
           : null,
@@ -810,11 +882,119 @@ export class BillingService {
             this.readString(this.asObject(stripeSubscription.metadata).tierCode) ??
             this.readString(this.asObject(subscription.metadataJson).tierCode) ??
             null,
+          trialApplied: Boolean(stripeSubscription.trial_end),
+          trialDays:
+            this.readNumber(this.asObject(stripeSubscription.metadata).trialDays) ??
+            this.readNumber(this.asObject(subscription.metadataJson).trialDays) ??
+            this.resolveTrialDaysFromStripe(stripeSubscription),
+          trialStart:
+            this.readUnixTimestamp(stripeSubscription.trial_start)?.toISOString() ??
+            this.readString(this.asObject(subscription.metadataJson).trialStart) ??
+            null,
+          trialEnd:
+            this.readUnixTimestamp(stripeSubscription.trial_end)?.toISOString() ??
+            this.readString(this.asObject(subscription.metadataJson).trialEnd) ??
+            null,
         }),
       },
     });
 
     return { ok: true };
+  }
+
+  async handleTrialWillEnd(stripeSubscription: any) {
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { externalRef: stripeSubscription.id },
+      include: { plan: true, client: true },
+    });
+
+    if (!subscription) return { ok: true };
+
+    const trialEnd = this.readUnixTimestamp(stripeSubscription.trial_end) ?? subscription.currentPeriodEnd;
+    const recipientEmail = await this.resolveClientEmail(subscription.organizationId, subscription.clientId);
+
+    if (!recipientEmail) return { ok: true };
+
+    const planName = subscription.plan?.name ?? 'Subscription';
+    const amountText = formatMoney(subscription.amountCents, subscription.currencyCode);
+
+    await this.emailsService.sendDirectEmail({
+      toEmail: recipientEmail,
+      toName: subscription.client?.displayName ?? undefined,
+      category: 'billing',
+      subject: 'Your trial is ending soon',
+      bodyText: [
+        `Your ${planName} trial with Orchestrate will end on ${trialEnd ? trialEnd.toUTCString() : 'the scheduled billing date'}.`,
+        `When the trial ends, billing will begin at ${amountText} per month unless you cancel before then.`,
+        `You can manage or cancel your subscription from the billing portal at any time.`,
+      ].join('\n\n'),
+      bodyHtml: [
+        `<p>Your <strong>${planName}</strong> trial with Orchestrate will end on <strong>${trialEnd ? trialEnd.toUTCString() : 'the scheduled billing date'}</strong>.</p>`,
+        `<p>When the trial ends, billing will begin at <strong>${amountText} per month</strong> unless you cancel before then.</p>`,
+        `<p>You can manage or cancel your subscription from the billing portal at any time.</p>`,
+      ].join(''),
+      replyToEmail: process.env.EMAIL_REPLY_TO_SUPPORT?.trim() || 'support@orchestrateops.com',
+      templateVariables: {
+        plan_name: planName,
+        trial_end: trialEnd?.toISOString() ?? null,
+        amount_text: amountText,
+      },
+    });
+
+    return { ok: true };
+  }
+
+  private async isClientEligibleForTrial(organizationId: string, clientId: string) {
+    const subscriptionCount = await this.prisma.subscription.count({
+      where: {
+        organizationId,
+        clientId,
+      },
+    });
+
+    if (subscriptionCount > 0) {
+      return false;
+    }
+
+    const client = await this.prisma.client.findFirst({
+      where: { id: clientId, organizationId },
+      select: { metadataJson: true },
+    });
+
+    if (!client) {
+      return false;
+    }
+
+    const billingMetadata = this.asObject(this.asObject(client.metadataJson).billing as Prisma.JsonValue);
+    const priorTrialApplied = this.readBoolean(this.asObject(billingMetadata.trial as Prisma.JsonValue).applied);
+
+    return !priorTrialApplied;
+  }
+
+  private resolveConfiguredTrialDays() {
+    const raw = process.env.STRIPE_TRIAL_DAYS?.trim();
+    if (!raw) return 15;
+
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+
+    return Math.max(1, Math.min(30, Math.floor(parsed)));
+  }
+
+  private resolveTrialDaysFromStripe(stripeSubscription: any) {
+    const trialStart = this.readUnixTimestamp(stripeSubscription.trial_start);
+    const trialEnd = this.readUnixTimestamp(stripeSubscription.trial_end);
+
+    if (!trialStart || !trialEnd) {
+      return null;
+    }
+
+    const diffMs = trialEnd.getTime() - trialStart.getTime();
+    if (diffMs <= 0) {
+      return null;
+    }
+
+    return Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
   }
 
   private async resolvePlan(
@@ -1150,8 +1330,32 @@ export class BillingService {
     return value as Record<string, unknown>;
   }
 
-  private readString(value: unknown) {
-    return typeof value === 'string' && value.trim().length ? value.trim() : undefined;
+  private async resolveClientEmail(organizationId: string, clientId: string) {
+    const recipient = await this.emailsService.resolveClientRecipient(organizationId, clientId);
+    return recipient?.email ?? null;
+  }
+
+  private readString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim().length ? value.trim() : null;
+  }
+
+  private readNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  private readBoolean(value: unknown): boolean {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      return normalized === 'true' || normalized === '1' || normalized === 'yes';
+    }
+    if (typeof value === 'number') return value === 1;
+    return false;
   }
 
   private readUnixTimestamp(value: unknown) {

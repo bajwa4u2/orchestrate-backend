@@ -17,6 +17,15 @@ type CreatePortalSessionInput = {
   customerId: string;
   returnUrl: string;
 };
+type CreateCheckoutSessionInput = {
+  customerId: string;
+  priceId: string;
+  successUrl: string;
+  cancelUrl: string;
+  metadata?: Record<string, string>;
+  subscriptionMetadata?: Record<string, string>;
+  trialDays?: number;
+};
 
 type SubscriptionPlanCode = 'OPPORTUNITY' | 'REVENUE';
 type SubscriptionTierCode = 'FOCUSED' | 'MULTI' | 'PRECISION';
@@ -56,6 +65,27 @@ export class StripeService {
         save_default_payment_method: 'on_subscription',
       },
       expand: ['latest_invoice.payment_intent'],
+    });
+  }
+
+  async createCheckoutSession(input: CreateCheckoutSessionInput) {
+    const normalizedTrialDays =
+      typeof input.trialDays === 'number' && Number.isFinite(input.trialDays) && input.trialDays > 0
+        ? Math.max(1, Math.min(30, Math.floor(input.trialDays)))
+        : undefined;
+
+    return this.stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: input.customerId,
+      line_items: [{ price: input.priceId, quantity: 1 }],
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      metadata: input.metadata,
+      subscription_data: {
+        metadata: input.subscriptionMetadata,
+        ...(normalizedTrialDays ? { trial_period_days: normalizedTrialDays } : {}),
+      },
+      allow_promotion_codes: false,
     });
   }
 

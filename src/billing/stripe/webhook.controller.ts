@@ -56,6 +56,10 @@ export class WebhookController {
         await this.billingService.handleSubscriptionUpdated(event.data.object);
         break;
 
+      case 'customer.subscription.trial_will_end':
+        await this.billingService.handleTrialWillEnd(event.data.object);
+        break;
+
       default:
         break;
     }
