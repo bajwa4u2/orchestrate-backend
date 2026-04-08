@@ -15,6 +15,7 @@ type CreateSubscriptionIntentInput = {
   userId: string;
   email?: string;
   plan: 'OPPORTUNITY' | 'REVENUE';
+  tier: 'FOCUSED' | 'MULTI' | 'PRECISION';
 };
 
 type PortalSessionInput = {
@@ -315,7 +316,7 @@ export class BillingService {
       };
     }
 
-    const plan = await this.resolvePlan(input.organizationId, input.plan);
+    const plan = await this.resolvePlan(input.organizationId, input.plan, input.tier);
     const clientMetadata = this.asObject(client.metadataJson);
     const billingMetadata = this.asObject((clientMetadata as Record<string, unknown>).billing as Prisma.JsonValue);
 
@@ -329,6 +330,7 @@ export class BillingService {
           organizationId: input.organizationId,
           clientId: input.clientId,
           planCode: plan.code,
+          tierCode: input.tier,
         },
       });
 
@@ -364,22 +366,24 @@ export class BillingService {
       customer: stripeCustomerId,
       line_items: [
         {
-          price: this.resolveStripePriceId(input.plan),
+          price: this.resolveStripePriceId(input.plan, input.tier),
           quantity: 1,
         },
       ],
       success_url: `${normalizedBaseUrl}/client/workspace?billing=success`,
-      cancel_url: `${normalizedBaseUrl}/client/subscribe?plan=${input.plan.toLowerCase()}&canceled=1`,
+      cancel_url: `${normalizedBaseUrl}/client/subscribe?plan=${input.plan.toLowerCase()}&tier=${input.tier.toLowerCase()}&canceled=1`,
       metadata: {
         organizationId: input.organizationId,
         clientId: input.clientId,
         planCode: plan.code,
+        tierCode: input.tier,
       },
       subscription_data: {
         metadata: {
           organizationId: input.organizationId,
           clientId: input.clientId,
           planCode: plan.code,
+          tierCode: input.tier,
           createdByUserId: input.userId,
         },
       },
@@ -455,8 +459,12 @@ export class BillingService {
       return null;
     }
 
+    const subscriptionMetadata = this.asObject(subscription.metadataJson);
+
     return {
       plan: subscription.plan?.name ?? null,
+      planCode: subscription.plan?.code ?? null,
+      tier: this.readString(subscriptionMetadata.tierCode) ?? null,
       status: subscription.status,
       amount: subscription.amountCents / 100,
       currency: subscription.currencyCode,
@@ -566,6 +574,7 @@ export class BillingService {
       const organizationId = this.readString(metadata.organizationId);
       const clientId = this.readString(metadata.clientId);
       const planCode = this.readString(metadata.planCode);
+      const tierCode = this.readString(metadata.tierCode);
 
       if (!organizationId || !clientId || !planCode) {
         return { ok: true };
@@ -604,6 +613,7 @@ export class BillingService {
             stripeSubscriptionId: stripeSubscription.id,
             stripeSubscriptionStatus: stripeSubscription.status,
             cancelAtPeriodEnd: Boolean(stripeSubscription.cancel_at_period_end),
+            tierCode: tierCode ?? null,
           }),
         },
       });
@@ -630,6 +640,10 @@ export class BillingService {
             typeof stripeSubscription.customer === 'string'
               ? stripeSubscription.customer
               : stripeSubscription.customer?.id,
+          tierCode:
+            this.readString(this.asObject(stripeSubscription.metadata).tierCode) ??
+            this.readString(this.asObject(subscription.metadataJson).tierCode) ??
+            null,
         }),
       },
     });
@@ -637,8 +651,12 @@ export class BillingService {
     return { ok: true };
   }
 
-  private async resolvePlan(organizationId: string, plan: 'OPPORTUNITY' | 'REVENUE') {
-    const desiredCode = plan === 'OPPORTUNITY' ? 'OPPORTUNITY_MONTHLY' : 'REVENUE_MONTHLY';
+  private async resolvePlan(
+    organizationId: string,
+    plan: 'OPPORTUNITY' | 'REVENUE',
+    tier: 'FOCUSED' | 'MULTI' | 'PRECISION',
+  ) {
+    const desiredCode = `${plan}_${tier}_MONTHLY`;
 
     const existing = await this.prisma.plan.findFirst({
       where: { organizationId, code: desiredCode, isActive: true },
@@ -646,60 +664,131 @@ export class BillingService {
 
     if (existing) return existing;
 
-    const seed = {
-      code: desiredCode,
-      name: plan === 'OPPORTUNITY' ? 'Opportunity' : 'Revenue',
-      description:
-        plan === 'OPPORTUNITY'
-          ? 'Generate meetings for your business.'
-          : 'Generate meetings and manage the billing that follows.',
-      amountCents: plan === 'OPPORTUNITY' ? 43500 : 87000,
-      currencyCode: 'USD',
-      interval: 'MONTHLY' as const,
-      featuresJson:
-        plan === 'OPPORTUNITY'
-          ? {
-              positioning: 'From first contact to scheduled meetings.',
-              scope: ['lead sourcing', 'outreach execution', 'follow-ups', 'meeting booking'],
-            }
-          : {
-              positioning: 'From meeting to invoice, payment, and record.',
-              scope: [
-                'lead sourcing',
-                'outreach execution',
-                'follow-ups',
-                'meeting booking',
-                'invoices',
-                'payment tracking',
-                'agreements',
-                'statements',
-              ],
-            },
-    };
+    const isOpportunity = plan === 'OPPORTUNITY';
+    const namePrefix = isOpportunity ? 'Opportunity' : 'Revenue';
+
+    const tierLabel =
+      tier === 'FOCUSED'
+        ? 'Focused'
+        : tier === 'MULTI'
+          ? 'Multi-Market'
+          : 'Precision';
+
+    const description = isOpportunity
+      ? tier === 'FOCUSED'
+        ? 'Operate within a single country across multiple regions with structured outreach and follow-up.'
+        : tier === 'MULTI'
+          ? 'Operate across multiple countries with structured outreach and follow-up.'
+          : 'Advanced targeting with city-level precision and prioritized market execution.'
+      : tier === 'FOCUSED'
+        ? 'Operate within a single country across multiple regions with full outreach and billing support.'
+        : tier === 'MULTI'
+          ? 'Operate across multiple countries with full outreach and billing support.'
+          : 'Advanced targeting with city-level precision and full operational control.';
+
+    const amountCents = this.resolvePlanAmountCents(plan, tier);
+
+    const featuresJson = isOpportunity
+      ? {
+          positioning:
+            tier === 'FOCUSED'
+              ? 'Operate within one country and scale across regions.'
+              : tier === 'MULTI'
+                ? 'Run outreach across multiple countries with one operating system.'
+                : 'Direct outreach with city-level precision and market priority control.',
+          scope: [
+            'lead sourcing',
+            'outreach execution',
+            'follow-ups',
+            'meeting booking',
+          ],
+          coverage: this.resolveCoverageFeatures(tier),
+        }
+      : {
+          positioning:
+            tier === 'FOCUSED'
+              ? 'Operate within one country with billing and collection continuity.'
+              : tier === 'MULTI'
+                ? 'Run outreach and billing operations across multiple countries.'
+                : 'Direct outreach and billing with precision market control.',
+          scope: [
+            'lead sourcing',
+            'outreach execution',
+            'follow-ups',
+            'meeting booking',
+            'invoices',
+            'payment tracking',
+            'agreements',
+            'statements',
+          ],
+          coverage: this.resolveCoverageFeatures(tier),
+        };
 
     return this.prisma.plan.create({
       data: {
         organizationId,
-        ...seed,
+        code: desiredCode,
+        name: `${namePrefix} ${tierLabel}`,
+        description,
+        amountCents,
+        currencyCode: 'USD',
+        interval: 'MONTHLY' as const,
+        featuresJson,
       },
     });
   }
 
-  private resolveStripePriceId(plan: 'OPPORTUNITY' | 'REVENUE') {
-    const priceId =
-      plan === 'OPPORTUNITY'
-        ? process.env.STRIPE_PRICE_OPPORTUNITY?.trim()
-        : process.env.STRIPE_PRICE_REVENUE?.trim();
+  private resolveStripePriceId(plan: 'OPPORTUNITY' | 'REVENUE', tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
+    const envKey = `STRIPE_PRICE_${plan}_${tier}`;
+    const priceId = process.env[envKey]?.trim();
 
     if (!priceId) {
-      throw new BadRequestException(
-        plan === 'OPPORTUNITY'
-          ? 'Missing STRIPE_PRICE_OPPORTUNITY env variable'
-          : 'Missing STRIPE_PRICE_REVENUE env variable',
-      );
+      throw new BadRequestException(`Missing ${envKey} env variable`);
     }
 
     return priceId;
+  }
+
+  private resolvePlanAmountCents(plan: 'OPPORTUNITY' | 'REVENUE', tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
+    if (plan === 'OPPORTUNITY') {
+      if (tier === 'FOCUSED') return 43500;
+      if (tier === 'MULTI') return 64500;
+      return 97500;
+    }
+
+    if (tier === 'FOCUSED') return 87000;
+    if (tier === 'MULTI') return 129000;
+    return 195000;
+  }
+
+  private resolveCoverageFeatures(tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
+    if (tier === 'FOCUSED') {
+      return {
+        countries: 1,
+        regions: 'multiple',
+        cityTargeting: false,
+        includeExcludeGeography: false,
+        marketPriorityOrder: false,
+      };
+    }
+
+    if (tier === 'MULTI') {
+      return {
+        countries: 'multiple',
+        regions: 'multiple',
+        cityTargeting: false,
+        includeExcludeGeography: false,
+        marketPriorityOrder: false,
+      };
+    }
+
+    return {
+      countries: 'multiple',
+      regions: 'multiple',
+      cityTargeting: true,
+      includeExcludeGeography: true,
+      marketPriorityOrder: true,
+    };
   }
 
   private mapStripeSubscriptionStatus(status: any): SubscriptionStatus {

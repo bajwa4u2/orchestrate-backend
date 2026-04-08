@@ -1,65 +1,60 @@
 import { Injectable } from '@nestjs/common';
-const Stripe = require('stripe');
-
-type CreateCustomerInput = {
-  email?: string;
-  name?: string;
-  metadata?: Record<string, string>;
-};
-
-type CreateSubscriptionInput = {
-  customerId: string;
-  priceId: string;
-  metadata?: Record<string, string>;
-};
-
-type CreatePortalSessionInput = {
-  customerId: string;
-  returnUrl: string;
-};
+import Stripe from 'stripe';
 
 @Injectable()
 export class StripeService {
-  private readonly stripe: any;
+  private stripe: Stripe;
 
   constructor() {
-    const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
-    if (!secretKey) {
-      throw new Error('Missing STRIPE_SECRET_KEY environment variable');
+    this.stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+      apiVersion: '2023-10-16',
+    });
+  }
+
+  private resolvePriceId(plan: string, tier: string): string {
+    if (plan === 'opportunity') {
+      if (tier === 'focused') return process.env.STRIPE_PRICE_OPPORTUNITY_FOCUSED!;
+      if (tier === 'multi') return process.env.STRIPE_PRICE_OPPORTUNITY_MULTI!;
+      if (tier === 'precision') return process.env.STRIPE_PRICE_OPPORTUNITY_PRECISION!;
     }
 
-    this.stripe = new Stripe(secretKey);
+    if (plan === 'revenue') {
+      if (tier === 'focused') return process.env.STRIPE_PRICE_REVENUE_FOCUSED!;
+      if (tier === 'multi') return process.env.STRIPE_PRICE_REVENUE_MULTI!;
+      if (tier === 'precision') return process.env.STRIPE_PRICE_REVENUE_PRECISION!;
+    }
+
+    throw new Error('Invalid plan or tier');
   }
 
-  getClient() {
-    return this.stripe;
-  }
+  async createCheckoutSession(
+    plan: string,
+    tier: string,
+    customerEmail: string,
+  ): Promise<string> {
+    const priceId = this.resolvePriceId(plan, tier);
 
-  async createCustomer(input: CreateCustomerInput) {
-    return this.stripe.customers.create({
-      email: input.email,
-      name: input.name,
-      metadata: input.metadata,
-    });
-  }
+    const session = await this.stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      customer_email: customerEmail,
 
-  async createSubscription(input: CreateSubscriptionInput) {
-    return this.stripe.subscriptions.create({
-      customer: input.customerId,
-      items: [{ price: input.priceId }],
-      metadata: input.metadata,
-      payment_behavior: 'default_incomplete',
-      payment_settings: {
-        save_default_payment_method: 'on_subscription',
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+
+      success_url: process.env.STRIPE_SUCCESS_URL!,
+      cancel_url: process.env.STRIPE_CANCEL_URL!,
+
+      metadata: {
+        plan,
+        tier,
       },
-      expand: ['latest_invoice.payment_intent'],
     });
-  }
 
-  async createPortalSession(input: CreatePortalSessionInput) {
-    return this.stripe.billingPortal.sessions.create({
-      customer: input.customerId,
-      return_url: input.returnUrl,
-    });
+    return session.url!;
   }
 }

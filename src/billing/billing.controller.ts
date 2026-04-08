@@ -58,7 +58,7 @@ export class BillingController {
   @Post('subscribe')
   async subscribe(
     @Headers() headers: Record<string, unknown>,
-    @Body() body: { plan: 'OPPORTUNITY' | 'REVENUE' },
+    @Body() body: { plan: 'OPPORTUNITY' | 'REVENUE'; tier: 'FOCUSED' | 'MULTI' | 'PRECISION' },
   ) {
     const context = await this.accessContextService.requireClient(headers);
     return this.billingService.createSubscriptionIntent({
@@ -67,6 +67,7 @@ export class BillingController {
       userId: context.userId!,
       email: context.email,
       plan: body.plan,
+      tier: body.tier,
     });
   }
   
