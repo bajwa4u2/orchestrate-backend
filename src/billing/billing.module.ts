@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AccessContextModule } from '../access-context/access-context.module';
 import { EmailsModule } from '../emails/emails.module';
+import { WorkflowsModule } from '../workflows/workflows.module';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 import { ReceiptDocumentBuilder } from './dto/receipt-document.builder';
@@ -10,7 +11,7 @@ import { StripeService } from './stripe/stripe.service';
 import { WebhookController } from './stripe/webhook.controller';
 
 @Module({
-  imports: [AccessContextModule, EmailsModule],
+  imports: [AccessContextModule, EmailsModule, WorkflowsModule],
   controllers: [BillingController, WebhookController],
   providers: [
     BillingService,

@@ -1,17 +1,25 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  ArtifactLifecycle,
+  DispatchLifecycle,
   DocumentDispatchStatus,
   EmailCategory,
   EmailDeliveryMode,
   EmailDeliveryProvider,
   EmailEventType,
   InvoiceStatus,
-  Prisma,
+  RecordSource,
   TemplateType,
+  WorkflowLane,
+  WorkflowStatus,
+  WorkflowTrigger,
+  WorkflowType,
+  Prisma,
 } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
+import { WorkflowsService } from '../workflows/workflows.service';
 import { InvoiceDocumentBuilder } from './dto/invoice-document.builder';
 import { InvoiceEmailRenderer } from './dto/invoice-email.renderer';
 import { InvoicePdfService } from './invoice-pdf.service';
@@ -24,6 +32,7 @@ export class InvoiceDeliveryService {
     private readonly invoiceEmailRenderer: InvoiceEmailRenderer,
     private readonly invoicePdfService: InvoicePdfService,
     private readonly emailsService: EmailsService,
+    private readonly workflowsService: WorkflowsService,
   ) {}
 
   async sendInvoiceEmail(params: {
@@ -68,6 +77,25 @@ export class InvoiceDeliveryService {
       throw new BadRequestException('No billing recipient email was found for this invoice');
     }
 
+    const workflow = invoice.workflowRunId
+      ? await this.workflowsService.startWorkflowRun(invoice.workflowRunId, {
+          stage: 'invoice-delivery',
+          invoiceId: invoice.id,
+        })
+      : await this.workflowsService.createWorkflowRun({
+          clientId: invoice.clientId,
+          subscriptionId: invoice.subscriptionId ?? undefined,
+          invoiceId: invoice.id,
+          lane: WorkflowLane.DOCUMENTS,
+          type: WorkflowType.DOCUMENT_DISPATCH,
+          status: WorkflowStatus.RUNNING,
+          trigger: params.actorUserId ? WorkflowTrigger.MANUAL_OPERATOR : WorkflowTrigger.SYSTEM_EVENT,
+          source: RecordSource.SYSTEM_GENERATED,
+          title: `Invoice dispatch ${invoice.invoiceNumber}`,
+          startedAt: new Date(),
+        });
+
+    const workflowRunId = workflow.id;
     const normalizedInvoice = this.invoiceDocumentBuilder.buildFromRecord(invoice);
     const shouldAttachPdf = params.attachPdf !== false;
     const generatedPdf = shouldAttachPdf
@@ -115,10 +143,13 @@ export class InvoiceDeliveryService {
         organizationId: invoice.organizationId,
         clientId: invoice.clientId,
         invoiceId: invoice.id,
+        workflowRunId,
         kind: TemplateType.INVOICE,
         emailCategory: EmailCategory.BILLING,
         emailEvent: EmailEventType.INVOICE_ISSUED,
         status: dispatchStatus,
+        source: RecordSource.SYSTEM_GENERATED,
+        dispatchState: transport.mode === 'resend' ? DispatchLifecycle.SENT : DispatchLifecycle.QUEUED,
         deliveryChannel: 'EMAIL',
         deliveryProvider: this.mapDeliveryProvider(transport.mode),
         deliveryMode: this.mapDeliveryMode(transport.mode),
@@ -156,11 +187,22 @@ export class InvoiceDeliveryService {
     const updatedInvoice = await this.db.invoice.update({
       where: { id: invoice.id },
       data: {
+        workflowRunId,
+        source: RecordSource.SYSTEM_GENERATED,
+        lifecycle: transport.mode === 'resend' ? ArtifactLifecycle.DISPATCHED : ArtifactLifecycle.ISSUED,
         status: nextStatus,
         issuedAt,
         lastSentAt: transport.mode === 'disabled' ? invoice.lastSentAt : now,
         pdfGeneratedAt: generatedPdf ? now : invoice.pdfGeneratedAt,
       },
+    });
+
+    await this.workflowsService.completeWorkflowRun(workflowRunId, {
+      invoiceId: updatedInvoice.id,
+      dispatchId: dispatch.id,
+      invoiceNumber: updatedInvoice.invoiceNumber,
+      dispatchState: dispatch.dispatchState,
+      transportMode: transport.mode,
     });
 
     return {
@@ -229,7 +271,7 @@ export class InvoiceDeliveryService {
     return value as Record<string, unknown>;
   }
 
-  private mapDeliveryMode(mode: 'resend' | 'log' | 'disabled'): EmailDeliveryMode {
+  private mapDeliveryMode(mode: 'resend' | 'log' | 'disabled') {
     switch (mode) {
       case 'resend':
         return EmailDeliveryMode.RESEND;
@@ -240,7 +282,7 @@ export class InvoiceDeliveryService {
     }
   }
 
-  private mapDeliveryProvider(mode: 'resend' | 'log' | 'disabled'): EmailDeliveryProvider {
+  private mapDeliveryProvider(mode: 'resend' | 'log' | 'disabled') {
     switch (mode) {
       case 'resend':
         return EmailDeliveryProvider.RESEND;

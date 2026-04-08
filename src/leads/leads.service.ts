@@ -1,5 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import { JobType, LeadStatus, Prisma } from '@prisma/client';
+import {
+  ActivityVisibility,
+  JobType,
+  LeadQualificationState,
+  LeadSourceType,
+  LeadStatus,
+  Prisma,
+  RecordSource,
+} from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
@@ -17,9 +25,21 @@ export class LeadsService {
 
   async create(dto: CreateLeadDto) {
     return this.prisma.$transaction(async (tx) => {
+      const campaign = await tx.campaign.findUnique({
+        where: { id: dto.campaignId },
+        select: {
+          id: true,
+          workflowRunId: true,
+          generationState: true,
+        },
+      });
+
       let accountId = dto.accountId;
       let contactId = dto.contactId;
       let leadSourceId = dto.leadSourceId;
+      const workflowRunId = campaign?.workflowRunId ?? null;
+      const recordSource = this.resolveLeadRecordSource(dto.sourceType);
+      const qualificationState = this.resolveQualificationState(dto.status);
 
       if (!accountId && dto.companyName) {
         const account = await tx.account.create({
@@ -69,8 +89,10 @@ export class LeadsService {
             organizationId: dto.organizationId,
             clientId: dto.clientId,
             campaignId: dto.campaignId,
+            workflowRunId,
             name: dto.sourceName,
             type: dto.sourceType,
+            source: recordSource,
             sourceRef: dto.sourceRef,
             importedAt: new Date(),
           },
@@ -86,7 +108,10 @@ export class LeadsService {
           accountId,
           contactId,
           leadSourceId,
+          workflowRunId,
           status: dto.status,
+          source: recordSource,
+          qualificationState,
           priority: dto.priority,
           score: dto.score == null ? undefined : new Prisma.Decimal(dto.score),
           metadataJson: toPrismaJson(dto.metadataJson),
@@ -104,13 +129,29 @@ export class LeadsService {
           organizationId: dto.organizationId,
           clientId: dto.clientId,
           campaignId: dto.campaignId,
+          workflowRunId,
           kind: 'LEAD_IMPORTED',
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
           subjectType: 'lead',
           subjectId: lead.id,
           summary: `Lead ${lead.id} added`,
-          metadataJson: { leadId: lead.id } as Prisma.InputJsonValue,
+          metadataJson: {
+            leadId: lead.id,
+            workflowRunId,
+            source: recordSource,
+            qualificationState,
+          } as Prisma.InputJsonValue,
         },
       });
+
+      if (campaign?.id && (!campaign.generationState || campaign.generationState === 'INIT' || campaign.generationState === 'TARGETING_READY')) {
+        await tx.campaign.update({
+          where: { id: campaign.id },
+          data: {
+            generationState: 'LEADS_READY',
+          },
+        });
+      }
 
       return lead;
     });
@@ -142,6 +183,7 @@ export class LeadsService {
           contact: true,
           campaign: true,
           leadSource: true,
+          workflowRun: true,
         },
         orderBy: [{ priority: 'desc' }, { createdAt: 'desc' }],
         skip,
@@ -173,5 +215,46 @@ export class LeadsService {
       ...dto,
       jobType: JobType.FOLLOWUP_SEND,
     });
+  }
+
+  private resolveLeadRecordSource(sourceType?: LeadSourceType): RecordSource {
+    switch (sourceType) {
+      case LeadSourceType.CSV_IMPORT:
+      case LeadSourceType.GOOGLE_MAPS:
+      case LeadSourceType.DIRECTORY:
+      case LeadSourceType.API:
+      case LeadSourceType.REFERRAL:
+        return RecordSource.IMPORTED;
+      case LeadSourceType.INTERNAL_GROWTH:
+        return RecordSource.AI_GENERATED;
+      case LeadSourceType.MANUAL:
+      case LeadSourceType.OTHER:
+      default:
+        return RecordSource.USER_CREATED;
+    }
+  }
+
+  private resolveQualificationState(status?: LeadStatus): LeadQualificationState | undefined {
+    switch (status) {
+      case LeadStatus.NEW:
+      case LeadStatus.ENRICHED:
+        return LeadQualificationState.DISCOVERED;
+      case LeadStatus.QUALIFIED:
+        return LeadQualificationState.QUALIFIED;
+      case LeadStatus.CONTACTED:
+      case LeadStatus.FOLLOWED_UP:
+        return LeadQualificationState.CONTACTED;
+      case LeadStatus.REPLIED:
+        return LeadQualificationState.REPLIED;
+      case LeadStatus.INTERESTED:
+        return LeadQualificationState.INTERESTED;
+      case LeadStatus.BOOKED:
+        return LeadQualificationState.CONVERTED;
+      case LeadStatus.CLOSED_LOST:
+      case LeadStatus.SUPPRESSED:
+        return LeadQualificationState.DISQUALIFIED;
+      default:
+        return undefined;
+    }
   }
 }

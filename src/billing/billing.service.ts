@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InvoiceStatus, PaymentMethodType, PaymentStatus, Prisma, SubscriptionStatus } from '@prisma/client';
+import { ActivityKind, ActivityVisibility, ArtifactLifecycle, InvoiceStatus, PaymentMethodType, PaymentStatus, Prisma, RecordSource, SubscriptionStatus, WorkflowLane, WorkflowStatus, WorkflowTrigger, WorkflowType } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
@@ -8,6 +8,7 @@ import { ORCHESTRATE_LEGAL_IDENTITY } from '../financial-documents/legal-identit
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { StripeService } from './stripe/stripe.service';
+import { WorkflowsService } from '../workflows/workflows.service';
 
 type CreateSubscriptionIntentInput = {
   organizationId: string;
@@ -29,6 +30,7 @@ export class BillingService {
     private readonly prisma: PrismaService,
     private readonly emailsService: EmailsService,
     private readonly stripeService: StripeService,
+    private readonly workflowsService: WorkflowsService,
   ) {}
 
   async overview(organizationId: string, clientId?: string) {
@@ -158,6 +160,25 @@ export class BillingService {
     const taxCents = dto.taxCents ?? 0;
     const totalCents = subtotalCents + taxCents;
 
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: dto.clientId,
+      subscriptionId: dto.subscriptionId ?? undefined,
+      lane: WorkflowLane.REVENUE,
+      type: WorkflowType.BILLING_CYCLE,
+      status: WorkflowStatus.RUNNING,
+      trigger: createdById ? WorkflowTrigger.MANUAL_OPERATOR : WorkflowTrigger.SYSTEM_EVENT,
+      source: createdById ? RecordSource.OPERATOR_CREATED : RecordSource.SYSTEM_GENERATED,
+      title: `Invoice ${invoiceNumber}`,
+      inputJson: {
+        invoiceNumber,
+        lineCount: dto.lines.length,
+        subtotalCents,
+        taxCents,
+        totalCents,
+      },
+      startedAt: new Date(),
+    });
+
     const invoice = await this.prisma.invoice.create({
       data: {
         organizationId,
@@ -165,9 +186,12 @@ export class BillingService {
         subscriptionId: dto.subscriptionId,
         billingProfileId: dto.billingProfileId,
         createdById,
+        workflowRunId: workflow.id,
         invoiceNumber,
         currencyCode: dto.currencyCode ?? client.currencyCode,
         status: dto.issuedAt ? InvoiceStatus.ISSUED : InvoiceStatus.DRAFT,
+        source: createdById ? RecordSource.OPERATOR_CREATED : RecordSource.SYSTEM_GENERATED,
+        lifecycle: dto.issuedAt ? ArtifactLifecycle.ISSUED : ArtifactLifecycle.DRAFT,
         subtotalCents,
         taxCents,
         totalCents,
@@ -192,14 +216,60 @@ export class BillingService {
       include: { lines: true, client: true },
     });
 
+    await Promise.all([
+      this.workflowsService.attachWorkflowSubjects(workflow.id, {
+        invoiceId: invoice.id,
+        title: `Invoice ${invoice.invoiceNumber}`,
+        resultJson: { invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, totalCents },
+      }),
+      this.prisma.activityEvent.create({
+        data: {
+          organizationId,
+          clientId: dto.clientId,
+          actorUserId: createdById,
+          workflowRunId: workflow.id,
+          kind: ActivityKind.INVOICE_ISSUED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'INVOICE',
+          subjectId: invoice.id,
+          summary: dto.issuedAt ? `Invoice ${invoice.invoiceNumber} issued.` : `Invoice ${invoice.invoiceNumber} drafted.`,
+          metadataJson: toPrismaJson({ invoiceNumber: invoice.invoiceNumber, totalCents }),
+        },
+      }),
+    ]);
+
     if (invoice.status === InvoiceStatus.ISSUED) {
+      await this.workflowsService.completeWorkflowRun(workflow.id, {
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        status: invoice.status,
+      });
       await this.sendInvoiceIssuedEmail(organizationId, invoice);
+    } else {
+      await this.workflowsService.completeWorkflowRun(workflow.id, {
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        status: invoice.status,
+      });
     }
 
     return invoice;
   }
 
   async recordPayment(organizationId: string, actorUserId: string | undefined, dto: RecordPaymentDto) {
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: dto.clientId,
+      invoiceId: dto.invoiceId ?? undefined,
+      lane: WorkflowLane.REVENUE,
+      type: WorkflowType.PAYMENT_COLLECTION,
+      status: WorkflowStatus.RUNNING,
+      trigger: actorUserId ? WorkflowTrigger.MANUAL_OPERATOR : WorkflowTrigger.PAYMENT_EVENT,
+      source: dto.method === PaymentMethodType.STRIPE ? RecordSource.EXTERNAL_SYNC : RecordSource.SYSTEM_GENERATED,
+      title: 'Payment collection',
+      inputJson: { amountCents: dto.amountCents, method: dto.method, invoiceId: dto.invoiceId ?? null },
+      startedAt: new Date(),
+    });
+
     const payment = await this.prisma.payment.create({
       data: {
         organizationId,
@@ -211,15 +281,17 @@ export class BillingService {
         currencyCode: dto.currencyCode ?? 'USD',
         amountCents: dto.amountCents,
         receivedAt: dto.receivedAt ?? new Date(),
-        metadataJson: toPrismaJson({ ...(dto.metadataJson ?? {}), actorUserId }),
+        metadataJson: toPrismaJson({ ...(dto.metadataJson ?? {}), actorUserId, workflowRunId: workflow.id }),
       },
       include: { invoice: true, client: true },
     });
 
+    let receiptNumber: string | null = null;
+
     if (dto.invoiceId && (dto.status ?? PaymentStatus.SUCCEEDED) === PaymentStatus.SUCCEEDED) {
       const invoice = await this.prisma.invoice.findFirst({
         where: { id: dto.invoiceId, organizationId },
-        select: { id: true, totalCents: true, amountPaidCents: true, invoiceNumber: true },
+        select: { id: true, totalCents: true, amountPaidCents: true, invoiceNumber: true, workflowRunId: true },
       });
 
       if (invoice) {
@@ -230,6 +302,7 @@ export class BillingService {
           data: {
             amountPaidCents,
             balanceDueCents,
+            lifecycle: amountPaidCents >= invoice.totalCents ? ArtifactLifecycle.ACKNOWLEDGED : ArtifactLifecycle.ISSUED,
             paidAt: amountPaidCents >= invoice.totalCents ? new Date() : undefined,
             status: amountPaidCents >= invoice.totalCents ? InvoiceStatus.PAID : InvoiceStatus.PARTIALLY_PAID,
           },
@@ -241,13 +314,17 @@ export class BillingService {
             clientId: dto.clientId,
             invoiceId: dto.invoiceId,
             paymentId: payment.id,
+            workflowRunId: workflow.id,
             receiptNumber: await this.generateReceiptNumber(organizationId),
+            source: RecordSource.SYSTEM_GENERATED,
+            lifecycle: ArtifactLifecycle.ISSUED,
             currencyCode: payment.currencyCode,
             amountCents: payment.amountCents,
             issuedAt: payment.receivedAt ?? new Date(),
             metadataJson: { source: 'payment-recorded', actorUserId } as Prisma.InputJsonValue,
           },
         });
+        receiptNumber = receipt.receiptNumber;
 
         await this.sendPaymentReceivedEmail(organizationId, {
           clientId: payment.clientId,
@@ -259,6 +336,30 @@ export class BillingService {
         });
       }
     }
+
+    await Promise.all([
+      this.workflowsService.completeWorkflowRun(workflow.id, {
+        paymentId: payment.id,
+        invoiceId: dto.invoiceId ?? null,
+        receiptNumber,
+        amountCents: payment.amountCents,
+        status: payment.status,
+      }),
+      this.prisma.activityEvent.create({
+        data: {
+          organizationId,
+          clientId: dto.clientId,
+          actorUserId,
+          workflowRunId: workflow.id,
+          kind: ActivityKind.PAYMENT_RECEIVED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'PAYMENT',
+          subjectId: payment.id,
+          summary: 'Payment received.',
+          metadataJson: toPrismaJson({ amountCents: payment.amountCents, receiptNumber, invoiceId: dto.invoiceId ?? null }),
+        },
+      }),
+    ]);
 
     return payment;
   }
@@ -315,6 +416,18 @@ export class BillingService {
         alreadyExists: true,
       };
     }
+
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: input.clientId,
+      lane: WorkflowLane.ACTIVATION,
+      type: WorkflowType.SUBSCRIPTION_ACTIVATION,
+      status: WorkflowStatus.RUNNING,
+      trigger: WorkflowTrigger.USER_ACTION,
+      source: RecordSource.USER_CREATED,
+      title: 'Subscription activation',
+      inputJson: { plan: input.plan, tier: input.tier },
+      startedAt: new Date(),
+    });
 
     const plan = await this.resolvePlan(input.organizationId, input.plan, input.tier);
     const clientMetadata = this.asObject(client.metadataJson);
@@ -399,6 +512,13 @@ export class BillingService {
       planName: plan.name,
       amountCents: plan.amountCents,
       currencyCode: plan.currencyCode ?? 'USD',
+    });
+
+    await this.workflowsService.completeWorkflowRun(workflow.id, {
+      checkoutUrlCreated: true,
+      planCode: plan.code,
+      tier: input.tier,
+      stripeCustomerId,
     });
 
     return {
@@ -500,7 +620,19 @@ export class BillingService {
 
     const invoiceAmountCents = invoice.amount_paid ?? 0;
     if (invoiceAmountCents > 0) {
-      await this.prisma.payment.create({
+      const workflow = await this.workflowsService.createWorkflowRun({
+        clientId: subscription.clientId,
+        subscriptionId: subscription.id,
+        lane: WorkflowLane.REVENUE,
+        type: WorkflowType.PAYMENT_COLLECTION,
+        status: WorkflowStatus.RUNNING,
+        trigger: WorkflowTrigger.PAYMENT_EVENT,
+        source: RecordSource.EXTERNAL_SYNC,
+        title: 'Stripe invoice paid',
+        inputJson: { stripeInvoiceId: invoice.id, stripeSubscriptionId, amountCents: invoiceAmountCents },
+        startedAt: new Date(),
+      });
+      const payment = await this.prisma.payment.create({
         data: {
           organizationId: subscription.organizationId,
           clientId: subscription.clientId,
@@ -514,8 +646,24 @@ export class BillingService {
             source: 'stripe-webhook',
             stripeInvoiceId: invoice.id,
             stripeSubscriptionId,
+            workflowRunId: workflow.id,
           }),
         },
+      });
+      await this.prisma.paymentAttempt.create({
+        data: {
+          paymentId: payment.id,
+          workflowRunId: workflow.id,
+          status: PaymentStatus.SUCCEEDED,
+          source: RecordSource.EXTERNAL_SYNC,
+          gatewayMessage: 'Stripe webhook invoice.paid',
+          metadataJson: toPrismaJson({ stripeInvoiceId: invoice.id }),
+        },
+      });
+      await this.workflowsService.completeWorkflowRun(workflow.id, {
+        paymentId: payment.id,
+        stripeInvoiceId: invoice.id,
+        amountCents: invoiceAmountCents,
       });
     }
 
@@ -542,6 +690,19 @@ export class BillingService {
 
     if (!subscription) return { ok: true };
 
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: subscription.clientId,
+      subscriptionId: subscription.id,
+      lane: WorkflowLane.REVENUE,
+      type: WorkflowType.PAYMENT_COLLECTION,
+      status: WorkflowStatus.RUNNING,
+      trigger: WorkflowTrigger.PAYMENT_EVENT,
+      source: RecordSource.EXTERNAL_SYNC,
+      title: 'Stripe payment failed',
+      inputJson: { stripeInvoiceId: invoice.id, stripeSubscriptionId },
+      startedAt: new Date(),
+    });
+
     await this.prisma.subscription.update({
       where: { id: subscription.id },
       data: {
@@ -552,6 +713,11 @@ export class BillingService {
           latestPaymentFailureAt: new Date().toISOString(),
         }),
       },
+    });
+
+    await this.workflowsService.completeWorkflowRun(workflow.id, {
+      stripeInvoiceId: invoice.id,
+      status: 'PAST_DUE',
     });
 
     await this.sendPaymentFailedNotice(subscription.organizationId, {

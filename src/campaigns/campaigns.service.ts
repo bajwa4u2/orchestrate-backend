@@ -1,35 +1,133 @@
+import {
+  ActivityVisibility,
+  Prisma,
+  RecordSource,
+  WorkflowLane,
+  WorkflowStatus,
+  WorkflowTrigger,
+  WorkflowType,
+} from '@prisma/client';
 import { Injectable } from '@nestjs/common';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
+import { WorkflowsService } from '../workflows/workflows.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { ListCampaignsDto } from './dto/list-campaigns.dto';
 
 @Injectable()
 export class CampaignsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly workflowsService: WorkflowsService,
+  ) {}
 
-  create(dto: CreateCampaignDto) {
-    return this.prisma.campaign.create({
-      data: {
-        organizationId: dto.organizationId,
-        clientId: dto.clientId,
-        icpId: dto.icpId,
-        segmentId: dto.segmentId,
-        createdById: dto.createdById,
-        code: dto.code,
-        name: dto.name,
-        status: dto.status,
-        channel: dto.channel,
-        objective: dto.objective,
-        offerSummary: dto.offerSummary,
-        bookingUrlOverride: dto.bookingUrlOverride,
-        dailySendCap: dto.dailySendCap,
-        timezone: dto.timezone,
-        startAt: dto.startAt,
-        endAt: dto.endAt,
-        metadataJson: toPrismaJson(dto.metadataJson),
-      },
+  async create(dto: CreateCampaignDto) {
+    return this.prisma.$transaction(async (tx) => {
+      const workflow = await this.workflowsService.createWorkflowRun(
+        {
+          clientId: dto.clientId,
+          lane: WorkflowLane.GROWTH,
+          type: WorkflowType.CAMPAIGN_GENERATION,
+          status: WorkflowStatus.RUNNING,
+          trigger: WorkflowTrigger.USER_ACTION,
+          source: RecordSource.USER_CREATED,
+          title: dto.name,
+          inputJson: {
+            organizationId: dto.organizationId,
+            clientId: dto.clientId,
+            icpId: dto.icpId ?? null,
+            segmentId: dto.segmentId ?? null,
+            createdById: dto.createdById ?? null,
+            status: dto.status ?? null,
+            channel: dto.channel ?? null,
+            objective: dto.objective ?? null,
+            offerSummary: dto.offerSummary ?? null,
+            bookingUrlOverride: dto.bookingUrlOverride ?? null,
+            dailySendCap: dto.dailySendCap ?? null,
+            timezone: dto.timezone ?? null,
+            startAt: dto.startAt?.toISOString() ?? null,
+            endAt: dto.endAt?.toISOString() ?? null,
+            metadataJson: dto.metadataJson ?? null,
+          },
+          contextJson: {
+            stage: 'campaign_create',
+          },
+          startedAt: new Date(),
+        },
+        tx,
+      );
+
+      const campaign = await tx.campaign.create({
+        data: {
+          organizationId: dto.organizationId,
+          clientId: dto.clientId,
+          icpId: dto.icpId,
+          segmentId: dto.segmentId,
+          createdById: dto.createdById,
+          workflowRunId: workflow.id,
+          code: dto.code,
+          name: dto.name,
+          status: dto.status,
+          source: RecordSource.USER_CREATED,
+          generationState: 'INIT',
+          channel: dto.channel,
+          objective: dto.objective,
+          offerSummary: dto.offerSummary,
+          bookingUrlOverride: dto.bookingUrlOverride,
+          dailySendCap: dto.dailySendCap,
+          timezone: dto.timezone,
+          startAt: dto.startAt,
+          endAt: dto.endAt,
+          metadataJson: toPrismaJson(dto.metadataJson),
+        },
+      });
+
+      await tx.activityEvent.create({
+        data: {
+          organizationId: dto.organizationId,
+          clientId: dto.clientId,
+          campaignId: campaign.id,
+          actorUserId: dto.createdById,
+          workflowRunId: workflow.id,
+          kind: 'CAMPAIGN_CREATED',
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'campaign',
+          subjectId: campaign.id,
+          summary: `Campaign ${campaign.name} created`,
+          metadataJson: {
+            campaignId: campaign.id,
+            workflowRunId: workflow.id,
+            source: RecordSource.USER_CREATED,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      await this.workflowsService.attachWorkflowSubjects(
+        workflow.id,
+        {
+          campaignId: campaign.id,
+          title: campaign.name,
+          resultJson: {
+            campaignId: campaign.id,
+            status: campaign.status,
+            generationState: campaign.generationState,
+          },
+        },
+        tx,
+      );
+
+      await this.workflowsService.completeWorkflowRun(
+        workflow.id,
+        {
+          campaignId: campaign.id,
+          generationState: campaign.generationState,
+          status: campaign.status,
+        },
+        tx,
+      );
+
+      return campaign;
     });
   }
 
@@ -53,7 +151,7 @@ export class CampaignsService {
       this.prisma.campaign.findMany({
         where,
         orderBy: { createdAt: 'desc' },
-        include: { client: true },
+        include: { client: true, workflowRun: true },
         skip,
         take,
       }),

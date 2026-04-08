@@ -1,10 +1,25 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  ActivityKind,
+  ActivityVisibility,
+  ArtifactLifecycle,
+  InvoiceStatus,
+  RecordSource,
+  WorkflowLane,
+  WorkflowStatus,
+  WorkflowTrigger,
+  WorkflowType,
+} from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
-import { InvoiceStatus } from '@prisma/client';
+import { toPrismaJson } from '../common/utils/prisma-json';
+import { WorkflowsService } from '../workflows/workflows.service';
 
 @Injectable()
 export class InvoicesService {
-  constructor(private readonly db: PrismaService) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly workflowsService: WorkflowsService,
+  ) {}
 
   async createDraftInvoice(input: {
     organizationId: string;
@@ -64,13 +79,27 @@ export class InvoicesService {
 
     const total = subtotal + taxTotal;
     const invoiceNumber = await this.generateInvoiceNumber(input.organizationId);
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: input.clientId,
+      lane: WorkflowLane.REVENUE,
+      type: WorkflowType.BILLING_CYCLE,
+      status: WorkflowStatus.RUNNING,
+      trigger: input.createdById ? WorkflowTrigger.MANUAL_OPERATOR : WorkflowTrigger.SYSTEM_EVENT,
+      source: input.createdById ? RecordSource.OPERATOR_CREATED : RecordSource.SYSTEM_GENERATED,
+      title: `Invoice ${invoiceNumber}`,
+      inputJson: { dueAt: input.dueAt?.toISOString() ?? null, itemCount: items.length, subtotal, taxTotal, total },
+      startedAt: new Date(),
+    });
 
-    return this.db.invoice.create({
+    const invoice = await this.db.invoice.create({
       data: {
         organizationId: input.organizationId,
         clientId: input.clientId,
+        workflowRunId: workflow.id,
         invoiceNumber,
         status: InvoiceStatus.DRAFT,
+        source: input.createdById ? RecordSource.OPERATOR_CREATED : RecordSource.SYSTEM_GENERATED,
+        lifecycle: ArtifactLifecycle.DRAFT,
         dueAt: input.dueAt,
         createdById: input.createdById,
         metadataJson: {
@@ -83,6 +112,31 @@ export class InvoicesService {
         },
       },
     });
+
+    await Promise.all([
+      this.workflowsService.attachWorkflowSubjects(workflow.id, {
+        invoiceId: invoice.id,
+        title: `Invoice ${invoice.invoiceNumber}`,
+        resultJson: { invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, total },
+      }),
+      this.workflowsService.completeWorkflowRun(workflow.id, { invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, total }),
+      this.db.activityEvent.create({
+        data: {
+          organizationId: input.organizationId,
+          clientId: input.clientId,
+          actorUserId: input.createdById,
+          workflowRunId: workflow.id,
+          kind: ActivityKind.INVOICE_ISSUED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'INVOICE',
+          subjectId: invoice.id,
+          summary: `Invoice ${invoice.invoiceNumber} drafted.`,
+          metadataJson: toPrismaJson({ invoiceNumber: invoice.invoiceNumber, totalCents: total }),
+        },
+      }),
+    ]);
+
+    return invoice;
   }
 
   async issueInvoice(invoiceId: string) {
@@ -98,13 +152,24 @@ export class InvoicesService {
       throw new BadRequestException('Only draft invoices can be issued');
     }
 
-    return this.db.invoice.update({
+    const updated = await this.db.invoice.update({
       where: { id: invoiceId },
       data: {
         status: InvoiceStatus.ISSUED,
+        lifecycle: ArtifactLifecycle.ISSUED,
         issuedAt: new Date(),
       },
     });
+
+    if (updated.workflowRunId) {
+      await this.workflowsService.completeWorkflowRun(updated.workflowRunId, {
+        invoiceId: updated.id,
+        invoiceNumber: updated.invoiceNumber,
+        status: updated.status,
+      });
+    }
+
+    return updated;
   }
 
   async markOverdueIfNeeded(invoiceId: string) {

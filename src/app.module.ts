@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AccessContextModule } from './access-context/access-context.module';
 import { AgreementsModule } from './agreements/agreements.module';
+import { AiModule } from './ai/ai.module';
 import { AuthModule } from './auth/auth.module';
 import { BillingModule } from './billing/billing.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
@@ -13,6 +14,7 @@ import { DeliverabilityModule } from './deliverability/deliverability.module';
 import { EmailsModule } from './emails/emails.module';
 import { ExecutionModule } from './execution/execution.module';
 import { HealthModule } from './health/health.module';
+import { InvoicesModule } from './invoices/invoices.module';
 import { LeadsModule } from './leads/leads.module';
 import { MeetingsModule } from './meetings/meetings.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -25,7 +27,6 @@ import { StatementsModule } from './statements/statements.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { TemplatesModule } from './templates/templates.module';
 import { UsersModule } from './users/users.module';
-import { InvoicesModule } from './invoices/invoices.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { InvoicesModule } from './invoices/invoices.module';
     OperatorModule,
     ClientPortalModule,
     InvoicesModule,
+    AiModule,
   ],
 })
 export class AppModule {}

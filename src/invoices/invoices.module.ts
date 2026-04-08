@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module';
 import { EmailsModule } from '../emails/emails.module';
+import { WorkflowsModule } from '../workflows/workflows.module';
 import { InvoicesController } from './invoices.controller';
 import { InvoiceDocumentBuilder } from './dto/invoice-document.builder';
 import { InvoiceEmailRenderer } from './dto/invoice-email.renderer';
@@ -10,7 +11,7 @@ import { InvoicePdfService } from './invoice-pdf.service';
 import { InvoicesService } from './invoices.service';
 
 @Module({
-  imports: [DatabaseModule, EmailsModule],
+  imports: [DatabaseModule, EmailsModule, WorkflowsModule],
   controllers: [InvoicesController],
   providers: [
     InvoicesService,

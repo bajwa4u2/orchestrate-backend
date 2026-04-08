@@ -521,6 +521,173 @@ enum PolicyScope {
   MAILBOX
 }
 
+enum WorkflowLane {
+  ACTIVATION
+  GROWTH
+  REVENUE
+  DOCUMENTS
+  COMMUNICATIONS
+}
+
+enum WorkflowType {
+  TRIAL_ACTIVATION
+  SUBSCRIPTION_ACTIVATION
+  CAMPAIGN_GENERATION
+  OUTREACH_EXECUTION
+  FOLLOW_UP_EXECUTION
+  REPLY_PROCESSING
+  MEETING_CONVERSION
+  BILLING_CYCLE
+  PAYMENT_COLLECTION
+  AGREEMENT_ISSUANCE
+  STATEMENT_ISSUANCE
+  REMINDER_DISPATCH
+  DOCUMENT_DISPATCH
+}
+
+enum WorkflowStatus {
+  PENDING
+  RUNNING
+  WAITING
+  REQUIRES_REVIEW
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+enum WorkflowTrigger {
+  USER_ACTION
+  SYSTEM_EVENT
+  SCHEDULED
+  SUBSCRIPTION_EVENT
+  PAYMENT_EVENT
+  MANUAL_OPERATOR
+  POLICY_RULE
+}
+
+enum RecordSource {
+  AI_GENERATED
+  SYSTEM_GENERATED
+  USER_CREATED
+  OPERATOR_CREATED
+  IMPORTED
+  EXTERNAL_SYNC
+}
+
+enum GenerationState {
+  INIT
+  TARGETING_READY
+  LEADS_READY
+  MESSAGES_READY
+  SEQUENCE_READY
+  READY_TO_LAUNCH
+  ACTIVE
+  FAILED
+}
+
+enum LeadQualificationState {
+  DISCOVERED
+  QUALIFIED
+  ENROLLED
+  CONTACTED
+  REPLIED
+  INTERESTED
+  DISQUALIFIED
+  CONVERTED
+}
+
+enum MessageLifecycle {
+  DRAFT
+  APPROVED
+  SCHEDULED
+  DISPATCHED
+  DELIVERED
+  REPLIED
+  BOUNCED
+  FAILED
+}
+
+enum ArtifactLifecycle {
+  DRAFT
+  ISSUED
+  DISPATCHED
+  DELIVERED
+  ACKNOWLEDGED
+  VOIDED
+  ARCHIVED
+}
+
+enum DispatchLifecycle {
+  QUEUED
+  SENT
+  DELIVERED
+  OPENED
+  FAILED
+  BOUNCED
+}
+
+enum ActivityVisibility {
+  INTERNAL
+  CLIENT_VISIBLE
+  OPERATOR_VISIBLE
+}
+
+model WorkflowRun {
+  id                 String          @id @default(cuid())
+  organizationId     String
+  clientId           String
+  subscriptionId     String?
+  campaignId         String?
+  invoiceId          String?
+  serviceAgreementId String?
+  statementId        String?
+  lane               WorkflowLane
+  type               WorkflowType
+  status             WorkflowStatus  @default(PENDING)
+  trigger            WorkflowTrigger
+  source             RecordSource    @default(SYSTEM_GENERATED)
+  title              String?
+  inputJson          Json?
+  contextJson        Json?
+  resultJson         Json?
+  errorJson          Json?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  failedAt           DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaigns          Campaign[]
+  leadSources        LeadSource[]
+  leads              Lead[]
+  leadEnrollments    LeadEnrollment[]
+  sequences          Sequence[]
+  outreachMessages   OutreachMessage[]
+  replies            Reply[]
+  meetings           Meeting[]
+  invoices           Invoice[]
+  paymentAttempts    PaymentAttempt[]
+  receipts           Receipt[]
+  creditNotes        CreditNote[]
+  statements         Statement[]
+  serviceAgreements  ServiceAgreement[]
+  reminderArtifacts  ReminderArtifact[]
+  documentDispatches DocumentDispatch[]
+  jobRuns            JobRun[]
+  activityEvents     ActivityEvent[]
+
+  @@index([organizationId, lane, type, status])
+  @@index([clientId, lane, type, status])
+  @@index([subscriptionId])
+  @@index([campaignId])
+  @@index([invoiceId])
+  @@index([serviceAgreementId])
+  @@index([statementId])
+  @@index([createdAt])
+}
+
 model Organization {
   id           String           @id @default(cuid())
   slug         String           @unique
@@ -583,6 +750,7 @@ model Organization {
   tagDefinitions         TagDefinition[]
   tagAssignments         TagAssignment[]
   invoiceAccessEvents    InvoiceAccessEvent[]
+  workflowRuns           WorkflowRun[]
 }
 
 model User {
@@ -704,6 +872,7 @@ model Client {
   automationRules        AutomationRule[]
   tagDefinitions         TagDefinition[]
   invoiceAccessEvents    InvoiceAccessEvent[]
+  workflowRuns           WorkflowRun[]
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
@@ -762,23 +931,26 @@ model Subscription {
 }
 
 model Invoice {
-  id                 String        @id @default(cuid())
+  id                 String             @id @default(cuid())
   organizationId     String
   clientId           String
   subscriptionId     String?
   billingProfileId   String?
   createdById        String?
+  workflowRunId      String?
   invoiceNumber      String
-  status             InvoiceStatus @default(DRAFT)
-  currencyCode       String        @default("USD")
+  status             InvoiceStatus      @default(DRAFT)
+  source             RecordSource       @default(SYSTEM_GENERATED)
+  lifecycle          ArtifactLifecycle?
+  currencyCode       String             @default("USD")
   billingPeriodStart DateTime?
   billingPeriodEnd   DateTime?
-  subtotalCents      Int           @default(0)
-  discountCents      Int           @default(0)
-  taxCents           Int           @default(0)
-  totalCents         Int           @default(0)
-  amountPaidCents    Int           @default(0)
-  balanceDueCents    Int           @default(0)
+  subtotalCents      Int                @default(0)
+  discountCents      Int                @default(0)
+  taxCents           Int                @default(0)
+  totalCents         Int                @default(0)
+  amountPaidCents    Int                @default(0)
+  balanceDueCents    Int                @default(0)
   issuedAt           DateTime?
   dueAt              DateTime?
   lastSentAt         DateTime?
@@ -790,14 +962,15 @@ model Invoice {
   termsText          String?
   notesText          String?
   metadataJson       Json?
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
   organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client                 @relation(fields: [clientId], references: [id], onDelete: Cascade)
   subscription       Subscription?          @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
   billingProfile     BillingProfile?        @relation(fields: [billingProfileId], references: [id], onDelete: SetNull)
   createdBy          User?                  @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workflowRun        WorkflowRun?           @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   payments           Payment[]
   lines              InvoiceLine[]
   receipts           Receipt[]
@@ -811,6 +984,7 @@ model Invoice {
   @@unique([organizationId, invoiceNumber])
   @@index([organizationId, status, createdAt])
   @@index([clientId, status, dueAt])
+  @@index([workflowRunId])
 }
 
 model Payment {
@@ -843,14 +1017,18 @@ model Payment {
 model PaymentAttempt {
   id             String        @id @default(cuid())
   paymentId      String
+  workflowRunId  String?
   attemptedAt    DateTime      @default(now())
   status         PaymentStatus @default(PENDING)
+  source         RecordSource  @default(SYSTEM_GENERATED)
   gatewayMessage String?
   metadataJson   Json?
 
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  payment     Payment      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
 
   @@index([paymentId, attemptedAt])
+  @@index([workflowRunId])
 }
 
 model IdealCustomerProfile {
@@ -898,16 +1076,19 @@ model Segment {
 }
 
 model Campaign {
-  id                 String         @id @default(cuid())
+  id                 String           @id @default(cuid())
   organizationId     String
   clientId           String
   icpId              String?
   segmentId          String?
   createdById        String?
+  workflowRunId      String?
   code               String?
   name               String
-  status             CampaignStatus @default(DRAFT)
-  channel            MessageChannel @default(EMAIL)
+  status             CampaignStatus   @default(DRAFT)
+  source             RecordSource     @default(USER_CREATED)
+  generationState    GenerationState?
+  channel            MessageChannel   @default(EMAIL)
   objective          String?
   offerSummary       String?
   bookingUrlOverride String?
@@ -916,8 +1097,8 @@ model Campaign {
   startAt            DateTime?
   endAt              DateTime?
   metadataJson       Json?
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
   archivedAt         DateTime?
 
   organization     Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -925,6 +1106,7 @@ model Campaign {
   icp              IdealCustomerProfile? @relation(fields: [icpId], references: [id], onDelete: SetNull)
   segment          Segment?              @relation(fields: [segmentId], references: [id], onDelete: SetNull)
   createdBy        User?                 @relation("CampaignCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workflowRun      WorkflowRun?          @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   sequences        Sequence[]
   leadSources      LeadSource[]
   leads            Lead[]
@@ -941,6 +1123,7 @@ model Campaign {
   @@unique([clientId, name])
   @@index([organizationId, status])
   @@index([clientId, status])
+  @@index([workflowRunId])
 }
 
 model Sequence {
@@ -948,8 +1131,10 @@ model Sequence {
   organizationId String
   clientId       String
   campaignId     String
+  workflowRunId  String?
   name           String
   status         SequenceStatus @default(DRAFT)
+  source         RecordSource   @default(SYSTEM_GENERATED)
   description    String?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -957,10 +1142,12 @@ model Sequence {
   organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
   campaign     Campaign         @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  workflowRun  WorkflowRun?     @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   steps        SequenceStep[]
   enrollments  LeadEnrollment[]
 
   @@index([campaignId, status])
+  @@index([workflowRunId])
 }
 
 model SequenceStep {
@@ -988,8 +1175,10 @@ model LeadSource {
   organizationId String
   clientId       String
   campaignId     String?
+  workflowRunId  String?
   name           String
   type           LeadSourceType
+  source         RecordSource   @default(USER_CREATED)
   sourceRef      String?
   configJson     Json?
   importedAt     DateTime?
@@ -999,9 +1188,11 @@ model LeadSource {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
   campaign     Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   leads        Lead[]
 
   @@index([clientId, type])
+  @@index([workflowRunId])
 }
 
 model Account {
@@ -1066,24 +1257,27 @@ model Contact {
 }
 
 model Lead {
-  id                String     @id @default(cuid())
-  organizationId    String
-  clientId          String
-  campaignId        String
-  leadSourceId      String?
-  accountId         String?
-  contactId         String?
-  status            LeadStatus @default(NEW)
-  score             Decimal?   @db.Decimal(5, 2)
-  priority          Int        @default(0)
-  firstContactAt    DateTime?
-  lastContactAt     DateTime?
-  lastReplyAt       DateTime?
-  bookedAt          DateTime?
-  suppressionReason String?
-  metadataJson      Json?
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
+  id                 String                  @id @default(cuid())
+  organizationId     String
+  clientId           String
+  campaignId         String
+  leadSourceId       String?
+  accountId          String?
+  contactId          String?
+  workflowRunId      String?
+  status             LeadStatus              @default(NEW)
+  source             RecordSource            @default(USER_CREATED)
+  qualificationState LeadQualificationState?
+  score              Decimal?                @db.Decimal(5, 2)
+  priority           Int                     @default(0)
+  firstContactAt     DateTime?
+  lastContactAt      DateTime?
+  lastReplyAt        DateTime?
+  bookedAt           DateTime?
+  suppressionReason  String?
+  metadataJson       Json?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
 
   organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
@@ -1091,6 +1285,7 @@ model Lead {
   leadSource   LeadSource?       @relation(fields: [leadSourceId], references: [id], onDelete: SetNull)
   account      Account?          @relation(fields: [accountId], references: [id], onDelete: SetNull)
   contact      Contact?          @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun?      @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   enrollments  LeadEnrollment[]
   messages     OutreachMessage[]
   replies      Reply[]
@@ -1101,12 +1296,14 @@ model Lead {
   @@index([clientId, status])
   @@index([campaignId, status])
   @@index([lastReplyAt])
+  @@index([workflowRunId])
 }
 
 model LeadEnrollment {
   id               String           @id @default(cuid())
   leadId           String
   sequenceId       String
+  workflowRunId    String?
   status           EnrollmentStatus @default(PENDING)
   currentStepOrder Int?
   startedAt        DateTime?
@@ -1115,12 +1312,14 @@ model LeadEnrollment {
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
-  lead     Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  sequence Sequence          @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
-  messages OutreachMessage[]
+  lead        Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sequence    Sequence          @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun?      @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
+  messages    OutreachMessage[]
 
   @@unique([leadId, sequenceId])
   @@index([status, startedAt])
+  @@index([workflowRunId])
 }
 
 model OutreachMessage {
@@ -1132,9 +1331,12 @@ model OutreachMessage {
   enrollmentId      String?
   sequenceStepId    String?
   mailboxId         String?
+  workflowRunId     String?
   direction         MessageDirection
   channel           MessageChannel   @default(EMAIL)
   status            MessageStatus    @default(QUEUED)
+  source            RecordSource     @default(USER_CREATED)
+  lifecycle         MessageLifecycle @default(DRAFT)
   externalMessageId String?
   threadKey         String?
   subjectLine       String?
@@ -1156,32 +1358,36 @@ model OutreachMessage {
   enrollment   LeadEnrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
   sequenceStep SequenceStep?   @relation(fields: [sequenceStepId], references: [id], onDelete: SetNull)
   mailbox      Mailbox?        @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun?    @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   replies      Reply[]
 
   @@index([campaignId, status, sentAt])
   @@index([leadId, direction, sentAt])
   @@index([externalMessageId])
+  @@index([workflowRunId])
 }
 
 model Reply {
-  id                  String      @id @default(cuid())
+  id                  String       @id @default(cuid())
   organizationId      String
   clientId            String
   campaignId          String
   leadId              String
   messageId           String?
   mailboxId           String?
-  intent              ReplyIntent @default(UNCLEAR)
-  confidence          Decimal?    @db.Decimal(5, 2)
+  workflowRunId       String?
+  intent              ReplyIntent  @default(UNCLEAR)
+  source              RecordSource @default(EXTERNAL_SYNC)
+  confidence          Decimal?     @db.Decimal(5, 2)
   fromEmail           String?
   subjectLine         String?
   bodyText            String?
   receivedAt          DateTime
-  requiresHumanReview Boolean     @default(false)
+  requiresHumanReview Boolean      @default(false)
   handledAt           DateTime?
   metadataJson        Json?
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
 
   organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
@@ -1189,10 +1395,12 @@ model Reply {
   lead         Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
   message      OutreachMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull)
   mailbox      Mailbox?         @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun?     @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   meeting      Meeting?
 
   @@index([campaignId, intent, receivedAt])
   @@index([leadId, receivedAt])
+  @@index([workflowRunId])
 }
 
 model Meeting {
@@ -1202,7 +1410,9 @@ model Meeting {
   campaignId     String?
   leadId         String?
   replyId        String?       @unique
+  workflowRunId  String?
   status         MeetingStatus @default(PROPOSED)
+  source         RecordSource  @default(SYSTEM_GENERATED)
   title          String?
   bookingUrl     String?
   externalRef    String?
@@ -1218,8 +1428,10 @@ model Meeting {
   campaign     Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   lead         Lead?        @relation(fields: [leadId], references: [id], onDelete: SetNull)
   reply        Reply?       @relation(fields: [replyId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
 
   @@index([clientId, status, scheduledAt])
+  @@index([workflowRunId])
 }
 
 model SendingDomain {
@@ -1412,41 +1624,48 @@ model Job {
 }
 
 model JobRun {
-  id           String    @id @default(cuid())
-  jobId        String
-  runNumber    Int
-  status       JobStatus
-  startedAt    DateTime  @default(now())
-  finishedAt   DateTime?
-  errorMessage String?
-  logJson      Json?
+  id            String    @id @default(cuid())
+  jobId         String
+  workflowRunId String?
+  runNumber     Int
+  status        JobStatus
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+  errorMessage  String?
+  logJson       Json?
 
-  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  job         Job          @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
 
   @@unique([jobId, runNumber])
+  @@index([workflowRunId])
 }
 
 model ActivityEvent {
-  id             String       @id @default(cuid())
+  id             String             @id @default(cuid())
   organizationId String
   clientId       String?
   campaignId     String?
   actorUserId    String?
+  workflowRunId  String?
   kind           ActivityKind
+  visibility     ActivityVisibility @default(INTERNAL)
   subjectType    String
   subjectId      String
   summary        String
   metadataJson   Json?
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime           @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
   campaign     Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   actor        User?        @relation("ActivityActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, createdAt])
   @@index([clientId, createdAt])
   @@index([campaignId, createdAt])
+  @@index([workflowRunId, createdAt])
 }
 
 model AuditLog {
@@ -1988,78 +2207,93 @@ model InvoiceAccessEvent {
 }
 
 model Receipt {
-  id             String   @id @default(cuid())
+  id             String             @id @default(cuid())
   organizationId String
   clientId       String
   invoiceId      String?
   paymentId      String?
+  workflowRunId  String?
   receiptNumber  String
-  currencyCode   String   @default("USD")
+  source         RecordSource       @default(SYSTEM_GENERATED)
+  lifecycle      ArtifactLifecycle?
+  currencyCode   String             @default("USD")
   amountCents    Int
-  issuedAt       DateTime @default(now())
+  issuedAt       DateTime           @default(now())
   metadataJson   Json?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 
   organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
   invoice            Invoice?           @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
   payment            Payment?           @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  workflowRun        WorkflowRun?       @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   documentDispatches DocumentDispatch[]
 
   @@unique([organizationId, receiptNumber])
   @@index([clientId, issuedAt])
+  @@index([workflowRunId])
 }
 
 model CreditNote {
-  id               String   @id @default(cuid())
+  id               String             @id @default(cuid())
   organizationId   String
   clientId         String
   invoiceId        String?
+  workflowRunId    String?
   creditNoteNumber String
-  currencyCode     String   @default("USD")
+  source           RecordSource       @default(SYSTEM_GENERATED)
+  lifecycle        ArtifactLifecycle?
+  currencyCode     String             @default("USD")
   amountCents      Int
   reasonText       String?
-  issuedAt         DateTime @default(now())
+  issuedAt         DateTime           @default(now())
   metadataJson     Json?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
   invoice      Invoice?     @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
 
   @@unique([organizationId, creditNoteNumber])
   @@index([clientId, issuedAt])
+  @@index([workflowRunId])
 }
 
 model Statement {
-  id                 String          @id @default(cuid())
+  id                 String             @id @default(cuid())
   organizationId     String
   clientId           String
   createdById        String?
+  workflowRunId      String?
   statementNumber    String
   label              String?
-  status             StatementStatus @default(DRAFT)
+  status             StatementStatus    @default(DRAFT)
+  source             RecordSource       @default(SYSTEM_GENERATED)
+  lifecycle          ArtifactLifecycle?
   periodStart        DateTime
   periodEnd          DateTime
-  totalInvoicedCents Int             @default(0)
-  totalPaidCents     Int             @default(0)
-  balanceCents       Int             @default(0)
+  totalInvoicedCents Int                @default(0)
+  totalPaidCents     Int                @default(0)
+  balanceCents       Int                @default(0)
   issuedAt           DateTime?
   metadataJson       Json?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
   organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client                 @relation(fields: [clientId], references: [id], onDelete: Cascade)
   createdBy          User?                  @relation("StatementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workflowRun        WorkflowRun?           @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   invoiceLinks       StatementInvoiceLink[]
   paymentLinks       StatementPaymentLink[]
   documentDispatches DocumentDispatch[]
 
   @@unique([organizationId, statementNumber])
   @@index([clientId, periodEnd])
+  @@index([workflowRunId])
 }
 
 model StatementInvoiceLink {
@@ -2110,14 +2344,17 @@ model CollectionAction {
 }
 
 model ServiceAgreement {
-  id               String          @id @default(cuid())
+  id               String             @id @default(cuid())
   organizationId   String
   clientId         String
   subscriptionId   String?
   createdById      String?
+  workflowRunId    String?
   agreementNumber  String
   title            String
-  status           AgreementStatus @default(DRAFT)
+  status           AgreementStatus    @default(DRAFT)
+  source           RecordSource       @default(SYSTEM_GENERATED)
+  lifecycle        ArtifactLifecycle?
   effectiveStartAt DateTime?
   effectiveEndAt   DateTime?
   termsText        String?
@@ -2125,18 +2362,20 @@ model ServiceAgreement {
   acceptedByEmail  String?
   acceptedAt       DateTime?
   metadataJson     Json?
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
   subscription       Subscription?      @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
   createdBy          User?              @relation("AgreementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workflowRun        WorkflowRun?       @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   reminders          ReminderArtifact[]
   documentDispatches DocumentDispatch[]
 
   @@unique([organizationId, agreementNumber])
   @@index([clientId, status])
+  @@index([workflowRunId])
 }
 
 model ReminderArtifact {
@@ -2146,8 +2385,11 @@ model ReminderArtifact {
   createdById    String?
   invoiceId      String?
   agreementId    String?
+  workflowRunId  String?
   kind           ReminderArtifactKind
   status         ReminderArtifactStatus @default(PENDING)
+  source         RecordSource           @default(SYSTEM_GENERATED)
+  lifecycle      ArtifactLifecycle?
   dueAt          DateTime?
   scheduledAt    DateTime?
   sentAt         DateTime?
@@ -2163,10 +2405,12 @@ model ReminderArtifact {
   createdBy          User?              @relation("ReminderCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   invoice            Invoice?           @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
   agreement          ServiceAgreement?  @relation(fields: [agreementId], references: [id], onDelete: SetNull)
+  workflowRun        WorkflowRun?       @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
   collectionActions  CollectionAction[]
   documentDispatches DocumentDispatch[]
 
   @@index([clientId, status, scheduledAt])
+  @@index([workflowRunId])
 }
 
 model DocumentDispatch {
@@ -2180,10 +2424,13 @@ model DocumentDispatch {
   receiptId             String?
   reminderId            String?
   mailboxId             String?
+  workflowRunId         String?
   kind                  TemplateType
   emailCategory         EmailCategory?
   emailEvent            EmailEventType?
   status                DocumentDispatchStatus @default(RENDERED)
+  source                RecordSource           @default(SYSTEM_GENERATED)
+  dispatchState         DispatchLifecycle?
   deliveryChannel       DeliveryChannel        @default(EMAIL)
   deliveryProvider      EmailDeliveryProvider?
   deliveryMode          EmailDeliveryMode?
@@ -2214,15 +2461,10 @@ model DocumentDispatch {
   receipt      Receipt?          @relation(fields: [receiptId], references: [id], onDelete: SetNull)
   reminder     ReminderArtifact? @relation(fields: [reminderId], references: [id], onDelete: SetNull)
   mailbox      Mailbox?          @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  workflowRun  WorkflowRun?      @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, kind, status])
-  @@index([organizationId, deliveryChannel, status])
-  @@index([organizationId, emailCategory, createdAt])
-  @@index([organizationId, emailEvent, createdAt])
-  @@index([clientId, kind, createdAt])
-  @@index([recipientEmail, createdAt])
-  @@index([mailboxId, createdAt])
-  @@index([status, lastAttemptAt])
+  @@index([workflowRunId])
 }
 
 model PublicInquiry {
