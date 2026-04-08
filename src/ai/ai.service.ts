@@ -1,337 +1,768 @@
 import { Injectable } from '@nestjs/common';
 import {
   ActivityKind,
+  ActivityVisibility,
   CampaignStatus,
-  LeadSourceType,
+  ContactEmailStatus,
+  LeadQualificationState,
   LeadStatus,
   MessageChannel,
   MessageDirection,
+  MessageLifecycle,
   MessageStatus,
   Prisma,
-  SegmentStatus,
+  QualificationStatus,
+  RecordSource,
   SequenceStatus,
   SequenceStepStatus,
   SequenceStepType,
-  ICPStatus,
+  WorkflowLane,
+  WorkflowStatus,
+  WorkflowTrigger,
+  WorkflowType,
 } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
-import { toPrismaJson } from '../common/utils/prisma-json';
+import { WorkflowsService } from '../workflows/workflows.service';
+import {
+  ActivateGrowthWorkspaceDto,
+  GenerateAgreementDraftDto,
+  GenerateGrowthMessagesDto,
+  GenerateGrowthSequenceDto,
+  GenerateReminderDto,
+  GenerateStatementSummaryDto,
+} from './contracts/ai.controller.contract';
+import { LeadCandidate } from './contracts/lead.contract';
+import { ServiceProfileInput } from './contracts/service-profile.contract';
+import { StrategyBrief } from './contracts/strategy.contract';
 import { LeadAgent } from './agents/lead.agent';
 import { SequenceAgent } from './agents/sequence.agent';
 import { StrategyAgent } from './agents/strategy.agent';
 import { WriterAgent } from './agents/writer.agent';
-import { LeadCandidate } from './contracts/lead.contract';
-import { ServiceProfileInput } from './contracts/service-profile.contract';
-import { StrategyBrief } from './contracts/strategy.contract';
 
 @Injectable()
 export class AiService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly workflows: WorkflowsService,
     private readonly strategyAgent: StrategyAgent,
     private readonly leadAgent: LeadAgent,
     private readonly writerAgent: WriterAgent,
     private readonly sequenceAgent: SequenceAgent,
   ) {}
 
-  async buildStrategy(input: ServiceProfileInput): Promise<StrategyBrief> {
-    return this.strategyAgent.generate(input);
-  }
+  async activateGrowthWorkspace(input: ActivateGrowthWorkspaceDto) {
+    const client = await this.prisma.client.findUniqueOrThrow({
+      where: { id: input.clientId },
+      select: {
+        id: true,
+        organizationId: true,
+        legalName: true,
+        displayName: true,
+        industry: true,
+        websiteUrl: true,
+        bookingUrl: true,
+        outboundOffer: true,
+      },
+    });
 
-  async generateLeadCandidates(input: ServiceProfileInput, leadCount?: number): Promise<LeadCandidate[]> {
-    const strategy = await this.buildStrategy(input);
-    return this.leadAgent.generate(strategy, this.resolveLeadCount(leadCount ?? input.maxLeads));
-  }
+    const businessName = client.displayName || client.legalName;
 
-  async activateGrowthWorkspace(input: ServiceProfileInput) {
-    const strategy = await this.strategyAgent.generate(input);
-    const leadCount = this.resolveLeadCount(input.maxLeads);
-    const sequenceStepCount = this.resolveStepCount(input.sequenceStepCount);
-    const leads = await this.leadAgent.generate(strategy, leadCount);
-    const sequenceSteps = await this.sequenceAgent.generate(strategy, sequenceStepCount);
-    const messageDrafts = await Promise.all(
-      leads.map(async (candidate) => ({
-        candidate,
-        draft: await this.writerAgent.generate(strategy, candidate),
-      })),
+    const workflow = await this.workflows.createWorkflowRun({
+      clientId: client.id,
+      lane: WorkflowLane.GROWTH,
+      type: WorkflowType.CAMPAIGN_GENERATION,
+      status: WorkflowStatus.RUNNING,
+      trigger: WorkflowTrigger.USER_ACTION,
+      source: RecordSource.AI_GENERATED,
+      title: input.workflowTitle ?? `Growth activation for ${businessName}`,
+      inputJson: {
+        clientId: input.clientId,
+        setup: input.setup,
+      },
+      contextJson: {
+        initiatedBy: 'ai.controller',
+        endpoint: 'POST /v1/ai/growth/activate',
+      },
+    });
+
+    const serviceProfile: ServiceProfileInput = {
+      organizationId: client.organizationId,
+      clientId: client.id,
+      businessName,
+      websiteUrl: client.websiteUrl ?? undefined,
+      industry: input.setup.industry,
+      offerName: input.setup.offer ?? client.outboundOffer ?? 'Outbound growth service',
+      offerSummary:
+        input.setup.offer ??
+        client.outboundOffer ??
+        'Structured outbound outreach and follow-up automation',
+      desiredOutcome: input.setup.goal,
+      countries: input.setup.country,
+      regions: input.setup.regions ?? [],
+      buyerRoles: input.setup.roles,
+      tone: input.setup.tone ?? 'professional-direct',
+      callToAction: 'Book a meeting',
+      bookingUrl: client.bookingUrl ?? undefined,
+      complianceNotes: input.setup.constraints ?? [],
+      maxLeads: 12,
+      dailySendCap: 25,
+      sequenceStepCount: 3,
+    };
+
+    const strategy = await this.strategyAgent.generate(serviceProfile);
+
+    const campaignMetadata = {
+      strategy: strategy as unknown as Prisma.InputJsonValue,
+      serviceProfile: serviceProfile as unknown as Prisma.InputJsonValue,
+    } as unknown as Prisma.InputJsonValue;
+
+    const campaign = await this.prisma.campaign.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        workflowRunId: workflow.id,
+        name: strategy.campaignName,
+        status: CampaignStatus.DRAFT,
+        source: RecordSource.AI_GENERATED,
+        generationState: 'TARGETING_READY',
+        channel: MessageChannel.EMAIL,
+        objective: strategy.objective,
+        offerSummary: strategy.offerSummary,
+        bookingUrlOverride: strategy.bookingUrlOverride ?? client.bookingUrl ?? undefined,
+        metadataJson: campaignMetadata,
+      },
+      select: { id: true, name: true },
+    });
+
+    await this.workflows.attachWorkflowSubjects(workflow.id, {
+      campaignId: campaign.id,
+      title: `Campaign generation for ${campaign.name}`,
+      contextJson: {
+        endpoint: 'POST /v1/ai/growth/activate',
+        campaignId: campaign.id,
+      },
+    });
+
+    const leadCandidates = await this.leadAgent.generate(
+      strategy,
+      serviceProfile.maxLeads ?? 12,
     );
 
-    return this.prisma.$transaction(async (tx) => {
-      const icp = await tx.idealCustomerProfile.create({
+    const createdLeads: Array<{
+      id: string;
+      label: string;
+      candidate: LeadCandidate;
+    }> = [];
+
+    for (const lead of leadCandidates) {
+      const account = await this.prisma.account.create({
         data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          name: strategy.icpName,
-          status: ICPStatus.ACTIVE,
-          industryTags: strategy.industryTags,
-          geoTargets: strategy.geoTargets,
-          titleKeywords: strategy.titleKeywords,
-          exclusionKeywords: strategy.exclusionKeywords,
-          rulesJson: toPrismaJson({
-            painPoints: strategy.painPoints,
-            valueAngles: strategy.valueAngles,
-            callToAction: strategy.callToAction,
-            tone: strategy.tone,
-            bookingUrlOverride: strategy.bookingUrlOverride,
-          }),
+          organizationId: client.organizationId,
+          clientId: client.id,
+          domain: lead.domain ?? null,
+          companyName: lead.companyName,
+          industry: lead.industry ?? input.setup.industry,
+          employeeCount: lead.employeeCount ?? null,
+          city: lead.city ?? null,
+          region: lead.region ?? null,
+          countryCode: lead.countryCode ?? null,
+          websiteUrl: lead.domain ? `https://${lead.domain}` : null,
+          qualificationStatus: QualificationStatus.UNREVIEWED,
+          enrichmentJson: {
+            reasonForFit: lead.reasonForFit,
+            qualificationNotes: lead.qualificationNotes ?? null,
+          },
         },
+        select: { id: true },
       });
 
-      const segment = await tx.segment.create({
+      const contact = await this.prisma.contact.create({
         data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          icpId: icp.id,
-          name: `${strategy.icpName} Segment`,
-          status: SegmentStatus.ACTIVE,
-          filterJson: toPrismaJson({
-            geoTargets: strategy.geoTargets,
-            titleKeywords: strategy.titleKeywords,
-            exclusionKeywords: strategy.exclusionKeywords,
-            buyerIndustries: input.buyerIndustries ?? [input.industry],
-          }),
-          notesText: strategy.segmentNotes,
+          organizationId: client.organizationId,
+          clientId: client.id,
+          accountId: account.id,
+          firstName: lead.firstName ?? null,
+          lastName: lead.lastName ?? null,
+          fullName: lead.contactFullName,
+          title: lead.title,
+          email: lead.email ?? null,
+          emailStatus: lead.email
+            ? ContactEmailStatus.UNVERIFIED
+            : ContactEmailStatus.UNVERIFIED,
+          linkedinUrl: lead.linkedinUrl ?? null,
+          timezone: lead.timezone ?? null,
+          city: lead.city ?? null,
+          region: lead.region ?? null,
+          countryCode: lead.countryCode ?? null,
+          qualificationStatus: QualificationStatus.UNREVIEWED,
+          enrichmentJson: {
+            reasonForFit: lead.reasonForFit,
+            qualificationNotes: lead.qualificationNotes ?? null,
+          },
         },
+        select: { id: true, fullName: true },
       });
 
-      const campaign = await tx.campaign.create({
+      const createdLead = await this.prisma.lead.create({
         data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          icpId: icp.id,
-          segmentId: segment.id,
-          createdById: input.createdById,
-          name: strategy.campaignName,
-          status: CampaignStatus.READY,
-          channel: MessageChannel.EMAIL,
-          objective: strategy.objective,
-          offerSummary: strategy.offerSummary,
-          bookingUrlOverride: strategy.bookingUrlOverride,
-          dailySendCap: input.dailySendCap ?? 20,
-          metadataJson: toPrismaJson({
-            serviceProfile: {
-              businessName: input.businessName,
-              offerName: input.offerName,
-              desiredOutcome: input.desiredOutcome,
-            },
-            strategy,
-          }),
-        },
-      });
-
-      const leadSource = await tx.leadSource.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
+          organizationId: client.organizationId,
+          clientId: client.id,
           campaignId: campaign.id,
-          name: 'AI Generated Lead Pool',
-          type: LeadSourceType.INTERNAL_GROWTH,
-          configJson: toPrismaJson({
-            generator: 'openai',
-            model: 'gpt-4o-mini',
-            generatedLeadCount: leads.length,
-          }),
-          importedAt: new Date(),
-        },
-      });
-
-      const sequence = await tx.sequence.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          campaignId: campaign.id,
-          name: `${strategy.campaignName} Sequence`,
-          status: SequenceStatus.DRAFT,
-          description: `AI-generated sequence for ${strategy.campaignName}`,
-        },
-      });
-
-      const normalizedSteps = this.normalizeSequenceSteps(sequenceSteps);
-      const stepRecords = [] as { id: string; orderIndex: number }[];
-      for (const step of normalizedSteps) {
-        const record = await tx.sequenceStep.create({
-          data: {
-            sequenceId: sequence.id,
-            orderIndex: step.orderIndex,
-            type: SequenceStepType.EMAIL,
-            status: SequenceStepStatus.ACTIVE,
-            waitDays: step.waitDays,
-            subjectTemplate: step.subjectTemplate,
-            bodyTemplate: step.bodyTemplate,
-            instructionText: step.instructionText,
-            variantPolicyJson: toPrismaJson({ generator: 'ai' }),
-          },
-        });
-        stepRecords.push({ id: record.id, orderIndex: record.orderIndex });
-      }
-
-      const firstStep = stepRecords[0] ?? null;
-      const createdLeads = [] as { leadId: string; contactFullName: string; companyName: string; email?: string }[];
-
-      for (const generated of messageDrafts) {
-        const candidate = generated.candidate;
-        const account = await tx.account.create({
-          data: {
-            organizationId: input.organizationId,
-            clientId: input.clientId,
-            companyName: candidate.companyName,
-            domain: candidate.domain,
-            industry: candidate.industry,
-            employeeCount: candidate.employeeCount,
-            city: candidate.city,
-            region: candidate.region,
-            countryCode: candidate.countryCode,
-          },
-        });
-
-        const contact = await tx.contact.create({
-          data: {
-            organizationId: input.organizationId,
-            clientId: input.clientId,
-            accountId: account.id,
-            fullName: candidate.contactFullName,
-            firstName: candidate.firstName,
-            lastName: candidate.lastName,
-            title: candidate.title,
-            email: candidate.email,
-            linkedinUrl: candidate.linkedinUrl,
-            timezone: candidate.timezone,
-            city: candidate.city,
-            region: candidate.region,
-            countryCode: candidate.countryCode,
-          },
-        });
-
-        const lead = await tx.lead.create({
-          data: {
-            organizationId: input.organizationId,
-            clientId: input.clientId,
-            campaignId: campaign.id,
-            leadSourceId: leadSource.id,
-            accountId: account.id,
-            contactId: contact.id,
-            status: LeadStatus.NEW,
-            priority: candidate.priority ?? 50,
-            metadataJson: toPrismaJson({
-              reasonForFit: candidate.reasonForFit,
-              qualificationNotes: candidate.qualificationNotes,
-              generatedBy: 'ai',
-            }),
-          },
-        });
-
-        createdLeads.push({
-          leadId: lead.id,
-          contactFullName: candidate.contactFullName,
-          companyName: candidate.companyName,
-          email: candidate.email,
-        });
-
-        if (firstStep) {
-          const messageDraft = generated.draft;
-
-          await tx.outreachMessage.create({
-            data: {
-              organizationId: input.organizationId,
-              clientId: input.clientId,
-              campaignId: campaign.id,
-              leadId: lead.id,
-              sequenceStepId: firstStep.id,
-              direction: MessageDirection.OUTBOUND,
-              channel: MessageChannel.EMAIL,
-              status: MessageStatus.QUEUED,
-              subjectLine: messageDraft.subject,
-              bodyText: messageDraft.body,
-              metadataJson: toPrismaJson({
-                generatedBy: 'ai',
-                tone: messageDraft.tone,
-                intent: messageDraft.intent,
-              }),
-            },
-          });
-        }
-      }
-
-      await tx.activityEvent.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          campaignId: campaign.id,
-          actorUserId: input.createdById,
-          kind: ActivityKind.CAMPAIGN_CREATED,
-          subjectType: 'campaign',
-          subjectId: campaign.id,
-          summary: `AI prepared campaign ${campaign.name}`,
+          accountId: account.id,
+          contactId: contact.id,
+          workflowRunId: workflow.id,
+          status: LeadStatus.NEW,
+          source: RecordSource.AI_GENERATED,
+          qualificationState: LeadQualificationState.DISCOVERED,
+          priority: lead.priority ?? 0,
           metadataJson: {
-            generatedLeadCount: createdLeads.length,
-            sequenceStepCount: stepRecords.length,
-          } as Prisma.InputJsonValue,
+            reasonForFit: lead.reasonForFit,
+            qualificationNotes: lead.qualificationNotes ?? null,
+          },
         },
+        select: { id: true },
       });
 
-      return {
-        strategy,
-        campaign,
-        icp,
-        segment,
-        leadSource,
-        sequence,
-        leads: createdLeads,
-        sequenceSteps: stepRecords,
-      };
-    });
-  }
-
-  private resolveLeadCount(value?: number) {
-    const candidate = value ?? 12;
-    return Math.max(1, Math.min(candidate, 50));
-  }
-
-  private resolveStepCount(value?: number) {
-    const candidate = value ?? 3;
-    return Math.max(2, Math.min(candidate, 5));
-  }
-
-  private normalizeSequenceSteps(
-    steps: Array<{
-      orderIndex: number;
-      waitDays: number;
-      subjectTemplate?: string;
-      bodyTemplate?: string;
-      instructionText?: string;
-    }>,
-  ) {
-    const valid = steps
-      .filter((step) => Number.isFinite(step.orderIndex))
-      .sort((a, b) => a.orderIndex - b.orderIndex)
-      .slice(0, 5);
-
-    if (valid.length > 0) {
-      return valid;
+      createdLeads.push({
+        id: createdLead.id,
+        label: contact.fullName,
+        candidate: lead,
+      });
     }
 
-    return [
-      {
-        orderIndex: 1,
-        waitDays: 0,
-        subjectTemplate: 'Quick note',
-        bodyTemplate: 'Reaching out with a concise idea that may be relevant.',
-        instructionText: 'Initial outreach email.',
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { generationState: 'LEADS_READY' },
+    });
+
+    let messageCount = 0;
+
+    for (const lead of createdLeads) {
+      const message = await this.writerAgent.generate(strategy, lead.candidate);
+
+      await this.prisma.outreachMessage.create({
+        data: {
+          organizationId: client.organizationId,
+          clientId: client.id,
+          campaignId: campaign.id,
+          leadId: lead.id,
+          workflowRunId: workflow.id,
+          direction: MessageDirection.OUTBOUND,
+          channel: MessageChannel.EMAIL,
+          status: MessageStatus.QUEUED,
+          source: RecordSource.AI_GENERATED,
+          lifecycle: MessageLifecycle.DRAFT,
+          subjectLine: message.subject,
+          bodyText: message.body,
+          metadataJson: {
+            tone: message.tone,
+            intent: message.intent,
+          },
+        },
+      });
+
+      messageCount += 1;
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { generationState: 'MESSAGES_READY' },
+    });
+
+    const sequenceSteps = await this.sequenceAgent.generate(
+      strategy,
+      serviceProfile.sequenceStepCount ?? 3,
+    );
+
+    const sequence = await this.prisma.sequence.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        campaignId: campaign.id,
+        workflowRunId: workflow.id,
+        name: `${campaign.name} sequence`,
+        status: SequenceStatus.DRAFT,
+        source: RecordSource.AI_GENERATED,
+        description: strategy.segmentNotes ?? null,
       },
-      {
-        orderIndex: 2,
-        waitDays: 3,
-        subjectTemplate: 'Following up',
-        bodyTemplate: 'Following up in case this is relevant this quarter.',
-        instructionText: 'Short follow-up.',
+      select: { id: true },
+    });
+
+    for (const step of sequenceSteps) {
+      await this.prisma.sequenceStep.create({
+        data: {
+          sequenceId: sequence.id,
+          orderIndex: step.orderIndex,
+          type: SequenceStepType.EMAIL,
+          status: SequenceStepStatus.ACTIVE,
+          waitDays: step.waitDays,
+          subjectTemplate: step.subjectTemplate ?? null,
+          bodyTemplate: step.bodyTemplate ?? null,
+          instructionText: step.instructionText ?? null,
+        },
+      });
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { generationState: 'SEQUENCE_READY' },
+    });
+
+    await this.prisma.activityEvent.createMany({
+      data: [
+        {
+          organizationId: client.organizationId,
+          clientId: client.id,
+          campaignId: campaign.id,
+          workflowRunId: workflow.id,
+          kind: ActivityKind.CAMPAIGN_CREATED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'campaign',
+          subjectId: campaign.id,
+          summary: 'Targeting configured',
+          metadataJson: { campaignId: campaign.id },
+        },
+        {
+          organizationId: client.organizationId,
+          clientId: client.id,
+          campaignId: campaign.id,
+          workflowRunId: workflow.id,
+          kind: ActivityKind.LEAD_IMPORTED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'campaign',
+          subjectId: campaign.id,
+          summary: `${createdLeads.length} leads prepared`,
+          metadataJson: { campaignId: campaign.id, count: createdLeads.length },
+        },
+        {
+          organizationId: client.organizationId,
+          clientId: client.id,
+          campaignId: campaign.id,
+          workflowRunId: workflow.id,
+          kind: ActivityKind.NOTE_ADDED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'campaign',
+          subjectId: campaign.id,
+          summary: `${messageCount} messages drafted`,
+          metadataJson: { campaignId: campaign.id, count: messageCount },
+        },
+      ],
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { generationState: 'READY_TO_LAUNCH' },
+    });
+
+    await this.workflows.completeWorkflowRun(workflow.id, {
+      campaignId: campaign.id,
+      sequenceId: sequence.id,
+      leadCount: createdLeads.length,
+      messageCount,
+    });
+
+    return {
+      workflowRunId: workflow.id,
+      campaignId: campaign.id,
+      sequenceId: sequence.id,
+      leadCount: createdLeads.length,
+      messageCount,
+      status: 'READY_TO_LAUNCH',
+    };
+  }
+
+  async generateGrowthMessages(input: GenerateGrowthMessagesDto) {
+    const client = await this.prisma.client.findUniqueOrThrow({
+      where: { id: input.clientId },
+      select: {
+        id: true,
+        organizationId: true,
+        legalName: true,
+        displayName: true,
+        websiteUrl: true,
+        bookingUrl: true,
+        outboundOffer: true,
       },
-      {
-        orderIndex: 3,
-        waitDays: 7,
-        subjectTemplate: 'Final check-in',
-        bodyTemplate: 'Leaving one final note in case timing is better later.',
-        instructionText: 'Final follow-up.',
+    });
+
+    const campaign = await this.prisma.campaign.findUniqueOrThrow({
+      where: { id: input.campaignId },
+      select: {
+        id: true,
+        name: true,
+        clientId: true,
+        workflowRunId: true,
+        metadataJson: true,
       },
-    ];
+    });
+
+    const strategy = (campaign.metadataJson as StrategyBrief | null) ?? null;
+
+    if (!strategy) {
+      return {
+        ok: false,
+        message: 'Campaign strategy metadata is missing. Activate growth workspace first.',
+      };
+    }
+
+    const workflowRunId = campaign.workflowRunId ?? input.workflowRunId ?? null;
+    if (!workflowRunId) {
+      return {
+        ok: false,
+        message: 'No workflowRunId is available for this campaign.',
+      };
+    }
+
+    let generated = 0;
+
+    for (const lead of input.leads) {
+      const candidate: LeadCandidate = {
+        companyName: lead.company ?? 'Unknown company',
+        contactFullName: lead.label ?? 'Unknown contact',
+        title: lead.role ?? 'Decision maker',
+        reasonForFit: 'Regenerated from campaign context',
+      };
+
+      const draft = await this.writerAgent.generate(strategy, candidate);
+
+      await this.prisma.outreachMessage.create({
+        data: {
+          organizationId: client.organizationId,
+          clientId: client.id,
+          campaignId: campaign.id,
+          leadId: lead.id,
+          workflowRunId,
+          direction: MessageDirection.OUTBOUND,
+          channel: MessageChannel.EMAIL,
+          status: MessageStatus.QUEUED,
+          source: RecordSource.AI_GENERATED,
+          lifecycle: MessageLifecycle.DRAFT,
+          subjectLine: draft.subject,
+          bodyText: draft.body,
+          metadataJson: {
+            tone: draft.tone,
+            intent: draft.intent,
+            regenerated: true,
+          },
+        },
+      });
+
+      generated += 1;
+    }
+
+    await this.prisma.activityEvent.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        campaignId: campaign.id,
+        workflowRunId,
+        kind: ActivityKind.NOTE_ADDED,
+        visibility: ActivityVisibility.CLIENT_VISIBLE,
+        subjectType: 'campaign',
+        subjectId: campaign.id,
+        summary: `${generated} messages generated`,
+        metadataJson: { count: generated },
+      },
+    });
+
+    return {
+      ok: true,
+      workflowRunId,
+      campaignId: campaign.id,
+      generatedCount: generated,
+    };
+  }
+
+  async generateGrowthSequence(input: GenerateGrowthSequenceDto) {
+    const client = await this.prisma.client.findUniqueOrThrow({
+      where: { id: input.clientId },
+      select: {
+        id: true,
+        organizationId: true,
+      },
+    });
+
+    const campaign = await this.prisma.campaign.findUniqueOrThrow({
+      where: { id: input.campaignId },
+      select: {
+        id: true,
+        name: true,
+        workflowRunId: true,
+        metadataJson: true,
+      },
+    });
+
+    const strategy = (campaign.metadataJson as StrategyBrief | null) ?? null;
+
+    if (!strategy) {
+      return {
+        ok: false,
+        message: 'Campaign strategy metadata is missing. Activate growth workspace first.',
+      };
+    }
+
+    const stepCount = input.context?.desiredStepCount ?? 3;
+    const steps = await this.sequenceAgent.generate(strategy, stepCount);
+    const workflowRunId = campaign.workflowRunId ?? input.workflowRunId ?? null;
+
+    const sequence = await this.prisma.sequence.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        campaignId: campaign.id,
+        workflowRunId: workflowRunId ?? undefined,
+        name: `${campaign.name} regenerated sequence`,
+        status: SequenceStatus.DRAFT,
+        source: RecordSource.AI_GENERATED,
+        description: input.context?.offer ?? null,
+      },
+      select: { id: true },
+    });
+
+    for (const step of steps) {
+      await this.prisma.sequenceStep.create({
+        data: {
+          sequenceId: sequence.id,
+          orderIndex: step.orderIndex,
+          type: SequenceStepType.EMAIL,
+          status: SequenceStepStatus.ACTIVE,
+          waitDays: step.waitDays,
+          subjectTemplate: step.subjectTemplate ?? null,
+          bodyTemplate: step.bodyTemplate ?? null,
+          instructionText: step.instructionText ?? null,
+        },
+      });
+    }
+
+    if (workflowRunId) {
+      await this.prisma.activityEvent.create({
+        data: {
+          organizationId: client.organizationId,
+          clientId: client.id,
+          campaignId: campaign.id,
+          workflowRunId,
+          kind: ActivityKind.NOTE_ADDED,
+          visibility: ActivityVisibility.CLIENT_VISIBLE,
+          subjectType: 'campaign',
+          subjectId: campaign.id,
+          summary: `Sequence generated with ${steps.length} steps`,
+          metadataJson: { sequenceId: sequence.id, count: steps.length },
+        },
+      });
+    }
+
+    return {
+      ok: true,
+      workflowRunId,
+      campaignId: campaign.id,
+      sequenceId: sequence.id,
+      stepCount: steps.length,
+    };
+  }
+
+  async generateReminder(input: GenerateReminderDto) {
+    const client = await this.prisma.client.findUniqueOrThrow({
+      where: { id: input.clientId },
+      select: { id: true, organizationId: true, legalName: true, displayName: true },
+    });
+
+    const clientName = client.displayName || client.legalName;
+
+    const workflow = await this.workflows.createWorkflowRun({
+      clientId: client.id,
+      lane: WorkflowLane.REVENUE,
+      type: WorkflowType.REMINDER_DISPATCH,
+      status: WorkflowStatus.COMPLETED,
+      trigger: WorkflowTrigger.USER_ACTION,
+      source: RecordSource.AI_GENERATED,
+      title: `Reminder draft for ${clientName}`,
+      inputJson: {
+        clientId: input.clientId,
+        context: input.context,
+      },
+      contextJson: {
+        initiatedBy: 'ai.controller',
+        endpoint: 'POST /v1/ai/revenue/reminder/generate',
+      },
+      resultJson: { kind: 'REMINDER_DRAFT' },
+      completedAt: new Date(),
+    });
+
+    const amountText =
+      typeof input.context?.amount === 'number'
+        ? `$${input.context.amount.toFixed(2)}`
+        : 'the outstanding balance';
+
+    const dueDateText = input.context?.dueDate ?? 'the due date on file';
+
+    const subject = 'Friendly reminder regarding your invoice';
+    const body = [
+      'Hello,',
+      '',
+      `This is a reminder regarding invoice ${input.context?.invoiceId ?? ''}`.trim(),
+      `Our records show ${amountText} is pending, with reference to ${dueDateText}.`,
+      'Please review and arrange payment at your earliest convenience.',
+      '',
+      'Thank you.',
+    ].join('\n');
+
+    await this.prisma.activityEvent.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        workflowRunId: workflow.id,
+        kind: ActivityKind.NOTE_ADDED,
+        visibility: ActivityVisibility.CLIENT_VISIBLE,
+        subjectType: 'revenue_reminder',
+        subjectId: workflow.id,
+        summary: 'Reminder draft generated',
+        metadataJson: {
+          invoiceId: input.context?.invoiceId ?? null,
+        },
+      },
+    });
+
+    return {
+      workflowRunId: workflow.id,
+      kind: 'REMINDER_DRAFT',
+      subject,
+      body,
+      context: input.context,
+    };
+  }
+
+  async generateAgreementDraft(input: GenerateAgreementDraftDto) {
+    const client = await this.prisma.client.findUniqueOrThrow({
+      where: { id: input.clientId },
+      select: { id: true, organizationId: true, legalName: true, displayName: true },
+    });
+
+    const clientName = client.displayName || client.legalName;
+
+    const workflow = await this.workflows.createWorkflowRun({
+      clientId: client.id,
+      lane: WorkflowLane.DOCUMENTS,
+      type: WorkflowType.AGREEMENT_ISSUANCE,
+      status: WorkflowStatus.COMPLETED,
+      trigger: WorkflowTrigger.USER_ACTION,
+      source: RecordSource.AI_GENERATED,
+      title: `Agreement draft for ${clientName}`,
+      inputJson: {
+        clientId: input.clientId,
+        context: input.context,
+      },
+      contextJson: {
+        initiatedBy: 'ai.controller',
+        endpoint: 'POST /v1/ai/revenue/agreement/generate-draft',
+      },
+      resultJson: { kind: 'AGREEMENT_DRAFT' },
+      completedAt: new Date(),
+    });
+
+    const draft = [
+      'Service Agreement Draft',
+      '',
+      `Client: ${clientName}`,
+      `Service: ${input.context.service}`,
+      '',
+      'Scope',
+      input.context.terms ??
+        'The parties agree to the service scope and delivery boundaries as defined in the client profile and active service configuration.',
+      '',
+      'Performance',
+      'Services will be delivered according to the active workflow, plan limits, and operational availability defined in Orchestrate.',
+      '',
+      'Commercial Terms',
+      'Billing, invoices, receipts, reminders, and statements remain governed by the active subscription and issued financial records.',
+    ].join('\n');
+
+    await this.prisma.activityEvent.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        workflowRunId: workflow.id,
+        kind: ActivityKind.NOTE_ADDED,
+        visibility: ActivityVisibility.CLIENT_VISIBLE,
+        subjectType: 'agreement_draft',
+        subjectId: workflow.id,
+        summary: 'Agreement draft generated',
+        metadataJson: {
+          service: input.context.service,
+        },
+      },
+    });
+
+    return {
+      workflowRunId: workflow.id,
+      kind: 'AGREEMENT_DRAFT',
+      title: `Agreement draft for ${input.context.service}`,
+      body: draft,
+      context: input.context,
+    };
+  }
+
+  async generateStatementSummary(input: GenerateStatementSummaryDto) {
+    const client = await this.prisma.client.findUniqueOrThrow({
+      where: { id: input.clientId },
+      select: { id: true, organizationId: true, legalName: true, displayName: true },
+    });
+
+    const clientName = client.displayName || client.legalName;
+
+    const workflow = await this.workflows.createWorkflowRun({
+      clientId: client.id,
+      lane: WorkflowLane.REVENUE,
+      type: WorkflowType.STATEMENT_ISSUANCE,
+      status: WorkflowStatus.COMPLETED,
+      trigger: WorkflowTrigger.USER_ACTION,
+      source: RecordSource.AI_GENERATED,
+      title: `Statement summary for ${clientName}`,
+      inputJson: {
+        clientId: input.clientId,
+        context: input.context,
+      },
+      contextJson: {
+        initiatedBy: 'ai.controller',
+        endpoint: 'POST /v1/ai/revenue/statement/generate-summary',
+      },
+      resultJson: { kind: 'STATEMENT_SUMMARY' },
+      completedAt: new Date(),
+    });
+
+    const summary = [
+      'Statement Summary',
+      '',
+      `Client: ${clientName}`,
+      `Period: ${input.context.period}`,
+      '',
+      'This summary reflects the financial activity recorded for the selected period, including issued invoices, posted payments, receipts, and any outstanding balances still open at statement close.',
+      input.context.summaryData
+        ? 'Additional reference data has been attached in structured form for review.'
+        : 'No additional summary data was provided with this request.',
+    ].join('\n');
+
+    await this.prisma.activityEvent.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        workflowRunId: workflow.id,
+        kind: ActivityKind.NOTE_ADDED,
+        visibility: ActivityVisibility.CLIENT_VISIBLE,
+        subjectType: 'statement_summary',
+        subjectId: workflow.id,
+        summary: 'Statement summary generated',
+        metadataJson: {
+          period: input.context.period,
+        },
+      },
+    });
+
+    return {
+      workflowRunId: workflow.id,
+      kind: 'STATEMENT_SUMMARY',
+      title: `Statement summary for ${input.context.period}`,
+      body: summary,
+      context: input.context,
+    };
   }
 }
