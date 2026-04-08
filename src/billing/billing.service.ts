@@ -366,7 +366,7 @@ export class BillingService {
       customer: stripeCustomerId,
       line_items: [
         {
-          price: this.resolveStripePriceId(input.plan, input.tier),
+          price: this.stripeService.resolvePriceId(input.plan, input.tier),
           quantity: 1,
         },
       ],
@@ -736,17 +736,6 @@ export class BillingService {
         featuresJson,
       },
     });
-  }
-
-  private resolveStripePriceId(plan: 'OPPORTUNITY' | 'REVENUE', tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
-    const envKey = `STRIPE_PRICE_${plan}_${tier}`;
-    const priceId = process.env[envKey]?.trim();
-
-    if (!priceId) {
-      throw new BadRequestException(`Missing ${envKey} env variable`);
-    }
-
-    return priceId;
   }
 
   private resolvePlanAmountCents(plan: 'OPPORTUNITY' | 'REVENUE', tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
