@@ -477,6 +477,10 @@ export class BillingService {
       });
     }
 
+    if (!stripeCustomerId) {
+      throw new BadRequestException('Unable to resolve Stripe customer for checkout');
+    }
+
     const baseUrl =
       process.env.CLIENT_BASE_URL?.trim() ||
       process.env.CLIENT_PORTAL_BASE_URL?.trim();
