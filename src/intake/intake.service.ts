@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { IntakeAiService } from '../ai/intake-ai.service';
 import { SupportCaseService } from '../support/support-case.service';
-import { IntakeResponse, NormalizedIntakeInput } from './intake.types';
+import {
+  IntakeAiResult,
+  IntakeResponse,
+  NormalizedIntakeInput,
+} from './intake.types';
 
 @Injectable()
 export class IntakeService {
@@ -54,7 +58,7 @@ export class IntakeService {
       ]);
 
       if (needsFollowUp) {
-        const followUpAi = {
+        const followUpAi: IntakeAiResult = {
           category: 'billing',
           intent: 'issue',
           priority: 'high',
@@ -64,8 +68,10 @@ export class IntakeService {
           summary: 'Billing inquiry needs one clarifying detail before routing.',
           suggestedReply: 'I need one detail before I route this correctly.',
           missingFields: ['billing_scope'],
-          followUpQuestions: ['Is this about a current subscription, a recent checkout attempt, or an invoice or payment issue?'],
-        } as const;
+          followUpQuestions: [
+            'Is this about a current subscription, a recent checkout attempt, or an invoice or payment issue?',
+          ],
+        };
 
         const persisted = await this.supportCases.createFollowUpSession(
           input,
@@ -86,7 +92,7 @@ export class IntakeService {
         };
       }
 
-      const escalatedAi = {
+      const escalatedAi: IntakeAiResult = {
         category: 'billing',
         intent: 'issue',
         priority: 'high',
@@ -97,7 +103,7 @@ export class IntakeService {
         suggestedReply: 'Your billing request has been routed for review.',
         missingFields: [],
         followUpQuestions: [],
-      } as const;
+      };
 
       const persisted = await this.supportCases.createEscalatedCase(
         input,
@@ -172,7 +178,11 @@ export class IntakeService {
 
   async replyPublic(sessionId: string, message: string): Promise<IntakeResponse> {
     const inquiry = await this.supportCases.appendInboundReply(sessionId, message);
-    const combinedMessage = this.buildReplyContext(inquiry.message, inquiry.followUpStateJson, message);
+    const combinedMessage = this.buildReplyContext(
+      inquiry.message,
+      inquiry.followUpStateJson,
+      message,
+    );
 
     const ai = await this.ai.classify({
       source: inquiry.sourceKind as 'PUBLIC' | 'CLIENT',
@@ -189,7 +199,11 @@ export class IntakeService {
     });
 
     if (!ai.requiresHuman && ai.confidence >= 0.75) {
-      await this.supportCases.markResolvedByAi(sessionId, ai, ai.suggestedReply || 'Thanks. That resolves the request.');
+      await this.supportCases.markResolvedByAi(
+        sessionId,
+        ai,
+        ai.suggestedReply || 'Thanks. That resolves the request.',
+      );
       return {
         status: 'resolved',
         reply: ai.suggestedReply || 'Thanks. That resolves the request.',
@@ -204,7 +218,12 @@ export class IntakeService {
 
     if (ai.shouldAskFollowUp) {
       const followUpReply = 'I need one detail before I route this correctly.';
-      await this.supportCases.markNeedsFollowUp(sessionId, ai, followUpReply, ai.followUpQuestions ?? []);
+      await this.supportCases.markNeedsFollowUp(
+        sessionId,
+        ai,
+        followUpReply,
+        ai.followUpQuestions ?? [],
+      );
       return {
         status: 'needs_follow_up',
         reply: followUpReply,
@@ -218,7 +237,11 @@ export class IntakeService {
     }
 
     const escalatedReply = 'Your request has been routed for review.';
-    const escalated = await this.supportCases.escalateExistingSession(sessionId, ai, escalatedReply);
+    const escalated = await this.supportCases.escalateExistingSession(
+      sessionId,
+      ai,
+      escalatedReply,
+    );
     return {
       status: 'escalated',
       reply: escalatedReply,
@@ -240,7 +263,11 @@ export class IntakeService {
     return candidates.some((candidate) => text.includes(candidate));
   }
 
-  private buildReplyContext(initialMessage: string, followUpStateJson: unknown, latestReply: string): string {
+  private buildReplyContext(
+    initialMessage: string,
+    followUpStateJson: unknown,
+    latestReply: string,
+  ): string {
     const history = this.extractHistory(followUpStateJson)
       .map((entry) => {
         if (!entry || typeof entry !== 'object') return null;

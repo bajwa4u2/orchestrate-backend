@@ -15,6 +15,8 @@ export class SupportCaseRepository {
   }): Promise<{ inquiryId: string; sessionId: string }> {
     const sessionId = this.buildSessionId();
     const now = new Date();
+    const reply = params.reply ?? params.ai.suggestedReply ?? '';
+
     const inquiry = await this.prisma.publicInquiry.create({
       data: {
         inquiryType: this.resolveInquiryType(params.input.inquiryTypeHint),
@@ -29,7 +31,7 @@ export class SupportCaseRepository {
             mode: 'follow_up',
             persistedAt: now.toISOString(),
           },
-        },
+        } as any,
         sourceKind: params.input.source,
         accountType: this.resolveAccountType(params.input.source),
         category: params.ai.category.toUpperCase() as any,
@@ -42,11 +44,8 @@ export class SupportCaseRepository {
         aiSummary: params.ai.summary,
         aiSuggestedReply: reply,
         aiRawJson: params.ai as any,
-        followUpStateJson: {
-          awaitingReply: true,
-          missingFields: params.ai.missingFields ?? [],
-          questions: params.questions,
-          history: [
+        followUpStateJson: this.buildFollowUpState(
+          [
             {
               role: 'user',
               message: params.input.message,
@@ -59,7 +58,12 @@ export class SupportCaseRepository {
               at: now.toISOString(),
             },
           ],
-        },
+          {
+            awaitingReply: true,
+            missingFields: params.ai.missingFields ?? [],
+            questions: params.questions,
+          },
+        ),
         sourcePage: params.input.sourcePage ?? null,
         planContext: params.input.planContext ?? null,
         tierContext: params.input.tierContext ?? null,
@@ -94,6 +98,8 @@ export class SupportCaseRepository {
   }): Promise<{ inquiryId: string; sessionId: string }> {
     const sessionId = this.buildSessionId();
     const now = new Date();
+    const reply = params.reply ?? params.ai.suggestedReply ?? '';
+
     const inquiry = await this.prisma.publicInquiry.create({
       data: {
         inquiryType: this.resolveInquiryType(params.input.inquiryTypeHint),
@@ -108,7 +114,7 @@ export class SupportCaseRepository {
             mode: 'escalated',
             persistedAt: now.toISOString(),
           },
-        },
+        } as any,
         sourceKind: params.input.source,
         accountType: this.resolveAccountType(params.input.source),
         category: params.ai.category.toUpperCase() as any,
@@ -185,18 +191,18 @@ export class SupportCaseRepository {
     history?: unknown[];
   }): Promise<void> {
     const now = new Date();
+    const nextHistory = this.appendHistory(params.history, {
+      role: 'user',
+      message: params.message,
+      at: now.toISOString(),
+    });
+
     await this.prisma.publicInquiry.update({
       where: { id: params.inquiryId },
       data: {
         lastInboundAt: now,
         lastActivityAt: now,
-        followUpStateJson: {
-          history: [...(Array.isArray(params.history) ? params.history : []), {
-            role: 'user',
-            message: params.message,
-            at: now.toISOString(),
-          }],
-        },
+        followUpStateJson: this.buildFollowUpState(nextHistory),
         messages: {
           create: {
             direction: 'INBOUND' as any,
@@ -223,6 +229,14 @@ export class SupportCaseRepository {
     email?: string | null;
   }): Promise<void> {
     const now = new Date();
+    const reply = params.reply ?? params.ai.suggestedReply ?? '';
+    const nextHistory = this.appendHistory(params.history, {
+      role: 'assistant',
+      message: reply,
+      questions: params.questions,
+      at: now.toISOString(),
+    });
+
     await this.prisma.publicInquiry.update({
       where: { id: params.inquiryId },
       data: {
@@ -240,19 +254,18 @@ export class SupportCaseRepository {
         nextResponseDueAt: now,
         lastOutboundAt: now,
         lastActivityAt: now,
-        followUpStateJson: {
+        followUpStateJson: this.buildFollowUpState(nextHistory, {
           awaitingReply: true,
           missingFields: params.ai.missingFields ?? [],
           questions: params.questions,
-          history: [...(Array.isArray(params.history) ? params.history : []), {
-            role: 'assistant',
-            message: reply,
-            questions: params.questions,
-            at: now.toISOString(),
-          }],
-        },
+        }),
         messages: {
-          create: this.buildOutboundAiMessage(reply, { source: params.source } as NormalizedIntakeInput, now, params.email ?? null),
+          create: this.buildOutboundAiMessage(
+            reply,
+            { source: params.source } as NormalizedIntakeInput,
+            now,
+            params.email ?? null,
+          ),
         },
       },
     });
@@ -267,6 +280,13 @@ export class SupportCaseRepository {
     email?: string | null;
   }): Promise<void> {
     const now = new Date();
+    const reply = params.reply ?? params.ai.suggestedReply ?? '';
+    const nextHistory = this.appendHistory(params.history, {
+      role: 'assistant',
+      message: reply,
+      at: now.toISOString(),
+    });
+
     await this.prisma.publicInquiry.update({
       where: { id: params.inquiryId },
       data: {
@@ -285,16 +305,16 @@ export class SupportCaseRepository {
         lastOutboundAt: now,
         lastActivityAt: now,
         closedAt: now,
-        followUpStateJson: {
+        followUpStateJson: this.buildFollowUpState(nextHistory, {
           awaitingReply: false,
-          history: [...(Array.isArray(params.history) ? params.history : []), {
-            role: 'assistant',
-            message: reply,
-            at: now.toISOString(),
-          }],
-        },
+        }),
         messages: {
-          create: this.buildOutboundAiMessage(reply, { source: params.source } as NormalizedIntakeInput, now, params.email ?? null),
+          create: this.buildOutboundAiMessage(
+            reply,
+            { source: params.source } as NormalizedIntakeInput,
+            now,
+            params.email ?? null,
+          ),
         },
       },
     });
@@ -309,6 +329,13 @@ export class SupportCaseRepository {
     email?: string | null;
   }): Promise<void> {
     const now = new Date();
+    const reply = params.reply ?? params.ai.suggestedReply ?? '';
+    const nextHistory = this.appendHistory(params.history, {
+      role: 'assistant',
+      message: reply,
+      at: now.toISOString(),
+    });
+
     await this.prisma.publicInquiry.update({
       where: { id: params.inquiryId },
       data: {
@@ -328,16 +355,16 @@ export class SupportCaseRepository {
         nextResponseDueAt: now,
         lastOutboundAt: now,
         lastActivityAt: now,
-        followUpStateJson: {
+        followUpStateJson: this.buildFollowUpState(nextHistory, {
           awaitingReply: false,
-          history: [...(Array.isArray(params.history) ? params.history : []), {
-            role: 'assistant',
-            message: reply,
-            at: now.toISOString(),
-          }],
-        },
+        }),
         messages: {
-          create: this.buildOutboundAiMessage(reply, { source: params.source } as NormalizedIntakeInput, now, params.email ?? null),
+          create: this.buildOutboundAiMessage(
+            reply,
+            { source: params.source } as NormalizedIntakeInput,
+            now,
+            params.email ?? null,
+          ),
         },
       },
     });
@@ -418,5 +445,20 @@ export class SupportCaseRepository {
       toEmail: toEmail ?? input.email ?? null,
       sentAt: now,
     };
+  }
+
+  private appendHistory(history: unknown[] | undefined, entry: Record<string, unknown>) {
+    const safeHistory = Array.isArray(history) ? history : [];
+    return [...safeHistory, entry];
+  }
+
+  private buildFollowUpState(
+    history: unknown[],
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      ...extra,
+      history: JSON.parse(JSON.stringify(history)),
+    } as any;
   }
 }
