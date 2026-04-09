@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
 import { CreatePublicContactDto, PublicInquiryTypeDto } from './dto/create-public-contact.dto';
+import { getPlansGrouped } from '../billing/pricing/plan-catalog.service';
 
 @Injectable()
 export class PublicService {
@@ -35,28 +36,58 @@ export class PublicService {
       return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.min(30, Math.floor(parsed))) : 0;
     })();
 
+    const grouped = getPlansGrouped();
+
     return {
       trialDays: configuredTrialDays,
       plans: [
-        {
-          code: 'opportunity',
-          name: 'Opportunity',
-          amountCents: 43500,
-          currencyCode: 'USD',
-          interval: 'month',
+        ...grouped.opportunity.map((plan) => ({
+          code: `opportunity_${plan.tier}`,
+          lane: plan.lane,
+          tier: plan.tier,
+          name: `Opportunity ${plan.label}`,
+          amountCents: plan.amountCents,
+          displayPrice: plan.displayPrice,
+          currencyCode: plan.currency.toUpperCase(),
+          interval: plan.interval,
           trialDays: configuredTrialDays,
-          summary: 'Lead generation, outreach, follow-up, and meeting booking.',
-        },
-        {
-          code: 'revenue',
-          name: 'Revenue',
-          amountCents: 87000,
-          currencyCode: 'USD',
-          interval: 'month',
+          summary: plan.description,
+        })),
+        ...grouped.revenue.map((plan) => ({
+          code: `revenue_${plan.tier}`,
+          lane: plan.lane,
+          tier: plan.tier,
+          name: `Revenue ${plan.label}`,
+          amountCents: plan.amountCents,
+          displayPrice: plan.displayPrice,
+          currencyCode: plan.currency.toUpperCase(),
+          interval: plan.interval,
           trialDays: configuredTrialDays,
-          summary: 'Everything in Opportunity plus billing and revenue-side operations.',
-        },
+          summary: plan.description,
+        })),
       ],
+      grouped: {
+        opportunity: grouped.opportunity.map((plan) => ({
+          lane: plan.lane,
+          tier: plan.tier,
+          label: plan.label,
+          amountCents: plan.amountCents,
+          displayPrice: plan.displayPrice,
+          currencyCode: plan.currency.toUpperCase(),
+          interval: plan.interval,
+          description: plan.description,
+        })),
+        revenue: grouped.revenue.map((plan) => ({
+          lane: plan.lane,
+          tier: plan.tier,
+          label: plan.label,
+          amountCents: plan.amountCents,
+          displayPrice: plan.displayPrice,
+          currencyCode: plan.currency.toUpperCase(),
+          interval: plan.interval,
+          description: plan.description,
+        })),
+      },
       sequence: [
         'Choose plan',
         'Create account',

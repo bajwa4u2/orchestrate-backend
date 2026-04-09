@@ -9,6 +9,7 @@ import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { StripeService } from './stripe/stripe.service';
 import { WorkflowsService } from '../workflows/workflows.service';
+import { getPlan } from './pricing/plan-catalog.service';
 
 type CreateSubscriptionIntentInput = {
   organizationId: string;
@@ -443,6 +444,14 @@ export class BillingService {
     });
 
     const plan = await this.resolvePlan(input.organizationId, input.plan, input.tier);
+    const planCatalog = getPlan(
+      input.plan.toLowerCase() as 'opportunity' | 'revenue',
+      input.tier.toLowerCase() as 'focused' | 'multi' | 'precision',
+    );
+
+    if (!planCatalog) {
+      throw new BadRequestException('Invalid plan selection');
+    }
     const clientMetadata = this.asObject(client.metadataJson);
     const billingMetadata = this.asObject((clientMetadata as Record<string, unknown>).billing as Prisma.JsonValue);
 
@@ -495,7 +504,7 @@ export class BillingService {
 
     const checkoutSession = await this.stripeService.createCheckoutSession({
       customerId: stripeCustomerId,
-      priceId: this.stripeService.resolvePriceId(input.plan, input.tier),
+      priceId: planCatalog.stripePriceId,
       successUrl: `${normalizedBaseUrl}/client/workspace?billing=success${trialDays ? '&trial=1' : ''}`,
       cancelUrl: `${normalizedBaseUrl}/client/subscribe?plan=${input.plan.toLowerCase()}&tier=${input.tier.toLowerCase()}&canceled=1`,
       metadata: {
@@ -1006,6 +1015,14 @@ export class BillingService {
     plan: 'OPPORTUNITY' | 'REVENUE',
     tier: 'FOCUSED' | 'MULTI' | 'PRECISION',
   ) {
+    const normalizedLane = plan.toLowerCase() as 'opportunity' | 'revenue';
+    const normalizedTier = tier.toLowerCase() as 'focused' | 'multi' | 'precision';
+    const planCatalog = getPlan(normalizedLane, normalizedTier);
+
+    if (!planCatalog) {
+      throw new BadRequestException('Invalid plan selection');
+    }
+
     const desiredCode = `${plan}_${tier}_MONTHLY`;
 
     const existing = await this.prisma.plan.findFirst({
@@ -1014,36 +1031,14 @@ export class BillingService {
 
     if (existing) return existing;
 
-    const isOpportunity = plan === 'OPPORTUNITY';
-    const namePrefix = isOpportunity ? 'Opportunity' : 'Revenue';
+    const laneLabel = normalizedLane === 'opportunity' ? 'Opportunity' : 'Revenue';
 
-    const tierLabel =
-      tier === 'FOCUSED'
-        ? 'Focused'
-        : tier === 'MULTI'
-          ? 'Multi-Market'
-          : 'Precision';
-
-    const description = isOpportunity
-      ? tier === 'FOCUSED'
-        ? 'Operate within a single country across multiple regions with structured outreach and follow-up.'
-        : tier === 'MULTI'
-          ? 'Operate across multiple countries with structured outreach and follow-up.'
-          : 'Advanced targeting with city-level precision and prioritized market execution.'
-      : tier === 'FOCUSED'
-        ? 'Operate within a single country across multiple regions with full outreach and billing support.'
-        : tier === 'MULTI'
-          ? 'Operate across multiple countries with full outreach and billing support.'
-          : 'Advanced targeting with city-level precision and full operational control.';
-
-    const amountCents = this.resolvePlanAmountCents(plan, tier);
-
-    const featuresJson = isOpportunity
+    const featuresJson = normalizedLane === 'opportunity'
       ? {
           positioning:
-            tier === 'FOCUSED'
+            normalizedTier === 'focused'
               ? 'Operate within one country and scale across regions.'
-              : tier === 'MULTI'
+              : normalizedTier === 'multi'
                 ? 'Run outreach across multiple countries with one operating system.'
                 : 'Direct outreach with city-level precision and market priority control.',
           scope: [
@@ -1056,9 +1051,9 @@ export class BillingService {
         }
       : {
           positioning:
-            tier === 'FOCUSED'
+            normalizedTier === 'focused'
               ? 'Operate within one country with billing and collection continuity.'
-              : tier === 'MULTI'
+              : normalizedTier === 'multi'
                 ? 'Run outreach and billing operations across multiple countries.'
                 : 'Direct outreach and billing with precision market control.',
           scope: [
@@ -1078,26 +1073,14 @@ export class BillingService {
       data: {
         organizationId,
         code: desiredCode,
-        name: `${namePrefix} ${tierLabel}`,
-        description,
-        amountCents,
-        currencyCode: 'USD',
+        name: `${laneLabel} ${planCatalog.label}`,
+        description: planCatalog.description,
+        amountCents: planCatalog.amountCents,
+        currencyCode: planCatalog.currency.toUpperCase(),
         interval: 'MONTHLY' as const,
         featuresJson,
       },
     });
-  }
-
-  private resolvePlanAmountCents(plan: 'OPPORTUNITY' | 'REVENUE', tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
-    if (plan === 'OPPORTUNITY') {
-      if (tier === 'FOCUSED') return 43500;
-      if (tier === 'MULTI') return 64500;
-      return 97500;
-    }
-
-    if (tier === 'FOCUSED') return 87000;
-    if (tier === 'MULTI') return 129000;
-    return 195000;
   }
 
   private resolveCoverageFeatures(tier: 'FOCUSED' | 'MULTI' | 'PRECISION') {
