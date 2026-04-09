@@ -191,7 +191,7 @@ export class IntakeService {
     normalizedType: string | null,
     loweredMessage: string,
     input: NormalizedIntakeInput,
-  ): IntakeResponse | null {
+  ): Promise<IntakeResponse | null> {
     if (
       normalizedType === 'pricing' ||
       normalizedType === 'service_fit' ||
