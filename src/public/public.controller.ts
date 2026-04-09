@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { CreatePublicContactDto } from './dto/create-public-contact.dto';
 import { PublicService } from './public.service';
 
@@ -19,5 +19,28 @@ export class PublicController {
   @Post('contact')
   async submitContact(@Body() dto: CreatePublicContactDto) {
     return this.publicService.submitContact(dto);
+  }
+
+  @Post('intake')
+  async submitIntake(
+    @Body()
+    body: {
+      message: string;
+      name?: string | null;
+      email?: string | null;
+      company?: string | null;
+      sourcePage?: string | null;
+      inquiryTypeHint?: string | null;
+    },
+  ) {
+    return this.publicService.submitIntake(body);
+  }
+
+  @Post('intake/:sessionId/reply')
+  async replyToSession(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { message: string },
+  ) {
+    return this.publicService.replyToIntakeSession(sessionId, body.message);
   }
 }

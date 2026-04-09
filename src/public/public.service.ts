@@ -259,6 +259,38 @@ export class PublicService {
     };
   }
 
+  async submitIntake(input: {
+    message: string;
+    name?: string | null;
+    email?: string | null;
+    company?: string | null;
+    sourcePage?: string | null;
+    inquiryTypeHint?: string | null;
+  }) {
+    const normalized = {
+      message: input.message.trim(),
+      name: input.name?.trim() || null,
+      email: input.email?.trim().toLowerCase() || null,
+      company: input.company?.trim() || null,
+      sourcePage: input.sourcePage?.trim() || 'public',
+      inquiryTypeHint: input.inquiryTypeHint?.trim() || null,
+    };
+
+    return this.intakeService.handlePublic({
+      source: 'PUBLIC',
+      message: normalized.message,
+      name: normalized.name,
+      email: normalized.email,
+      company: normalized.company,
+      sourcePage: normalized.sourcePage,
+      inquiryTypeHint: normalized.inquiryTypeHint,
+    });
+  }
+
+  async replyToIntakeSession(sessionId: string, message: string) {
+    return this.intakeService.replyPublic(sessionId, message.trim());
+  }
+
   private resolveContactRoute(inquiryType: PublicInquiryTypeDto) {
     const hello = process.env.CONTACT_EMAIL_HELLO?.trim() || process.env.EMAIL_REPLY_TO_HELLO?.trim() || 'hello@orchestrateops.com';
     const support = process.env.CONTACT_EMAIL_SUPPORT?.trim() || process.env.EMAIL_REPLY_TO_SUPPORT?.trim() || 'support@orchestrateops.com';
