@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Param, Post } from '@nestjs/common';
 import { IntakeService } from './intake.service';
 
 @Controller('public')
@@ -18,5 +18,13 @@ export class IntakeController {
       tierContext: body?.context?.tier ?? null,
       inquiryTypeHint: body?.inquiryType ?? null,
     });
+  }
+
+  @Post('intake/:sessionId/reply')
+  async publicReply(
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+  ) {
+    return this.intake.replyPublic(sessionId, body?.message ?? '');
   }
 }
