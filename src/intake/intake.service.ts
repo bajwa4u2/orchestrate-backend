@@ -187,7 +187,7 @@ export class IntakeService {
     };
   }
 
-  private resolveDirectKnowledge(
+  private async resolveDirectKnowledge(
     normalizedType: string | null,
     loweredMessage: string,
     input: NormalizedIntakeInput,
