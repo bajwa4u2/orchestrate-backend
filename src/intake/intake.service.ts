@@ -19,7 +19,7 @@ export class IntakeService {
     const normalizedMessage = (input.message || '').trim();
     const loweredMessage = normalizedMessage.toLowerCase();
 
-    const directKnowledgeResponse = this.resolveDirectKnowledge(
+    const directKnowledgeResponse = await this.resolveDirectKnowledge(
       normalizedType,
       loweredMessage,
       input,
@@ -273,7 +273,11 @@ export class IntakeService {
         followUpQuestions: [],
       };
 
-      return await this.createEscalationResponse(input, escalatedAi, escalatedAi.suggestedReply);
+      return await this.createEscalationResponse(
+        input,
+        escalatedAi,
+        escalatedAi.suggestedReply,
+      );
     }
 
     return null;
