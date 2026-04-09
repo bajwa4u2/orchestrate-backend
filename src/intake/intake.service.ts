@@ -254,7 +254,7 @@ export class IntakeService {
           ],
         };
 
-        return this.createFollowUpResponse(input, followUpAi);
+        return await this.createFollowUpResponse(input, followUpAi);
       }
 
       const escalatedAi: IntakeAiResult = {
@@ -273,7 +273,7 @@ export class IntakeService {
         followUpQuestions: [],
       };
 
-      return this.createEscalationResponse(input, escalatedAi, escalatedAi.suggestedReply);
+      return await this.createEscalationResponse(input, escalatedAi, escalatedAi.suggestedReply);
     }
 
     return null;
