@@ -25,7 +25,7 @@ export class IntakeService {
       input,
     );
 
-    if (directKnowledgeResponse) {
+    if (directKnowledgeResponse !== null) {
       return directKnowledgeResponse;
     }
 
