@@ -221,6 +221,60 @@ enum InquiryMessageType {
   SYNC
 }
 
+enum InquirySource {
+  PUBLIC
+  CLIENT
+}
+
+enum InquiryAccountType {
+  PUBLIC
+  CLIENT
+}
+
+enum InquiryCategory {
+  PRICING
+  BILLING
+  SUPPORT
+  TECHNICAL
+  ONBOARDING
+  SALES
+  PARTNERSHIP
+  COMPLIANCE
+  OTHER
+}
+
+enum InquiryIntent {
+  QUESTION
+  ISSUE
+  REQUEST
+  COMPLAINT
+}
+
+enum InquiryPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum InquiryMessageAuthorType {
+  USER
+  AI
+  OPERATOR
+  SYSTEM
+}
+
+enum InquiryMessageVisibility {
+  PUBLIC_THREAD
+  INTERNAL_ONLY
+}
+
+enum InquiryNoteType {
+  AI_SUMMARY
+  OPERATOR_NOTE
+  ESCALATION_NOTE
+  SYSTEM_NOTE
+}
+
 enum EnrollmentStatus {
   PENDING
   ACTIVE
@@ -764,20 +818,21 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  memberships       WorkspaceMember[]
-  createdClients    Client[]           @relation("ClientCreatedBy")
-  createdCampaigns  Campaign[]         @relation("CampaignCreatedBy")
-  createdInvoices   Invoice[]          @relation("InvoiceCreatedBy")
-  createdStatements Statement[]        @relation("StatementCreatedBy")
-  createdAgreements ServiceAgreement[] @relation("AgreementCreatedBy")
-  createdReminders  ReminderArtifact[] @relation("ReminderCreatedBy")
-  createdActivities ActivityEvent[]    @relation("ActivityActor")
-  auditEntries      AuditLog[]         @relation("AuditActor")
-  notesAuthored     Note[]             @relation("NoteAuthor")
-  alertsResolved    Alert[]            @relation("AlertResolvedBy")
-  assignedInquiries PublicInquiry[]    @relation("InquiryAssignedTo")
-  inquiryMessages   InquiryMessage[]   @relation("InquiryMessageCreatedBy")
-  inquiryNotes      InquiryNote[]      @relation("InquiryNoteAuthor")
+  memberships        WorkspaceMember[]
+  createdClients     Client[]           @relation("ClientCreatedBy")
+  createdCampaigns   Campaign[]         @relation("CampaignCreatedBy")
+  createdInvoices    Invoice[]          @relation("InvoiceCreatedBy")
+  createdStatements  Statement[]        @relation("StatementCreatedBy")
+  createdAgreements  ServiceAgreement[] @relation("AgreementCreatedBy")
+  createdReminders   ReminderArtifact[] @relation("ReminderCreatedBy")
+  createdActivities  ActivityEvent[]    @relation("ActivityActor")
+  auditEntries       AuditLog[]         @relation("AuditActor")
+  notesAuthored      Note[]             @relation("NoteAuthor")
+  alertsResolved     Alert[]            @relation("AlertResolvedBy")
+  assignedInquiries  PublicInquiry[]    @relation("InquiryAssignedTo")
+  submittedInquiries PublicInquiry[]    @relation("InquirySubmittedByUser")
+  inquiryMessages    InquiryMessage[]   @relation("InquiryMessageCreatedBy")
+  inquiryNotes       InquiryNote[]      @relation("InquiryNoteAuthor")
 }
 
 model WorkspaceMember {
@@ -873,6 +928,7 @@ model Client {
   tagDefinitions         TagDefinition[]
   invoiceAccessEvents    InvoiceAccessEvent[]
   workflowRuns           WorkflowRun[]
+  inquiries              PublicInquiry[]         @relation("InquiryClient")
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
@@ -2478,6 +2534,28 @@ model PublicInquiry {
   message      String
   metadataJson Json?
 
+  sourceKind        InquirySource      @default(PUBLIC)
+  accountType       InquiryAccountType @default(PUBLIC)
+  category          InquiryCategory?
+  intent            InquiryIntent?
+  priority          InquiryPriority    @default(MEDIUM)
+  aiConfidence      Decimal?           @db.Decimal(5, 4)
+  requiresHuman     Boolean            @default(true)
+  shouldAskFollowUp Boolean            @default(false)
+  resolvedByAi      Boolean            @default(false)
+  aiSummary         String?
+  aiSuggestedReply  String?
+  aiRawJson         Json?
+  followUpStateJson Json?
+  sourcePage        String?
+  planContext       String?
+  tierContext       String?
+  intakeSessionId   String?
+  dedupeHash        String?
+
+  userId   String?
+  clientId String?
+
   assignedToUserId String?
   assignedAt       DateTime?
 
@@ -2501,10 +2579,12 @@ model PublicInquiry {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  assignedTo User?            @relation("InquiryAssignedTo", fields: [assignedToUserId], references: [id], onDelete: SetNull)
-  mailbox    Mailbox?         @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
-  messages   InquiryMessage[]
-  notes      InquiryNote[]
+  submittedBy User?            @relation("InquirySubmittedByUser", fields: [userId], references: [id], onDelete: SetNull)
+  client      Client?          @relation("InquiryClient", fields: [clientId], references: [id], onDelete: SetNull)
+  assignedTo  User?            @relation("InquiryAssignedTo", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  mailbox     Mailbox?         @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  messages    InquiryMessage[]
+  notes       InquiryNote[]
 
   @@index([status, submittedAt])
   @@index([email])
@@ -2514,14 +2594,23 @@ model PublicInquiry {
   @@index([externalThreadId])
   @@index([isEscalated, status])
   @@index([lastActivityAt])
+  @@index([sourceKind, status, submittedAt])
+  @@index([accountType, status, submittedAt])
+  @@index([category, priority, status])
+  @@index([userId, status, submittedAt])
+  @@index([clientId, status, submittedAt])
+  @@index([intakeSessionId])
+  @@index([dedupeHash])
 }
 
 model InquiryMessage {
-  id                String             @id @default(cuid())
+  id                String                   @id @default(cuid())
   inquiryId         String
   direction         InquiryDirection
   channel           InquiryChannel
   messageType       InquiryMessageType
+  authorType        InquiryMessageAuthorType @default(USER)
+  visibility        InquiryMessageVisibility @default(PUBLIC_THREAD)
   subjectLine       String?
   bodyText          String
   fromEmail         String?
@@ -2533,8 +2622,8 @@ model InquiryMessage {
   createdByUserId   String?
   sentAt            DateTime?
   receivedAt        DateTime?
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
 
   inquiry   PublicInquiry @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
   mailbox   Mailbox?      @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
@@ -2545,21 +2634,25 @@ model InquiryMessage {
   @@index([createdByUserId, createdAt])
   @@index([direction, createdAt])
   @@index([messageType, createdAt])
+  @@index([authorType, createdAt])
+  @@index([visibility, createdAt])
   @@index([externalMessageId])
   @@index([externalThreadId])
 }
 
 model InquiryNote {
-  id           String   @id @default(cuid())
+  id           String          @id @default(cuid())
   inquiryId    String
   authorUserId String?
+  noteType     InquiryNoteType @default(OPERATOR_NOTE)
   bodyText     String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
 
   inquiry PublicInquiry @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
   author  User?         @relation("InquiryNoteAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
 
   @@index([inquiryId, createdAt])
   @@index([authorUserId, createdAt])
+  @@index([noteType, createdAt])
 }

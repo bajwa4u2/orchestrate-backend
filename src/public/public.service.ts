@@ -3,12 +3,14 @@ import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
 import { CreatePublicContactDto, PublicInquiryTypeDto } from './dto/create-public-contact.dto';
 import { getPlansGrouped } from '../billing/pricing/plan-catalog.service';
+import { IntakeService } from '../intake/intake.service';
 
 @Injectable()
 export class PublicService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly emailsService: EmailsService,
+    private readonly intakeService: IntakeService,
   ) {}
 
   async getOverview() {
@@ -26,7 +28,6 @@ export class PublicService {
       },
     };
   }
-
 
   async getPricing() {
     const configuredTrialDays = (() => {
@@ -108,6 +109,38 @@ export class PublicService {
       message: dto.message.trim(),
     };
 
+    const intakeResult = await this.intakeService.handlePublic({
+      source: 'PUBLIC',
+      name: normalized.name,
+      email: normalized.email,
+      company: normalized.company,
+      inquiryTypeHint: normalized.inquiryType,
+      message: normalized.message,
+      sourcePage: 'contact',
+    });
+
+    if (intakeResult.status === 'resolved') {
+      return {
+        ok: true,
+        mode: 'resolved',
+        message: intakeResult.reply,
+        category: intakeResult.category,
+        priority: intakeResult.priority,
+      };
+    }
+
+    if (intakeResult.status === 'needs_follow_up') {
+      return {
+        ok: true,
+        mode: 'needs_follow_up',
+        message: intakeResult.reply,
+        questions: intakeResult.questions,
+        sessionId: intakeResult.sessionId,
+        category: intakeResult.category,
+        priority: intakeResult.priority,
+      };
+    }
+
     const inquiry = await this.prisma.publicInquiry.create({
       data: {
         name: normalized.name,
@@ -118,6 +151,12 @@ export class PublicService {
         metadataJson: {
           route: '/contact',
           origin: 'public_web',
+          intake: {
+            category: intakeResult.category,
+            priority: intakeResult.priority,
+            sessionId: intakeResult.sessionId,
+            caseId: intakeResult.caseId,
+          },
         },
       },
     });
@@ -152,6 +191,8 @@ export class PublicService {
             message: normalized.message,
             submitted_at: new Date().toISOString(),
             routed_to: contactRoute.to.join(', '),
+            intake_category: intakeResult.category,
+            intake_priority: intakeResult.priority,
           },
         }),
       ),
@@ -198,6 +239,7 @@ export class PublicService {
 
     return {
       ok: true,
+      mode: 'escalated',
       inquiryId: inquiry.id,
       status: nextStatus,
       notification: {
@@ -208,6 +250,8 @@ export class PublicService {
       acknowledgement: {
         sent: acknowledged,
       },
+      category: intakeResult.category,
+      priority: intakeResult.priority,
       message:
         deliveredNotifications > 0
           ? 'Your inquiry has been received and routed.'

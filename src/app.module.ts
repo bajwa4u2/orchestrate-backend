@@ -14,6 +14,7 @@ import { DeliverabilityModule } from './deliverability/deliverability.module';
 import { EmailsModule } from './emails/emails.module';
 import { ExecutionModule } from './execution/execution.module';
 import { HealthModule } from './health/health.module';
+import { IntakeModule } from './intake/intake.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { LeadsModule } from './leads/leads.module';
 import { MeetingsModule } from './meetings/meetings.module';
@@ -35,6 +36,7 @@ import { UsersModule } from './users/users.module';
     AccessContextModule,
     HealthModule,
     PublicModule,
+    IntakeModule,
     AuthModule,
     OrganizationsModule,
     UsersModule,
