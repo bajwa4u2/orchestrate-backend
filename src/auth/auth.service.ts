@@ -601,15 +601,21 @@ private async loadClientState(clientId: string) {
 
   if (!client) return null;
 
+  const scope = client.scopeJson && typeof client.scopeJson === 'object' && !Array.isArray(client.scopeJson)
+    ? (client.scopeJson as Record<string, unknown>)
+    : {};
+  const mode = typeof scope.mode === 'string' ? scope.mode.trim().toLowerCase() : null;
+
   return {
     setupCompleted: Boolean(client.setupCompletedAt),
     setupCompletedAt: client.setupCompletedAt?.toISOString() ?? null,
     selectedPlan: client.selectedPlan ?? null,
+    selectedTier: mode || 'focused',
     subscriptionStatus: client.subscriptions[0]?.status?.toString().toLowerCase() ?? 'none',
     country: client.country ?? null,
     area: client.area ?? null,
     industry: client.industry ?? null,
-    scope: Array.isArray(client.scopeJson) ? client.scopeJson.map((item) => String(item)) : [],
+    scope,
   };
 }
 
