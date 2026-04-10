@@ -4,11 +4,12 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
+import { StripeService } from '../billing/stripe/stripe.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
@@ -53,6 +54,7 @@ export class ClientsService {
   constructor(
     private readonly accessContextService: AccessContextService,
     private readonly prisma: PrismaService,
+    private readonly stripeService: StripeService,
   ) {}
 
   create(dto: CreateClientDto) {
@@ -257,6 +259,75 @@ export class ClientsService {
     };
   }
 
+  async deactivateAccount(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
+
+    const activeSubscriptions = await this.prisma.subscription.findMany({
+      where: {
+        clientId: client.id,
+        status: {
+          in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE],
+        },
+      },
+      select: {
+        id: true,
+        externalRef: true,
+        metadataJson: true,
+      },
+    });
+
+    const stripe = this.stripeService.getClient();
+    for (const subscription of activeSubscriptions) {
+      if (!subscription.externalRef) continue;
+      await stripe.subscriptions.cancel(subscription.externalRef);
+    }
+
+    const now = new Date();
+    const clientMetadata = this.asObject(client.metadataJson);
+    const accountMetadata = this.asObject(clientMetadata.account);
+
+    await this.prisma.$transaction([
+      this.prisma.subscription.updateMany({
+        where: {
+          clientId: client.id,
+          status: {
+            in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE],
+          },
+        },
+        data: {
+          status: SubscriptionStatus.CANCELED,
+          canceledAt: now,
+        },
+      }),
+      this.prisma.workspaceMember.updateMany({
+        where: { organizationId: client.organizationId, isActive: true },
+        data: { isActive: false },
+      }),
+      this.prisma.client.update({
+        where: { id: client.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...clientMetadata,
+            account: {
+              ...accountMetadata,
+              deactivatedAt: now.toISOString(),
+              deactivatedBy: 'client',
+            },
+          }),
+        },
+      }),
+    ]);
+
+    return {
+      success: true,
+      clientId: client.id,
+      organizationId: client.organizationId,
+      deactivatedAt: now.toISOString(),
+      subscriptionsCanceled: activeSubscriptions.length,
+      nextRoute: '/client/login',
+    };
+  }
+
   async getProfile(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
     return this.buildProfileResponse(client);
@@ -337,20 +408,30 @@ export class ClientsService {
       throw new UnauthorizedException('Client access is required');
     }
 
+    let client: any = null;
+
     if (context.clientId) {
-      const client = await this.prisma.client.findUnique({ where: { id: context.clientId } });
-      if (client) return client;
+      client = await this.prisma.client.findUnique({ where: { id: context.clientId } });
     }
 
-    if (context.organizationId) {
-      const client = await this.prisma.client.findFirst({
+    if (!client && context.organizationId) {
+      client = await this.prisma.client.findFirst({
         where: { organizationId: context.organizationId },
         orderBy: { createdAt: 'asc' },
       });
-      if (client) return client;
     }
 
-    throw new NotFoundException('Client account not found');
+    if (!client) {
+      throw new NotFoundException('Client account not found');
+    }
+
+    const metadata = this.asObject(client.metadataJson);
+    const account = this.asObject(metadata.account);
+    if (this.readString(account.deactivatedAt)) {
+      throw new UnauthorizedException('This client account is no longer active.');
+    }
+
+    return client;
   }
 
   private normalizeServiceType(value: string): ServiceType {

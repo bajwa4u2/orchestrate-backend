@@ -96,6 +96,10 @@ export class StripeService {
     });
   }
 
+  async cancelSubscription(subscriptionId: string) {
+    return this.stripe.subscriptions.cancel(subscriptionId);
+  }
+
   resolvePriceId(plan: SubscriptionPlanCode, tier: SubscriptionTierCode) {
     const envKey = `STRIPE_PRICE_${plan}_${tier}`;
     const priceId = process.env[envKey]?.trim();

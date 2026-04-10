@@ -32,6 +32,11 @@ export class ClientsController {
     return this.clientsService.saveSetup(headers, dto);
   }
 
+  @Post('me/deactivate')
+  deactivate(@Headers() headers: Record<string, unknown>) {
+    return this.clientsService.deactivateAccount(headers);
+  }
+
   @Get('me/profile')
   getProfile(@Headers() headers: Record<string, unknown>) {
     return this.clientsService.getProfile(headers);
