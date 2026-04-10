@@ -79,6 +79,7 @@ export class AuthService {
         emailVerified: Boolean(auth.emailVerifiedAt),
         setupCompleted: clientState?.setupCompleted ?? false,
         selectedPlan: clientState?.selectedPlan ?? null,
+        selectedTier: clientState?.selectedTier ?? null,
         subscriptionStatus: clientState?.subscriptionStatus ?? 'none',
       },
       session: {
@@ -101,6 +102,7 @@ export class AuthService {
             setupCompleted: clientState.setupCompleted,
             setupCompletedAt: clientState.setupCompletedAt,
             selectedPlan: clientState.selectedPlan,
+            selectedTier: clientState.selectedTier,
             subscriptionStatus: clientState.subscriptionStatus,
             country: clientState.country,
             area: clientState.area,
@@ -532,11 +534,12 @@ export class AuthService {
       setupCompleted: boolean;
       setupCompletedAt: string | null;
       selectedPlan: string | null;
+      selectedTier?: string | null;
       subscriptionStatus: string;
       country: string | null;
       area: string | null;
       industry: string | null;
-      scope: string[];
+      scope: Record<string, unknown> | null;
     } | null;
   }) {
     const metadata = this.asObject(input.user.metadataJson);
@@ -551,6 +554,7 @@ export class AuthService {
         emailVerified: Boolean(auth.emailVerifiedAt),
         setupCompleted: input.clientState?.setupCompleted ?? false,
         selectedPlan: input.clientState?.selectedPlan ?? null,
+        selectedTier: input.clientState?.selectedTier ?? null,
         subscriptionStatus: input.clientState?.subscriptionStatus ?? 'none',
       },
       workspace: {
@@ -569,6 +573,7 @@ export class AuthService {
             setupCompleted: input.clientState.setupCompleted,
             setupCompletedAt: input.clientState.setupCompletedAt,
             selectedPlan: input.clientState.selectedPlan,
+            selectedTier: input.clientState.selectedTier ?? null,
             subscriptionStatus: input.clientState.subscriptionStatus,
             country: input.clientState.country,
             area: input.clientState.area,
