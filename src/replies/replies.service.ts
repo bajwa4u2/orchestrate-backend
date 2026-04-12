@@ -1,170 +1,268 @@
-import { Injectable } from '@nestjs/common';
-import { LeadStatus, MeetingStatus, Prisma, ReplyIntent } from '@prisma/client';
-import { buildPagination } from '../common/utils/pagination';
-import { PrismaService } from '../database/prisma.service';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ActivityVisibility,
+  JobStatus,
+  JobType,
+  Prisma,
+  RecordSource,
+  WorkflowLane,
+  WorkflowStatus,
+  WorkflowTrigger,
+  WorkflowType,
+} from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
-import { IntakeReplyDto } from './dto/intake-reply.dto';
-import { ListRepliesDto } from './dto/list-replies.dto';
+import { PrismaService } from '../database/prisma.service';
+import { WorkflowsService } from '../workflows/workflows.service';
+import { ExecutionService } from '../execution/execution.service';
+
+type InboundReplyInput = {
+  mailboxEmail?: string;
+  fromEmail: string;
+  subjectLine?: string;
+  bodyText?: string;
+  externalMessageId?: string;
+  threadKey?: string;
+  receivedAt?: string | Date;
+};
 
 @Injectable()
 export class RepliesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly workflowsService: WorkflowsService,
+    private readonly executionService: ExecutionService,
+  ) {}
 
-  async intake(dto: IntakeReplyDto) {
-    const lead = await this.prisma.lead.findUniqueOrThrow({
-      where: { id: dto.leadId },
-      include: { client: true, campaign: true },
+  async ingestInboundReply(input: InboundReplyInput) {
+    const fromEmail = input.fromEmail?.trim().toLowerCase();
+    if (!fromEmail) {
+      throw new BadRequestException('fromEmail is required');
+    }
+
+    const matchedMessage = await this.resolveMatchedOutboundMessage(input, fromEmail);
+    if (!matchedMessage) {
+      throw new NotFoundException('No matching outbound message was found for this reply');
+    }
+
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: matchedMessage.clientId,
+      campaignId: matchedMessage.campaignId,
+      lane: WorkflowLane.GROWTH,
+      type: WorkflowType.REPLY_PROCESSING,
+      status: WorkflowStatus.RUNNING,
+      trigger: WorkflowTrigger.SYSTEM_EVENT,
+      source: RecordSource.EXTERNAL_SYNC,
+      title: `Inbound reply from ${fromEmail}`,
+      inputJson: {
+        fromEmail,
+        messageId: matchedMessage.id,
+        threadKey: input.threadKey ?? null,
+        externalMessageId: input.externalMessageId ?? null,
+      },
+      startedAt: new Date(),
     });
 
-    const intent = dto.intent ?? this.classifyReplyIntent(dto.bodyText || dto.subjectLine || '');
-    const requiresHumanReview =
-      intent === ReplyIntent.UNCLEAR ||
-      intent === ReplyIntent.HUMAN_REVIEW ||
-      intent === ReplyIntent.REFERRAL;
+    const existingReply = await this.prisma.reply.findFirst({
+      where: {
+        messageId: matchedMessage.id,
+        fromEmail,
+        receivedAt: this.resolveReceivedAt(input.receivedAt),
+      },
+      select: { id: true },
+    });
+
+    if (existingReply) {
+      await this.workflowsService.markWorkflowWaiting(workflow.id, {
+        dedupedToReplyId: existingReply.id,
+      });
+      return {
+        ok: true,
+        deduped: true,
+        replyId: existingReply.id,
+        workflowRunId: workflow.id,
+      };
+    }
 
     const reply = await this.prisma.reply.create({
       data: {
-        organizationId: dto.organizationId,
-        clientId: dto.clientId,
-        campaignId: dto.campaignId || lead.campaignId,
-        leadId: dto.leadId,
-        messageId: dto.messageId,
-        mailboxId: dto.mailboxId,
-        intent,
-        confidence: 0.76,
-        fromEmail: dto.fromEmail?.toLowerCase(),
-        subjectLine: dto.subjectLine,
-        bodyText: dto.bodyText,
-        receivedAt: dto.receivedAt || new Date(),
-        requiresHumanReview,
-        metadataJson: toPrismaJson(dto.metadataJson),
+        organizationId: matchedMessage.organizationId,
+        clientId: matchedMessage.clientId,
+        campaignId: matchedMessage.campaignId,
+        leadId: matchedMessage.leadId,
+        messageId: matchedMessage.id,
+        mailboxId: matchedMessage.mailboxId,
+        workflowRunId: workflow.id,
+        source: RecordSource.EXTERNAL_SYNC,
+        fromEmail,
+        subjectLine: input.subjectLine?.trim() || null,
+        bodyText: input.bodyText?.trim() || null,
+        receivedAt: this.resolveReceivedAt(input.receivedAt),
+        metadataJson: toPrismaJson({
+          externalMessageId: input.externalMessageId ?? null,
+          threadKey: input.threadKey ?? null,
+          mailboxEmail: input.mailboxEmail?.trim().toLowerCase() ?? null,
+          matchedOutboundMessageId: matchedMessage.id,
+        }),
       },
     });
-
-    if (dto.messageId) {
-      await this.prisma.outreachMessage.update({
-        where: { id: dto.messageId },
-        data: { status: 'REPLIED' },
-      }).catch(() => null);
-    }
-
-    const statusMap: Record<ReplyIntent, LeadStatus> = {
-      INTERESTED: LeadStatus.INTERESTED,
-      NOT_NOW: LeadStatus.REPLIED,
-      NOT_RELEVANT: LeadStatus.CLOSED_LOST,
-      REFERRAL: LeadStatus.REPLIED,
-      UNSUBSCRIBE: LeadStatus.SUPPRESSED,
-      OOO: LeadStatus.REPLIED,
-      BOUNCE: LeadStatus.SUPPRESSED,
-      UNCLEAR: LeadStatus.REPLIED,
-      HUMAN_REVIEW: LeadStatus.REPLIED,
-    };
-
-    await this.prisma.lead.update({
-      where: { id: dto.leadId },
-      data: {
-        status: statusMap[intent],
-        lastReplyAt: dto.receivedAt || new Date(),
-        suppressionReason: intent === ReplyIntent.UNSUBSCRIBE || intent === ReplyIntent.BOUNCE ? intent : undefined,
-      },
-    });
-
-    let meeting: { id: string } | null = null;
-    if (intent === ReplyIntent.INTERESTED) {
-      meeting = await this.prisma.meeting.create({
-        data: {
-          organizationId: dto.organizationId,
-          clientId: dto.clientId,
-          campaignId: dto.campaignId || lead.campaignId,
-          leadId: dto.leadId,
-          replyId: reply.id,
-          status: dto.booked ? MeetingStatus.BOOKED : MeetingStatus.PROPOSED,
-          title: `Meeting handoff for ${lead.client.displayName}`,
-          bookingUrl: lead.campaign.bookingUrlOverride || lead.client.bookingUrl,
-          scheduledAt: dto.scheduledAt,
-        },
-      });
-
-      if (dto.booked) {
-        await this.prisma.lead.update({
-          where: { id: dto.leadId },
-          data: { status: LeadStatus.BOOKED, bookedAt: dto.scheduledAt || new Date() },
-        });
-      }
-    }
 
     await this.prisma.activityEvent.create({
       data: {
-        organizationId: dto.organizationId,
-        clientId: dto.clientId,
-        campaignId: dto.campaignId || lead.campaignId,
-        kind: intent === ReplyIntent.INTERESTED && dto.booked ? 'MEETING_BOOKED' : 'REPLY_RECEIVED',
-        subjectType: meeting ? 'meeting' : 'reply',
-        subjectId: meeting?.id ?? reply.id,
-        summary: `Reply received with intent ${intent}`,
-        metadataJson: { leadId: dto.leadId, replyId: reply.id, meetingId: meeting?.id ?? null } as Prisma.InputJsonValue,
+        organizationId: matchedMessage.organizationId,
+        clientId: matchedMessage.clientId,
+        campaignId: matchedMessage.campaignId,
+        workflowRunId: workflow.id,
+        kind: 'REPLY_RECEIVED',
+        visibility: ActivityVisibility.CLIENT_VISIBLE,
+        subjectType: 'reply',
+        subjectId: reply.id,
+        summary: `Inbound reply received from ${fromEmail}`,
+        metadataJson: toPrismaJson({
+          replyId: reply.id,
+          messageId: matchedMessage.id,
+          leadId: matchedMessage.leadId,
+        }),
       },
     });
 
-    if (requiresHumanReview) {
-      await this.prisma.alert.create({
-        data: {
-          organizationId: dto.organizationId,
-          clientId: dto.clientId,
-          campaignId: dto.campaignId || lead.campaignId,
-          severity: 'WARNING',
-          status: 'OPEN',
-          category: 'reply_review',
-          title: `Reply requires review for lead ${dto.leadId}`,
-          bodyText: `Intent ${intent} was detected and requires operator review.`,
-          metadataJson: { replyId: reply.id } as Prisma.InputJsonValue,
-        },
-      });
-    }
+    const classificationJob = await this.prisma.job.create({
+      data: {
+        organizationId: matchedMessage.organizationId,
+        clientId: matchedMessage.clientId,
+        campaignId: matchedMessage.campaignId,
+        type: JobType.REPLY_CLASSIFICATION,
+        status: JobStatus.QUEUED,
+        queueName: 'replies',
+        dedupeKey: `reply_classification:${reply.id}`,
+        scheduledFor: new Date(),
+        maxAttempts: 3,
+        payloadJson: toPrismaJson({
+          replyId: reply.id,
+          workflowRunId: workflow.id,
+        }),
+      },
+    });
+
+    await this.workflowsService.markWorkflowWaiting(workflow.id, {
+      replyId: reply.id,
+      classificationJobId: classificationJob.id,
+    });
 
     return {
       ok: true,
-      reply,
-      meeting,
-      leadStatus: dto.booked ? LeadStatus.BOOKED : statusMap[intent],
-      requiresHumanReview,
+      replyId: reply.id,
+      workflowRunId: workflow.id,
+      classificationJobId: classificationJob.id,
     };
   }
 
-  async list(query: ListRepliesDto) {
-    const { page, limit, skip, take } = buildPagination(query.page, query.limit);
-    const where = {
-      ...(query.organizationId ? { organizationId: query.organizationId } : {}),
-      ...(query.clientId ? { clientId: query.clientId } : {}),
-      ...(query.campaignId ? { campaignId: query.campaignId } : {}),
-      ...(query.leadId ? { leadId: query.leadId } : {}),
-      ...(query.intent ? { intent: query.intent } : {}),
+  async processReply(replyId: string) {
+    const classification = await this.executionService.runReplyClassification(replyId);
+    let handoff = null;
+    if (!classification.requiresHumanReview && classification.handoffJobId) {
+      handoff = await this.executionService.runMeetingHandoff(replyId);
+    }
+    return {
+      ok: true,
+      classification,
+      handoff,
     };
-
-    const [items, total] = await this.prisma.$transaction([
-      this.prisma.reply.findMany({
-        where,
-        include: { lead: true, message: true, meeting: true },
-        orderBy: { receivedAt: 'desc' },
-        skip,
-        take,
-      }),
-      this.prisma.reply.count({ where }),
-    ]);
-
-    return { items, meta: { page, limit, total } };
   }
 
-  private classifyReplyIntent(text: string): ReplyIntent {
-    const value = text.toLowerCase();
-    if (/(book|calendar|available|schedule|meet)/.test(value)) return ReplyIntent.INTERESTED;
-    if (/(unsubscribe|remove me|stop emailing)/.test(value)) return ReplyIntent.UNSUBSCRIBE;
-    if (/(not now|later|next quarter|next month)/.test(value)) return ReplyIntent.NOT_NOW;
-    if (/(not relevant|not interested|no thanks)/.test(value)) return ReplyIntent.NOT_RELEVANT;
-    if (/(out of office|ooo|vacation)/.test(value)) return ReplyIntent.OOO;
-    if (/(reach out to|contact|speak with)/.test(value)) return ReplyIntent.REFERRAL;
-    if (/(bounce|undeliverable|invalid)/.test(value)) return ReplyIntent.BOUNCE;
-    if (value.trim().length < 8) return ReplyIntent.HUMAN_REVIEW;
-    return ReplyIntent.UNCLEAR;
+  async listForClient(clientId: string) {
+    return this.prisma.reply.findMany({
+      where: { clientId },
+      include: {
+        lead: true,
+        campaign: true,
+        message: true,
+        meeting: true,
+      },
+      orderBy: [{ receivedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+  }
+
+  private async resolveMatchedOutboundMessage(input: InboundReplyInput, fromEmail: string) {
+    const mailboxEmail = input.mailboxEmail?.trim().toLowerCase();
+    const externalMessageId = input.externalMessageId?.trim();
+    const threadKey = input.threadKey?.trim();
+
+    if (externalMessageId) {
+      const byExternal = await this.prisma.outreachMessage.findFirst({
+        where: {
+          externalMessageId,
+          direction: 'OUTBOUND',
+        },
+        select: {
+          id: true,
+          organizationId: true,
+          clientId: true,
+          campaignId: true,
+          leadId: true,
+          mailboxId: true,
+        },
+      });
+      if (byExternal) return byExternal;
+    }
+
+    if (threadKey) {
+      const byThread = await this.prisma.outreachMessage.findFirst({
+        where: {
+          threadKey,
+          direction: 'OUTBOUND',
+          lead: {
+            contact: {
+              email: fromEmail,
+            },
+          },
+        },
+        orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
+        select: {
+          id: true,
+          organizationId: true,
+          clientId: true,
+          campaignId: true,
+          leadId: true,
+          mailboxId: true,
+        },
+      });
+      if (byThread) return byThread;
+    }
+
+    return this.prisma.outreachMessage.findFirst({
+      where: {
+        direction: 'OUTBOUND',
+        ...(mailboxEmail
+          ? {
+              mailbox: {
+                emailAddress: mailboxEmail,
+              },
+            }
+          : {}),
+        lead: {
+          contact: {
+            email: fromEmail,
+          },
+        },
+      },
+      orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        id: true,
+        organizationId: true,
+        clientId: true,
+        campaignId: true,
+        leadId: true,
+        mailboxId: true,
+      },
+    });
+  }
+
+  private resolveReceivedAt(value?: string | Date) {
+    if (value instanceof Date) return value;
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = new Date(value);
+      if (!Number.isNaN(parsed.getTime())) return parsed;
+    }
+    return new Date();
   }
 }

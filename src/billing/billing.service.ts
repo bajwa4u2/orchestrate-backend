@@ -1053,7 +1053,7 @@ export class BillingService {
       'focused';
 
     const queueName = planCode === 'revenue' ? 'billing' : 'growth';
-    const bootstrapJobType = planCode === 'revenue' ? JobType.INVOICE_GENERATION : JobType.LEAD_IMPORT;
+    const bootstrapJobType = JobType.LEAD_IMPORT;
     const workflowType =
       subscription.status === SubscriptionStatus.TRIALING
         ? WorkflowType.TRIAL_ACTIVATION
@@ -1179,8 +1179,9 @@ export class BillingService {
         select: { id: true },
       });
 
+      let bootstrapJobId: string | null = null;
       if (!existingJob) {
-        await this.prisma.job.create({
+        const bootstrapJob = await this.prisma.job.create({
           data: {
             organizationId: client.organizationId,
             clientId: client.id,
@@ -1203,6 +1204,59 @@ export class BillingService {
             }),
           },
         });
+        bootstrapJobId = bootstrapJob.id;
+      } else {
+        bootstrapJobId = existingJob.id;
+      }
+
+      const mailbox = await this.prisma.mailbox.findFirst({
+        where: {
+          organizationId: client.organizationId,
+          OR: [{ clientId: client.id }, { clientId: null }],
+          status: 'ACTIVE',
+        },
+        orderBy: [{ updatedAt: 'desc' }],
+        select: { id: true, emailAddress: true },
+      });
+
+      let mailboxHealthJobId: string | null = null;
+      if (mailbox) {
+        const mailboxHealthDedupeKey = `mailbox-health:${subscription.id}:${mailbox.id}`;
+        const existingMailboxJob = await this.prisma.job.findFirst({
+          where: {
+            dedupeKey: mailboxHealthDedupeKey,
+            status: {
+              in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED],
+            },
+          },
+          select: { id: true },
+        });
+
+        if (!existingMailboxJob) {
+          const mailboxJob = await this.prisma.job.create({
+            data: {
+              organizationId: client.organizationId,
+              clientId: client.id,
+              campaignId: campaignId ?? undefined,
+              type: JobType.MAILBOX_HEALTH_CHECK,
+              status: JobStatus.QUEUED,
+              queueName: 'deliverability',
+              dedupeKey: mailboxHealthDedupeKey,
+              scheduledFor: new Date(),
+              maxAttempts: 2,
+              payloadJson: toPrismaJson({
+                workflowRunId: workflow.id,
+                mailboxId: mailbox.id,
+                mailboxEmail: mailbox.emailAddress,
+                activationSource: 'subscription',
+                subscriptionId: subscription.id,
+              }),
+            },
+          });
+          mailboxHealthJobId = mailboxJob.id;
+        } else {
+          mailboxHealthJobId = existingMailboxJob.id;
+        }
       }
 
       await this.workflowsService.completeWorkflowRun(workflow.id, {
@@ -1211,6 +1265,8 @@ export class BillingService {
         tierCode,
         campaignId,
         bootstrapJobType,
+        bootstrapJobId,
+        mailboxHealthJobId,
         queueName,
       });
     }

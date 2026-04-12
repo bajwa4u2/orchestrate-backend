@@ -30,4 +30,19 @@ export class MeetingsService {
 
     return { items, meta: { page, limit, total } };
   }
+
+  async listOpenHandoffs(clientId: string) {
+    return this.prisma.meeting.findMany({
+      where: {
+        clientId,
+        status: 'PROPOSED',
+      },
+      include: {
+        lead: true,
+        reply: true,
+        campaign: true,
+      },
+      orderBy: [{ createdAt: 'desc' }],
+    });
+  }
 }
