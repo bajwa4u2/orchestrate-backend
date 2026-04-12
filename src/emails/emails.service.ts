@@ -1284,7 +1284,11 @@ export class EmailsService {
       throw new BadRequestException('Inbound email is missing sender or mailbox address');
     }
 
-    const reply = await this.repliesService.ingestInboundReply(inbound);
+    const reply = await this.repliesService.ingestInboundReply({
+      ...inbound,
+      fromEmail: inbound.fromEmail,
+      mailboxEmail: inbound.mailboxEmail,
+    });
 
     return {
       ok: true,
