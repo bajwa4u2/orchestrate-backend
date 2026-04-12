@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { ActivityKind, ActivityVisibility, ArtifactLifecycle, InvoiceStatus, PaymentMethodType, PaymentStatus, Prisma, RecordSource, SubscriptionStatus, WorkflowLane, WorkflowStatus, WorkflowTrigger, WorkflowType } from '@prisma/client';
+import { ActivityKind, ActivityVisibility, ArtifactLifecycle, ClientStatus, InvoiceStatus, JobStatus, JobType, PaymentMethodType, PaymentStatus, Prisma, RecordSource, SubscriptionStatus, WorkflowLane, WorkflowStatus, WorkflowTrigger, WorkflowType } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
@@ -668,7 +668,7 @@ export class BillingService {
 
     if (!subscription) return { ok: true };
 
-    await this.prisma.subscription.update({
+    const updatedSubscription = await this.prisma.subscription.update({
       where: { id: subscription.id },
       data: {
         status: SubscriptionStatus.ACTIVE,
@@ -681,6 +681,8 @@ export class BillingService {
         }),
       },
     });
+
+    await this.activateClientServices(updatedSubscription);
 
     const invoiceAmountCents = invoice.amount_paid ?? 0;
     if (invoiceAmountCents > 0) {
@@ -820,7 +822,7 @@ export class BillingService {
         return { ok: true };
       }
 
-      await this.prisma.subscription.create({
+      subscription = await this.prisma.subscription.create({
         data: {
           organizationId,
           clientId,
@@ -865,10 +867,11 @@ export class BillingService {
         },
       });
 
+      await this.activateClientServices(subscription);
       return { ok: true };
     }
 
-    await this.prisma.subscription.update({
+    subscription = await this.prisma.subscription.update({
       where: { id: subscription.id },
       data: {
         status: this.mapStripeSubscriptionStatus(stripeSubscription.status),
@@ -912,6 +915,7 @@ export class BillingService {
       },
     });
 
+    await this.activateClientServices(subscription);
     return { ok: true };
   }
 
@@ -982,6 +986,254 @@ export class BillingService {
     const priorTrialApplied = this.readBoolean(this.asObject(billingMetadata.trial as Prisma.JsonValue).applied);
 
     return !priorTrialApplied;
+  }
+
+
+  private async activateClientServices(subscription: {
+    id: string;
+    organizationId: string;
+    clientId: string;
+    status: SubscriptionStatus;
+    amountCents: number;
+    currencyCode: string;
+    metadataJson?: Prisma.JsonValue | null;
+    planId?: string | null;
+    externalRef?: string | null;
+    currentPeriodStart?: Date | null;
+    currentPeriodEnd?: Date | null;
+  }) {
+    if (
+      subscription.status !== SubscriptionStatus.ACTIVE &&
+      subscription.status !== SubscriptionStatus.TRIALING
+    ) {
+      return { ok: true, activated: false, reason: 'subscription_not_runnable' };
+    }
+
+    const subscriptionMetadata = this.asObject(subscription.metadataJson);
+    const activationMetadata = this.asObject(
+      this.asObject(subscriptionMetadata.activation as Prisma.JsonValue) as Prisma.JsonValue,
+    );
+
+    const alreadyActivatedForStatus =
+      this.readString(activationMetadata.status) === subscription.status &&
+      this.readString(activationMetadata.subscriptionId) === subscription.id;
+
+    const client = await this.prisma.client.findUnique({
+      where: { id: subscription.clientId },
+      select: {
+        id: true,
+        organizationId: true,
+        displayName: true,
+        legalName: true,
+        primaryTimezone: true,
+        bookingUrl: true,
+        selectedPlan: true,
+        scopeJson: true,
+        metadataJson: true,
+        status: true,
+      },
+    });
+
+    if (!client) {
+      return { ok: true, activated: false, reason: 'client_not_found' };
+    }
+
+    const scope = this.asObject(client.scopeJson as Prisma.JsonValue);
+    const clientMetadata = this.asObject(client.metadataJson);
+    const billingMetadata = this.asObject(clientMetadata.billing as Prisma.JsonValue);
+    const clientActivation = this.asObject(billingMetadata.activation as Prisma.JsonValue);
+    const planCode =
+      this.readString(subscriptionMetadata.planCode) ??
+      client.selectedPlan ??
+      this.readString(scope.lane) ??
+      'opportunity';
+    const tierCode =
+      this.readString(subscriptionMetadata.tierCode) ??
+      this.readString(scope.mode) ??
+      'focused';
+
+    const queueName = planCode === 'revenue' ? 'billing' : 'growth';
+    const bootstrapJobType = planCode === 'revenue' ? JobType.INVOICE_GENERATION : JobType.LEAD_IMPORT;
+    const workflowType =
+      subscription.status === SubscriptionStatus.TRIALING
+        ? WorkflowType.TRIAL_ACTIVATION
+        : WorkflowType.SUBSCRIPTION_ACTIVATION;
+
+    const existingCampaign = await this.prisma.campaign.findFirst({
+      where: {
+        clientId: client.id,
+        code: 'PRIMARY_AUTOMATION',
+        archivedAt: null,
+      },
+      select: { id: true, name: true, status: true },
+    });
+
+    let campaignId = existingCampaign?.id ?? null;
+    let workflowRunId: string | null = null;
+
+    await this.prisma.client.update({
+      where: { id: client.id },
+      data: {
+        status: ClientStatus.ACTIVE,
+        metadataJson: toPrismaJson({
+          ...clientMetadata,
+          billing: {
+            ...billingMetadata,
+            activation: {
+              ...clientActivation,
+              status: subscription.status,
+              subscriptionId: subscription.id,
+              stripeSubscriptionId: subscription.externalRef ?? null,
+              planCode,
+              tierCode,
+              activatedAt: new Date().toISOString(),
+              currentPeriodStart: subscription.currentPeriodStart?.toISOString() ?? null,
+              currentPeriodEnd: subscription.currentPeriodEnd?.toISOString() ?? null,
+            },
+          },
+        }),
+      },
+    });
+
+    if (!alreadyActivatedForStatus) {
+      const workflow = await this.workflowsService.createWorkflowRun({
+        clientId: client.id,
+        subscriptionId: subscription.id,
+        campaignId: campaignId ?? undefined,
+        lane: WorkflowLane.ACTIVATION,
+        type: workflowType,
+        status: WorkflowStatus.RUNNING,
+        trigger: WorkflowTrigger.SUBSCRIPTION_EVENT,
+        source: RecordSource.EXTERNAL_SYNC,
+        title:
+          subscription.status === SubscriptionStatus.TRIALING
+            ? 'Trial activation'
+            : 'Subscription activation',
+        inputJson: {
+          planCode,
+          tierCode,
+          subscriptionId: subscription.id,
+          stripeSubscriptionId: subscription.externalRef ?? null,
+          bootstrapJobType,
+          queueName,
+        },
+        contextJson: {
+          scope,
+          currentPeriodStart: subscription.currentPeriodStart?.toISOString() ?? null,
+          currentPeriodEnd: subscription.currentPeriodEnd?.toISOString() ?? null,
+        },
+        startedAt: new Date(),
+      });
+      workflowRunId = workflow.id;
+
+      if (!campaignId) {
+        const createdCampaign = await this.prisma.campaign.create({
+          data: {
+            organizationId: client.organizationId,
+            clientId: client.id,
+            workflowRunId: workflow.id,
+            code: 'PRIMARY_AUTOMATION',
+            name: 'Primary Automation',
+            status: 'READY',
+            source: RecordSource.SYSTEM_GENERATED,
+            generationState: 'INIT',
+            objective:
+              planCode === 'revenue'
+                ? 'Billing activation and revenue operations bootstrap'
+                : 'Outbound activation and opportunity generation bootstrap',
+            offerSummary:
+              planCode === 'revenue'
+                ? 'Revenue operations are being prepared from the subscribed service configuration.'
+                : 'Outbound execution is being prepared from the subscribed service configuration.',
+            bookingUrlOverride: client.bookingUrl ?? undefined,
+            timezone: client.primaryTimezone ?? undefined,
+            metadataJson: toPrismaJson({
+              source: 'subscription-activation',
+              activationWorkflowRunId: workflow.id,
+              planCode,
+              tierCode,
+            }),
+          },
+        });
+        campaignId = createdCampaign.id;
+
+        await this.workflowsService.attachWorkflowSubjects(workflow.id, {
+          campaignId: createdCampaign.id,
+          title: createdCampaign.name,
+          resultJson: {
+            campaignId: createdCampaign.id,
+            status: createdCampaign.status,
+            generationState: createdCampaign.generationState,
+          },
+        });
+      }
+
+      const dedupeKey = `activation:${subscription.id}:${subscription.status}`;
+      const existingJob = await this.prisma.job.findFirst({
+        where: {
+          dedupeKey,
+          status: {
+            in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED],
+          },
+        },
+        select: { id: true },
+      });
+
+      if (!existingJob) {
+        await this.prisma.job.create({
+          data: {
+            organizationId: client.organizationId,
+            clientId: client.id,
+            campaignId: campaignId ?? undefined,
+            type: bootstrapJobType,
+            status: JobStatus.QUEUED,
+            queueName,
+            dedupeKey,
+            scheduledFor: new Date(),
+            maxAttempts: 3,
+            payloadJson: toPrismaJson({
+              workflowRunId: workflow.id,
+              activationSource: 'subscription',
+              subscriptionId: subscription.id,
+              stripeSubscriptionId: subscription.externalRef ?? null,
+              planCode,
+              tierCode,
+              campaignId,
+              scope,
+            }),
+          },
+        });
+      }
+
+      await this.workflowsService.completeWorkflowRun(workflow.id, {
+        activated: true,
+        planCode,
+        tierCode,
+        campaignId,
+        bootstrapJobType,
+        queueName,
+      });
+    }
+
+    await this.prisma.subscription.update({
+      where: { id: subscription.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...subscriptionMetadata,
+          activation: {
+            ...activationMetadata,
+            status: subscription.status,
+            subscriptionId: subscription.id,
+            workflowRunId,
+            planCode,
+            tierCode,
+            activatedAt: new Date().toISOString(),
+          },
+        }),
+      },
+    });
+
+    return { ok: true, activated: true, campaignId, workflowRunId };
   }
 
   private resolveConfiguredTrialDays() {
