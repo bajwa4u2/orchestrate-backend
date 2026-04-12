@@ -158,7 +158,7 @@ export class RepliesService {
 
   async processReply(replyId: string) {
     const classification = await this.executionService.runReplyClassification(replyId);
-    let handoff = null;
+    let handoff: Awaited<ReturnType<ExecutionService['runMeetingHandoff']>> | null = null;
     if (!classification.requiresHumanReview && classification.handoffJobId) {
       handoff = await this.executionService.runMeetingHandoff(replyId);
     }

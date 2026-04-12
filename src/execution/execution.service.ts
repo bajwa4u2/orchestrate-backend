@@ -230,9 +230,33 @@ export class ExecutionService {
       } else if (job.type === JobType.MAILBOX_HEALTH_CHECK) {
         result = await this.deliverabilityService.refreshMailboxHealth(String(payload.mailboxId || ''));
       } else if (job.type === JobType.LEAD_IMPORT) {
-        result = await this.runLeadImportBootstrap(job, payload, workflowRunId);
+        if (!job.clientId) {
+          throw new BadRequestException(`Job ${job.id} is missing clientId`);
+        }
+        result = await this.runLeadImportBootstrap(
+          {
+            id: job.id,
+            organizationId: job.organizationId,
+            clientId: job.clientId,
+            campaignId: job.campaignId,
+          },
+          payload,
+          workflowRunId,
+        );
       } else if (job.type === JobType.INVOICE_GENERATION) {
-        result = await this.runRevenueBootstrap(job, payload, workflowRunId);
+        if (!job.clientId) {
+          throw new BadRequestException(`Job ${job.id} is missing clientId`);
+        }
+        result = await this.runRevenueBootstrap(
+          {
+            id: job.id,
+            organizationId: job.organizationId,
+            clientId: job.clientId,
+            campaignId: job.campaignId,
+          },
+          payload,
+          workflowRunId,
+        );
       } else if (job.type === JobType.REPLY_CLASSIFICATION) {
         result = await this.runReplyClassification(String(payload.replyId || ''), {
           workflowRunId,
@@ -967,7 +991,7 @@ export class ExecutionService {
     } else if (classification.intent === ReplyIntent.NOT_NOW || classification.intent === ReplyIntent.NOT_RELEVANT) {
       nextLeadStatus = LeadStatus.REPLIED;
       nextQualification = LeadQualificationState.REPLIED;
-    } else if (classification.intent === ReplyIntent.UNSUBSCRIBE || classification.intent === ReplyIntent.BOUNCE) {
+    } else if (classification.intent === ReplyIntent.UNSUBSCRIBE) {
       nextLeadStatus = LeadStatus.SUPPRESSED;
       nextQualification = LeadQualificationState.DISQUALIFIED;
     } else if (classification.intent === ReplyIntent.OOO || classification.intent === ReplyIntent.UNCLEAR) {
@@ -985,9 +1009,7 @@ export class ExecutionService {
           suppressionReason:
             classification.intent === ReplyIntent.UNSUBSCRIBE
               ? 'unsubscribe_reply'
-              : classification.intent === ReplyIntent.BOUNCE
-                ? 'bounce_reply'
-                : undefined,
+              : undefined,
         },
       });
     }
