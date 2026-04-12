@@ -225,6 +225,10 @@ export class AuthService {
       throw new UnauthorizedException('Email or password is incorrect');
     }
 
+    if (!this.isEmailVerified(user.metadataJson)) {
+      throw new UnauthorizedException('Please verify your email first');
+    }
+
     const membership =
       user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
       user.memberships[0];
@@ -449,12 +453,67 @@ export class AuthService {
     auth.emailVerifiedAt = new Date().toISOString();
     metadata.auth = auth;
 
-    await this.prisma.user.update({
+    const updatedUser = await this.prisma.user.update({
       where: { id: user.id },
       data: { metadataJson: metadata },
     });
 
-    return { ok: true };
+    const membership = payload.organizationId
+      ? await this.prisma.workspaceMember.findFirst({
+          where: {
+            userId: user.id,
+            organizationId: payload.organizationId,
+            isActive: true,
+          },
+          include: { organization: true },
+        })
+      : await this.prisma.workspaceMember.findFirst({
+          where: { userId: user.id, isActive: true },
+          include: { organization: true },
+          orderBy: { createdAt: 'asc' },
+        });
+
+    if (!membership) {
+      return { ok: true };
+    }
+
+    const clientId =
+      payload.clientId ||
+      (payload.surface === 'client'
+        ? await this.resolveClientId(user.id, membership.organizationId)
+        : undefined);
+
+    const token = this.signToken({
+      typ: 'session',
+      sub: updatedUser.id,
+      email: updatedUser.email,
+      organizationId: membership.organizationId,
+      clientId,
+      memberRole: membership.role,
+      surface:
+        payload.surface ||
+        (this.isOperatorOrganization(membership.organization.type, membership.organization.isInternal)
+          ? 'operator'
+          : 'client'),
+      fullName: updatedUser.fullName,
+      exp: this.expiresInSeconds(30 * 24 * 3600),
+    });
+
+    const clientState = clientId ? await this.loadClientState(clientId) : null;
+
+    return this.buildSessionResponse({
+      token,
+      user: updatedUser,
+      organization: membership.organization,
+      clientId,
+      memberRole: membership.role,
+      surface:
+        payload.surface ||
+        (this.isOperatorOrganization(membership.organization.type, membership.organization.isInternal)
+          ? 'operator'
+          : 'client'),
+      clientState,
+    });
   }
 
   verifySessionToken(token: string) {
@@ -584,45 +643,44 @@ export class AuthService {
     };
   }
 
-
-private async loadClientState(clientId: string) {
-  const client = await this.prisma.client.findUnique({
-    where: { id: clientId },
-    select: {
-      id: true,
-      country: true,
-      area: true,
-      industry: true,
-      scopeJson: true,
-      selectedPlan: true,
-      setupCompletedAt: true,
-      subscriptions: {
-        orderBy: { createdAt: 'desc' },
-        take: 1,
-        select: { status: true },
+  private async loadClientState(clientId: string) {
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: {
+        id: true,
+        country: true,
+        area: true,
+        industry: true,
+        scopeJson: true,
+        selectedPlan: true,
+        setupCompletedAt: true,
+        subscriptions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { status: true },
+        },
       },
-    },
-  });
+    });
 
-  if (!client) return null;
+    if (!client) return null;
 
-  const scope = client.scopeJson && typeof client.scopeJson === 'object' && !Array.isArray(client.scopeJson)
-    ? (client.scopeJson as Record<string, unknown>)
-    : {};
-  const mode = typeof scope.mode === 'string' ? scope.mode.trim().toLowerCase() : null;
+    const scope = client.scopeJson && typeof client.scopeJson === 'object' && !Array.isArray(client.scopeJson)
+      ? (client.scopeJson as Record<string, unknown>)
+      : {};
+    const mode = typeof scope.mode === 'string' ? scope.mode.trim().toLowerCase() : null;
 
-  return {
-    setupCompleted: Boolean(client.setupCompletedAt),
-    setupCompletedAt: client.setupCompletedAt?.toISOString() ?? null,
-    selectedPlan: client.selectedPlan ?? null,
-    selectedTier: mode || 'focused',
-    subscriptionStatus: client.subscriptions[0]?.status?.toString().toLowerCase() ?? 'none',
-    country: client.country ?? null,
-    area: client.area ?? null,
-    industry: client.industry ?? null,
-    scope,
-  };
-}
+    return {
+      setupCompleted: Boolean(client.setupCompletedAt),
+      setupCompletedAt: client.setupCompletedAt?.toISOString() ?? null,
+      selectedPlan: client.selectedPlan ?? null,
+      selectedTier: mode || 'focused',
+      subscriptionStatus: client.subscriptions[0]?.status?.toString().toLowerCase() ?? 'none',
+      country: client.country ?? null,
+      area: client.area ?? null,
+      industry: client.industry ?? null,
+      scope,
+    };
+  }
 
   private async ensureEmailAvailable(email: string) {
     const existing = await this.prisma.user.findUnique({ where: { email } });
@@ -736,5 +794,11 @@ private async loadClientState(clientId: string) {
 
   private isOperatorOrganization(type: OrganizationType, isInternal?: boolean) {
     return isInternal || type === 'PLATFORM' || type === 'INTERNAL';
+  }
+
+  private isEmailVerified(metadataJson: unknown) {
+    const metadata = this.asObject(metadataJson);
+    const auth = this.asObject(metadata.auth);
+    return Boolean(auth.emailVerifiedAt);
   }
 }
