@@ -9,7 +9,14 @@ import { ExecutionController } from './execution.controller';
 import { ExecutionService } from './execution.service';
 
 @Module({
-  imports: [DatabaseModule, WorkflowsModule, AiModule, MeetingsModule, RepliesModule, forwardRef(() => DeliverabilityModule)],
+  imports: [
+    DatabaseModule,
+    WorkflowsModule,
+    AiModule,
+    forwardRef(() => MeetingsModule),
+    forwardRef(() => RepliesModule),
+    forwardRef(() => DeliverabilityModule),
+  ],
   controllers: [ExecutionController],
   providers: [ExecutionService],
   exports: [ExecutionService],
