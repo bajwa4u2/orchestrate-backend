@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Query, Req } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { SendTemplatedEmailDto } from './dto/send-templated-email.dto';
 import { EmailsService } from './emails.service';
@@ -20,5 +20,33 @@ export class EmailsController {
   async sendTemplate(@Headers() headers: Record<string, unknown>, @Body() dto: SendTemplatedEmailDto) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.emailsService.sendTemplateEmail(context.organizationId!, context.userId, dto);
+  }
+
+  @Post('inbound')
+  async handleInbound(@Req() req: any, @Headers() headers: Record<string, unknown>) {
+    const rawBody = this.extractRawBody(req);
+    return this.emailsService.handleInboundWebhook(rawBody, headers);
+  }
+
+  private extractRawBody(req: any): string {
+    const raw = req?.rawBody;
+
+    if (typeof raw === 'string') {
+      return raw;
+    }
+
+    if (raw && typeof raw === 'object' && typeof raw.toString === 'function') {
+      return raw.toString();
+    }
+
+    if (typeof req?.body === 'string') {
+      return req.body;
+    }
+
+    if (req?.body && typeof req.body === 'object') {
+      return JSON.stringify(req.body);
+    }
+
+    return '';
   }
 }

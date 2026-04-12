@@ -1,7 +1,9 @@
-import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { DocumentDispatchStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RepliesService } from '../replies/replies.service';
 import { SendTemplatedEmailDto } from './dto/send-templated-email.dto';
 
 import { accountApprovedTemplate } from './templates/account-approved.template';
@@ -118,11 +120,55 @@ type RenderedEmail = {
   text: string;
 };
 
+
+type InboundWebhookResult = {
+  ok: boolean;
+  ignored?: boolean;
+  verified?: boolean;
+  type?: string;
+  emailId?: string | null;
+  reply?: unknown;
+};
+
+type ResendWebhookEnvelope = {
+  type?: string;
+  created_at?: string;
+  data?: {
+    email_id?: string;
+    created_at?: string;
+    from?: string;
+    to?: string[];
+    cc?: string[];
+    bcc?: string[];
+    message_id?: string;
+    subject?: string;
+    attachments?: Array<Record<string, unknown>>;
+  };
+};
+
+type ResendReceivedEmail = {
+  id?: string;
+  object?: string;
+  from?: string;
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string;
+  text?: string | null;
+  html?: string | null;
+  created_at?: string;
+  headers?: Array<{ name?: string; value?: string }> | Record<string, unknown>;
+  message_id?: string;
+  in_reply_to?: string | null;
+  references?: string[] | string | null;
+};
+
 @Injectable()
 export class EmailsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
+    private readonly repliesService: RepliesService,
   ) {}
 
   listDispatches(organizationId: string, clientId?: string) {
@@ -1211,4 +1257,246 @@ export class EmailsService {
 
     return undefined;
   }
+
+
+  async handleInboundWebhook(rawPayload: string, headers: Record<string, unknown>): Promise<InboundWebhookResult> {
+    const verified = this.verifyResendWebhook(rawPayload, headers);
+    const event = this.parseInboundPayload(rawPayload);
+
+    if (event.type !== 'email.received') {
+      return {
+        ok: true,
+        ignored: true,
+        verified,
+        type: event.type ?? 'unknown',
+      };
+    }
+
+    const emailId = this.readString(event.data?.email_id);
+    if (!emailId) {
+      throw new BadRequestException('Missing email.received data.email_id');
+    }
+
+    const received = await this.fetchReceivedEmail(emailId);
+    const inbound = this.normalizeInboundEmail(event, received);
+
+    if (!inbound.fromEmail || !inbound.mailboxEmail) {
+      throw new BadRequestException('Inbound email is missing sender or mailbox address');
+    }
+
+    const reply = await this.repliesService.ingestInboundReply(inbound);
+
+    return {
+      ok: true,
+      verified,
+      type: event.type,
+      emailId,
+      reply,
+    };
+  }
+
+  private parseInboundPayload(rawPayload: string): ResendWebhookEnvelope {
+    try {
+      const parsed = JSON.parse(rawPayload);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Webhook body must be a JSON object');
+      }
+      return parsed as ResendWebhookEnvelope;
+    } catch {
+      throw new BadRequestException('Invalid webhook payload');
+    }
+  }
+
+  private verifyResendWebhook(rawPayload: string, headers: Record<string, unknown>) {
+    const secret = process.env.RESEND_WEBHOOK_SECRET?.trim();
+    if (!secret) {
+      return false;
+    }
+
+    const svixId = this.readHeader(headers, 'svix-id');
+    const svixTimestamp = this.readHeader(headers, 'svix-timestamp');
+    const svixSignature = this.readHeader(headers, 'svix-signature');
+
+    if (!svixId || !svixTimestamp || !svixSignature) {
+      throw new UnauthorizedException('Missing webhook signature headers');
+    }
+
+    const signedContent = `${svixId}.${svixTimestamp}.${rawPayload}`;
+    const secretBytes = this.decodeSvixSecret(secret);
+    const expected = createHmac('sha256', secretBytes).update(signedContent).digest('base64');
+
+    const candidates = svixSignature
+      .split(' ')
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+      .flatMap((chunk) => chunk.split(','))
+      .map((chunk) => chunk.trim())
+      .filter((chunk) => chunk.startsWith('v1,'))
+      .map((chunk) => chunk.slice(3))
+      .filter(Boolean);
+
+    const matched = candidates.some((value) => this.safeCompareBase64(value, expected));
+    if (!matched) {
+      throw new UnauthorizedException('Invalid webhook signature');
+    }
+
+    return true;
+  }
+
+  private decodeSvixSecret(secret: string) {
+    const normalized = secret.startsWith('whsec_') ? secret.slice(6) : secret;
+    return Buffer.from(normalized, 'base64');
+  }
+
+  private safeCompareBase64(a: string, b: string) {
+    try {
+      const left = Buffer.from(a, 'base64');
+      const right = Buffer.from(b, 'base64');
+      return left.length === right.length && timingSafeEqual(left, right);
+    } catch {
+      return false;
+    }
+  }
+
+  private async fetchReceivedEmail(emailId: string): Promise<ResendReceivedEmail> {
+    const apiKey = process.env.RESEND_API_KEY?.trim();
+    if (!apiKey) {
+      throw new InternalServerErrorException('RESEND_API_KEY is missing.');
+    }
+
+    const response = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(emailId)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+    if (!response.ok) {
+      const message =
+        this.readString(payload['message']) ??
+        this.readString(payload['error']) ??
+        'Unable to retrieve inbound email content from Resend.';
+      throw new InternalServerErrorException(message);
+    }
+
+    const data = payload['data'];
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      return data as ResendReceivedEmail;
+    }
+
+    return payload as ResendReceivedEmail;
+  }
+
+  private normalizeInboundEmail(event: ResendWebhookEnvelope, received: ResendReceivedEmail) {
+    const eventData = event.data ?? {};
+    const headers = this.normalizeHeaderMap(received.headers);
+
+    const messageId =
+      this.readString(received.message_id) ??
+      this.readString(eventData.message_id) ??
+      headers.get('message-id');
+
+    const inReplyTo =
+      this.readString(received.in_reply_to) ??
+      headers.get('in-reply-to');
+
+    const references = this.normalizeMessageIdList(received.references ?? headers.get('references'));
+    const threadKey = inReplyTo ?? references[0] ?? messageId ?? this.readString(eventData.email_id) ?? null;
+
+    const bodyText = this.coalesceBodyText(received.text, received.html);
+    const mailboxEmail = this.extractFirstEmail(received.to ?? eventData.to ?? []);
+    const fromEmail = this.extractEmailAddress(received.from ?? eventData.from ?? '');
+
+    return {
+      mailboxEmail,
+      fromEmail,
+      subjectLine: this.readString(received.subject) ?? this.readString(eventData.subject) ?? '',
+      bodyText,
+      externalMessageId: messageId ?? this.readString(eventData.email_id),
+      threadKey,
+      receivedAt:
+        this.readString(received.created_at) ??
+        this.readString(eventData.created_at) ??
+        this.readString(event.created_at) ??
+        new Date().toISOString(),
+    };
+  }
+
+  private normalizeHeaderMap(input: ResendReceivedEmail['headers']): Map<string, string> {
+    const map = new Map<string, string>();
+
+    if (Array.isArray(input)) {
+      for (const entry of input) {
+        const name = this.readString(entry?.name)?.toLowerCase();
+        const value = this.readString(entry?.value);
+        if (name && value) map.set(name, value);
+      }
+      return map;
+    }
+
+    if (input && typeof input === 'object') {
+      for (const [key, value] of Object.entries(input)) {
+        const normalized = this.readString(value);
+        if (normalized) map.set(key.toLowerCase(), normalized);
+      }
+    }
+
+    return map;
+  }
+
+  private normalizeMessageIdList(input: unknown): string[] {
+    if (Array.isArray(input)) {
+      return input
+        .map((item) => this.readString(item))
+        .filter((item): item is string => Boolean(item));
+    }
+
+    const value = this.readString(input);
+    if (!value) return [];
+
+    return value
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  private coalesceBodyText(text?: string | null, html?: string | null) {
+    const plain = this.readString(text);
+    if (plain) return plain;
+    const htmlValue = this.readString(html);
+    if (htmlValue) return this.stripHtml(htmlValue);
+    return '';
+  }
+
+  private extractFirstEmail(values: unknown[]) {
+    for (const value of values) {
+      const email = this.extractEmailAddress(value);
+      if (email) return email;
+    }
+    return undefined;
+  }
+
+  private readHeader(headers: Record<string, unknown>, key: string) {
+    const direct = headers[key] ?? headers[key.toLowerCase()] ?? headers[key.toUpperCase()];
+    if (Array.isArray(direct)) {
+      return this.readString(direct[0]);
+    }
+    return this.readString(direct);
+  }
+
+  private readString(value: unknown): string | undefined {
+    if (value == null) return undefined;
+    if (typeof value === 'string') {
+      const normalized = value.trim();
+      return normalized.length ? normalized : undefined;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return undefined;
+  }
+
 }
