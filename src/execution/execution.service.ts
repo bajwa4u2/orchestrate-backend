@@ -1416,8 +1416,7 @@ Orchestrate`,
         '',
         'Best,',
         'Orchestrate',
-      ].join('
-');
+      ].join('\n');
     }
 
     return [
@@ -1429,8 +1428,7 @@ Orchestrate`,
       '',
       'Best,',
       'Orchestrate',
-    ].join('
-');
+    ].join('\n');
   }
 
   private resolveWorkflowType(jobType: JobType): WorkflowType {
