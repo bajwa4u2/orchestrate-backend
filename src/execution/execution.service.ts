@@ -1166,7 +1166,7 @@ export class ExecutionService {
           where: { id: reply.meeting.id },
           data: {
             workflowRunId,
-            status: bookingUrl ? MeetingStatus.PROPOSED : MeetingStatus.PROPOSED,
+            status: MeetingStatus.PROPOSED,
             bookingUrl,
             title,
             notesText: this.buildMeetingNotes(reply),
@@ -1197,6 +1197,58 @@ export class ExecutionService {
             }),
           },
         });
+
+    const existingMeetingResponse = await this.prisma.outreachMessage.findFirst({
+      where: {
+        campaignId: reply.campaignId,
+        leadId: reply.leadId,
+        direction: 'OUTBOUND',
+        metadataJson: {
+          path: ['type'],
+          equals: 'meeting_response',
+        },
+        AND: [
+          {
+            metadataJson: {
+              path: ['replyId'],
+              equals: reply.id,
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+
+    let responseMessageId: string | null = existingMeetingResponse?.id ?? null;
+
+    if (!existingMeetingResponse) {
+      const meetingResponse = await this.prisma.outreachMessage.create({
+        data: {
+          organizationId: reply.organizationId,
+          clientId: reply.clientId,
+          campaignId: reply.campaignId,
+          leadId: reply.leadId,
+          mailboxId: reply.mailboxId,
+          workflowRunId,
+          direction: 'OUTBOUND',
+          channel: 'EMAIL',
+          status: MessageStatus.SENT,
+          source: RecordSource.SYSTEM_GENERATED,
+          lifecycle: MessageLifecycle.DISPATCHED,
+          subjectLine: this.buildMeetingResponseSubject(reply),
+          bodyText: this.buildMeetingResponseBody(reply, bookingUrl),
+          sentAt: new Date(),
+          metadataJson: toPrismaJson({
+            type: 'meeting_response',
+            replyId: reply.id,
+            meetingId: meeting.id,
+            bookingUrl,
+          }),
+        },
+      });
+
+      responseMessageId = meetingResponse.id;
+    }
 
     await this.prisma.lead.update({
       where: { id: reply.leadId },
@@ -1233,6 +1285,7 @@ export class ExecutionService {
           meetingId: meeting.id,
           replyId: reply.id,
           bookingUrl,
+          responseMessageId,
         }),
       },
     });
@@ -1242,6 +1295,7 @@ export class ExecutionService {
         replyId: reply.id,
         meetingId: meeting.id,
         bookingUrl,
+        responseMessageId,
       });
     }
 
@@ -1250,6 +1304,7 @@ export class ExecutionService {
       replyId: reply.id,
       meetingId: meeting.id,
       bookingUrl,
+      responseMessageId,
       requiresHumanReview: !bookingUrl,
       workflowRunId,
       jobId: input.jobId,
@@ -1315,19 +1370,67 @@ ${body}`;
   private buildMessageBody(lead: any, jobType: JobType, note?: string) {
     const firstName = lead.contact?.firstName || lead.contact?.fullName || 'there';
     const offer = lead.campaign.offerSummary || lead.client.outboundOffer || 'a relevant business offer';
-    const bookingUrl = lead.campaign.bookingUrlOverride || lead.client.bookingUrl;
     const intro =
       jobType === JobType.FOLLOWUP_SEND
-        ? `Hi ${firstName},\n\nFollowing up on my earlier note.`
-        : `Hi ${firstName},\n\nReaching out with a quick intro.`;
+        ? `Hi ${firstName},
+
+Following up on my earlier note.`
+        : `Hi ${firstName},
+
+Reaching out with a quick intro.`;
 
     return [
       intro,
-      `\n\nWe are helping teams around: ${offer}.`,
-      bookingUrl ? `\n\nIf helpful, here is the booking link: ${bookingUrl}` : '',
-      note ? `\n\nNote: ${note}` : '',
-      `\n\nBest,\nOrchestrate`,
+      `
+
+We are helping teams around: ${offer}.`,
+      note ? `
+
+Note: ${note}` : '',
+      `
+
+Best,
+Orchestrate`,
     ].join('');
+  }
+
+  private buildMeetingResponseSubject(reply: any) {
+    const originalSubject = this.readString(reply.subjectLine);
+    return originalSubject ? `Re: ${originalSubject}` : 'Re: Quick follow-up';
+  }
+
+  private buildMeetingResponseBody(reply: any, bookingUrl: string | null) {
+    const firstName =
+      reply.lead?.contact?.firstName ||
+      reply.lead?.contact?.fullName ||
+      reply.lead?.account?.companyName ||
+      'there';
+
+    if (bookingUrl) {
+      return [
+        `Hi ${firstName},`,
+        '',
+        'Thanks for your response.',
+        '',
+        `You can pick a time that works for you here: ${bookingUrl}`,
+        '',
+        'Best,',
+        'Orchestrate',
+      ].join('
+');
+    }
+
+    return [
+      `Hi ${firstName},`,
+      '',
+      'Thanks for your response.',
+      '',
+      'I’ll coordinate a time and get back to you shortly.',
+      '',
+      'Best,',
+      'Orchestrate',
+    ].join('
+');
   }
 
   private resolveWorkflowType(jobType: JobType): WorkflowType {
