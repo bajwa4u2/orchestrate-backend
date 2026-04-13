@@ -113,9 +113,10 @@ export class ClientsService {
     const metadata = this.asObject(client.metadataJson);
     const setup = this.asObject(metadata.setup);
     const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
-    const selectedPlan = this.readString(setup.selectedPlan) ?? client.selectedPlan ?? scope.recommendedPlan.code;
-    const selectedTier = this.readString(setup.selectedTier) ?? scope.recommendedPlan.tier;
-    const subscriptionStatus = await this.resolveSubscriptionStatus(client.id);
+    const setupSelectedPlan =
+      this.readString(setup.selectedPlan) ?? client.selectedPlan ?? scope.recommendedPlan.code;
+    const setupSelectedTier = this.readString(setup.selectedTier) ?? scope.recommendedPlan.tier;
+    const commercial = await this.resolveCommercialState(client.id);
 
     return {
       clientId: client.id,
@@ -123,9 +124,12 @@ export class ClientsService {
       emailVerified: true,
       setupCompleted: Boolean(client.setupCompletedAt),
       setupCompletedAt: client.setupCompletedAt,
-      selectedPlan,
-      selectedTier,
-      subscriptionStatus,
+      selectedPlan: commercial.service ?? setupSelectedPlan,
+      selectedTier: commercial.tier ?? setupSelectedTier,
+      setupSelectedPlan,
+      setupSelectedTier,
+      subscriptionStatus: commercial.status,
+      commercial,
       setup: client.setupCompletedAt
         ? {
             serviceType: scope.lane,
@@ -138,8 +142,8 @@ export class ClientsService {
             excludeGeo: scope.excludeGeo,
             priorityMarkets: scope.priorityMarkets,
             notes: scope.notes,
-            selectedPlan,
-            selectedTier,
+            selectedPlan: setupSelectedPlan,
+            selectedTier: setupSelectedTier,
             recommendedPlan: scope.recommendedPlan,
             scope,
             legacy: {
@@ -221,8 +225,8 @@ export class ClientsService {
       },
     });
 
-    const subscriptionStatus = await this.resolveSubscriptionStatus(updated.id);
-    const normalizedStatus = subscriptionStatus.toLowerCase();
+    const commercial = await this.resolveCommercialState(updated.id);
+    const normalizedStatus = commercial.status.toLowerCase();
     const nextRoute = normalizedStatus === 'active'
       ? '/client/workspace'
       : `/client/subscribe?plan=${selectedPlan}&tier=${selectedTier}`;
@@ -235,9 +239,12 @@ export class ClientsService {
         emailVerified: true,
         setupCompleted: true,
         setupCompletedAt: updated.setupCompletedAt,
-        selectedPlan: updated.selectedPlan,
-        selectedTier,
+        selectedPlan: commercial.service ?? updated.selectedPlan,
+        selectedTier: commercial.tier ?? selectedTier,
+        setupSelectedPlan: selectedPlan,
+        setupSelectedTier: selectedTier,
         subscriptionStatus: normalizedStatus,
+        commercial,
         setup: {
           serviceType: lane,
           scopeMode: selectedTier,
@@ -772,13 +779,51 @@ export class ClientsService {
     return industries;
   }
 
-  private async resolveSubscriptionStatus(clientId: string) {
+  private async resolveCommercialState(clientId: string) {
     const subscription = await this.prisma.subscription.findFirst({
-      where: { clientId },
+      where: {
+        clientId,
+        status: {
+          in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE],
+        },
+      },
       orderBy: { createdAt: 'desc' },
-      select: { status: true },
+      include: { plan: { select: { code: true, name: true } } },
     });
 
-    return (subscription?.status ?? 'none').toString();
+    if (!subscription) {
+      return {
+        status: 'none',
+        service: null,
+        tier: null,
+        planCode: null,
+        planName: null,
+      };
+    }
+
+    const planCode = subscription.plan?.code ?? null;
+    const service =
+      typeof planCode === 'string' && planCode.includes('REVENUE')
+        ? 'revenue'
+        : typeof planCode === 'string' && planCode.includes('OPPORTUNITY')
+          ? 'opportunity'
+          : null;
+
+    const tier =
+      typeof planCode === 'string' && planCode.includes('PRECISION')
+        ? 'precision'
+        : typeof planCode === 'string' && planCode.includes('MULTI')
+          ? 'multi'
+          : typeof planCode === 'string' && planCode.includes('FOCUSED')
+            ? 'focused'
+            : null;
+
+    return {
+      status: subscription.status.toString(),
+      service,
+      tier,
+      planCode,
+      planName: subscription.plan?.name ?? null,
+    };
   }
 }

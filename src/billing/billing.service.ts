@@ -614,6 +614,34 @@ export class BillingService {
     return { url: session.url };
   }
 
+
+  private derivePlanIdentity(planCode: string | null, metadata: Record<string, unknown>) {
+    const normalizedPlanCode = (planCode ?? this.readString(metadata.planCode) ?? '').trim().toUpperCase();
+    const metadataTier = this.readString(metadata.tierCode)?.trim().toLowerCase() ?? null;
+
+    const service =
+      normalizedPlanCode.includes('REVENUE')
+        ? 'revenue'
+        : normalizedPlanCode.includes('OPPORTUNITY')
+          ? 'opportunity'
+          : (this.readString(metadata.planCode)?.trim().toLowerCase() ?? 'opportunity');
+
+    const tier =
+      normalizedPlanCode.includes('PRECISION')
+        ? 'precision'
+        : normalizedPlanCode.includes('MULTI')
+          ? 'multi'
+          : normalizedPlanCode.includes('FOCUSED')
+            ? 'focused'
+            : (metadataTier ?? 'focused');
+
+    return {
+      service,
+      lane: service,
+      tier,
+    };
+  }
+
   async getClientSubscription(organizationId: string, clientId: string) {
     const subscription = await this.prisma.subscription.findFirst({
       where: {
@@ -634,11 +662,18 @@ export class BillingService {
     }
 
     const subscriptionMetadata = this.asObject(subscription.metadataJson);
+    const derivedIdentity = this.derivePlanIdentity(
+      subscription.plan?.code ?? null,
+      subscriptionMetadata,
+    );
 
     return {
-      plan: subscription.plan?.name ?? null,
+      service: derivedIdentity.service,
+      lane: derivedIdentity.lane,
+      plan: derivedIdentity.service,
+      planName: subscription.plan?.name ?? null,
       planCode: subscription.plan?.code ?? null,
-      tier: this.readString(subscriptionMetadata.tierCode) ?? null,
+      tier: derivedIdentity.tier,
       status: subscription.status,
       amount: subscription.amountCents / 100,
       currency: subscription.currencyCode,
@@ -1042,15 +1077,21 @@ export class BillingService {
     const clientMetadata = this.asObject(client.metadataJson);
     const billingMetadata = this.asObject(clientMetadata.billing as Prisma.JsonValue);
     const clientActivation = this.asObject(billingMetadata.activation as Prisma.JsonValue);
-    const planCode =
-      this.readString(subscriptionMetadata.planCode) ??
-      client.selectedPlan ??
-      this.readString(scope.lane) ??
-      'opportunity';
-    const tierCode =
-      this.readString(subscriptionMetadata.tierCode) ??
-      this.readString(scope.mode) ??
-      'focused';
+
+    const subscribedPlan = subscription.planId
+      ? await this.prisma.plan.findUnique({
+          where: { id: subscription.planId },
+          select: { code: true, name: true },
+        })
+      : null;
+
+    const derivedIdentity = this.derivePlanIdentity(
+      subscribedPlan?.code ?? null,
+      subscriptionMetadata,
+    );
+
+    const planCode = derivedIdentity.service;
+    const tierCode = derivedIdentity.tier;
 
     const queueName = planCode === 'revenue' ? 'billing' : 'growth';
     const bootstrapJobType = JobType.LEAD_IMPORT;
