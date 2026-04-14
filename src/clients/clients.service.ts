@@ -14,6 +14,7 @@ import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
 import { UpdateClientProfileDto } from './dto/update-client-profile.dto';
+import { UpdateCampaignProfileDto } from './dto/update-campaign-profile.dto';
 
 type ServiceType = 'opportunity' | 'revenue';
 type ScopeMode = 'focused' | 'multi' | 'precision';
@@ -377,6 +378,161 @@ export class ClientsService {
     };
   }
 
+
+  async getCampaignProfile(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
+    const metadata = this.asObject(client.metadataJson);
+    const setup = this.asObject(metadata.setup);
+    const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
+    const commercial = await this.resolveCommercialState(client.id);
+
+    return {
+      success: true,
+      clientId: client.id,
+      organizationId: client.organizationId,
+      campaignProfile: {
+        serviceType: scope.lane,
+        scopeMode: scope.mode,
+        countries: scope.countries,
+        regions: scope.regions,
+        metros: scope.metros,
+        industries: scope.industries,
+        includeGeo: scope.includeGeo,
+        excludeGeo: scope.excludeGeo,
+        priorityMarkets: scope.priorityMarkets,
+        notes: scope.notes,
+        recommendedPlan: scope.recommendedPlan,
+        subscriptionAlignment: this.buildSubscriptionAlignment(commercial, scope),
+      },
+    };
+  }
+
+  async updateCampaignProfile(
+    headers: Record<string, unknown>,
+    dto: UpdateCampaignProfileDto,
+  ) {
+    const client = await this.resolveClientForRequest(headers);
+    const metadata = this.asObject(client.metadataJson);
+    const setup = this.asObject(metadata.setup);
+    const currentScope = this.readStructuredScope(setup.scope ?? client.scopeJson);
+
+    const countries = dto.countries !== undefined
+      ? this.normalizeCountries(dto.countries)
+      : currentScope.countries;
+
+    const regions = dto.regions !== undefined
+      ? this.normalizeRegions(dto.regions, countries)
+      : currentScope.regions;
+
+    const metros = dto.metros !== undefined
+      ? this.normalizeMetros(dto.metros, countries, regions)
+      : currentScope.metros;
+
+    const industries = dto.industries !== undefined
+      ? this.normalizeIndustries(dto.industries)
+      : currentScope.industries;
+
+    const includeGeo = dto.includeGeo !== undefined
+      ? this.normalizeStringList(dto.includeGeo, 40, 120)
+      : currentScope.includeGeo;
+
+    const excludeGeo = dto.excludeGeo !== undefined
+      ? this.normalizeStringList(dto.excludeGeo, 40, 120)
+      : currentScope.excludeGeo;
+
+    const priorityMarkets = dto.priorityMarkets !== undefined
+      ? this.normalizeStringList(dto.priorityMarkets, 20, 120)
+      : currentScope.priorityMarkets;
+
+    const notes = dto.notes !== undefined
+      ? this.normalizeOptionalString(dto.notes, 500)
+      : currentScope.notes;
+
+    const recommendedTier = this.recommendTier(
+      countries,
+      metros,
+      includeGeo,
+      excludeGeo,
+      priorityMarkets,
+    );
+
+    this.validateScope(
+      recommendedTier,
+      countries,
+      regions,
+      metros,
+      includeGeo,
+      excludeGeo,
+      priorityMarkets,
+    );
+
+    const scope = this.buildScopeJson({
+      lane: currentScope.lane,
+      mode: recommendedTier,
+      countries,
+      regions,
+      metros,
+      industries,
+      includeGeo,
+      excludeGeo,
+      priorityMarkets,
+      notes,
+    });
+
+    const updated = await this.prisma.client.update({
+      where: { id: client.id },
+      data: {
+        country: countries[0]?.label ?? null,
+        area: this.buildAreaSummary(regions, metros),
+        industry: industries[0]?.label ?? null,
+        scopeJson: scope as unknown as Prisma.InputJsonValue,
+        selectedPlan: currentScope.lane,
+        metadataJson: toPrismaJson({
+          ...metadata,
+          setup: {
+            ...setup,
+            serviceType: currentScope.lane,
+            scopeMode: recommendedTier,
+            countries,
+            regions,
+            metros,
+            industries,
+            includeGeo,
+            excludeGeo,
+            priorityMarkets,
+            notes,
+            selectedPlan: currentScope.lane,
+            selectedTier: recommendedTier,
+            recommendedPlan: scope.recommendedPlan,
+            scope,
+          },
+        }),
+      },
+    });
+
+    const commercial = await this.resolveCommercialState(updated.id);
+
+    return {
+      success: true,
+      clientId: updated.id,
+      organizationId: updated.organizationId,
+      campaignProfile: {
+        serviceType: scope.lane,
+        scopeMode: scope.mode,
+        countries: scope.countries,
+        regions: scope.regions,
+        metros: scope.metros,
+        industries: scope.industries,
+        includeGeo: scope.includeGeo,
+        excludeGeo: scope.excludeGeo,
+        priorityMarkets: scope.priorityMarkets,
+        notes: scope.notes,
+        recommendedPlan: scope.recommendedPlan,
+        subscriptionAlignment: this.buildSubscriptionAlignment(commercial, scope),
+      },
+    };
+  }
+
   private buildProfileResponse(client: any) {
     const metadata = this.asObject(client.metadataJson);
     const branding = this.asObject(metadata.branding);
@@ -439,6 +595,44 @@ export class ClientsService {
     }
 
     return client;
+  }
+
+
+  private buildSubscriptionAlignment(
+    commercial: {
+      status: string;
+      service: string | null;
+      tier: string | null;
+      planCode: string | null;
+      planName: string | null;
+    },
+    scope: ScopeJson,
+  ) {
+    const currentTier = commercial.tier;
+    const currentService = commercial.service;
+    const recommendedTier = scope.mode;
+    const recommendedService = scope.lane;
+
+    return {
+      subscriptionStatus: commercial.status,
+      currentService,
+      currentTier,
+      recommendedService,
+      recommendedTier,
+      matchesCurrentSubscription:
+        currentService === recommendedService && currentTier === recommendedTier,
+      upgradeSuggested:
+        this.tierRank(recommendedTier) > this.tierRank(currentTier),
+      downgradePossible:
+        this.tierRank(currentTier) > this.tierRank(recommendedTier),
+    };
+  }
+
+  private tierRank(value: string | null | undefined) {
+    if (value === 'precision') return 3;
+    if (value === 'multi') return 2;
+    if (value === 'focused') return 1;
+    return 0;
   }
 
   private normalizeServiceType(value: string): ServiceType {

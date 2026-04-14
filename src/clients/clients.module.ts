@@ -6,10 +6,15 @@ import { ClientsController } from './clients.controller';
 import { ClientsService } from './clients.service';
 import { ClientSupportController } from '../support/client-support.controller';
 import { StripeService } from '../billing/stripe/stripe.service';
+import { ClientCampaignController } from './client-campaign.controller';
 
 @Module({
   imports: [AccessContextModule, DatabaseModule, IntakeModule],
-  controllers: [ClientsController, ClientSupportController],
+  controllers: [
+    ClientsController,
+    ClientCampaignController,
+    ClientSupportController,
+  ],
   providers: [ClientsService, StripeService],
   exports: [ClientsService],
 })
