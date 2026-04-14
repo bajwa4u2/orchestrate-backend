@@ -1,9 +1,14 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import {
   ActivityVisibility,
   JobStatus,
   JobType,
-  Prisma,
   RecordSource,
   WorkflowLane,
   WorkflowStatus,
@@ -30,6 +35,7 @@ export class RepliesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workflowsService: WorkflowsService,
+    @Inject(forwardRef(() => ExecutionService))
     private readonly executionService: ExecutionService,
   ) {}
 
@@ -159,9 +165,11 @@ export class RepliesService {
   async processReply(replyId: string) {
     const classification = await this.executionService.runReplyClassification(replyId);
     let handoff: Awaited<ReturnType<ExecutionService['runMeetingHandoff']>> | null = null;
+
     if (!classification.requiresHumanReview && classification.handoffJobId) {
       handoff = await this.executionService.runMeetingHandoff(replyId);
     }
+
     return {
       ok: true,
       classification,
