@@ -615,6 +615,19 @@ export class BillingService {
   }
 
 
+  private humanizePlanService(service: string | null) {
+    if (service === 'revenue') return 'Revenue';
+    if (service === 'opportunity') return 'Opportunity';
+    return 'Not set';
+  }
+
+  private humanizePlanTier(tier: string | null) {
+    if (tier === 'precision') return 'Precision';
+    if (tier === 'multi') return 'Multi-Market';
+    if (tier === 'focused') return 'Focused';
+    return 'Not set';
+  }
+
   private derivePlanIdentity(planCode: string | null, metadata: Record<string, unknown>) {
     const normalizedPlanCode = (planCode ?? this.readString(metadata.planCode) ?? '').trim().toUpperCase();
     const metadataTier = this.readString(metadata.tierCode)?.trim().toLowerCase() ?? null;
@@ -669,11 +682,14 @@ export class BillingService {
 
     return {
       service: derivedIdentity.service,
+      serviceLabel: this.humanizePlanService(derivedIdentity.service),
       lane: derivedIdentity.lane,
       plan: derivedIdentity.service,
       planName: subscription.plan?.name ?? null,
       planCode: subscription.plan?.code ?? null,
       tier: derivedIdentity.tier,
+      tierLabel: this.humanizePlanTier(derivedIdentity.tier),
+      displayPlanLabel: `${this.humanizePlanService(derivedIdentity.service)} · ${this.humanizePlanTier(derivedIdentity.tier)}`,
       status: subscription.status,
       amount: subscription.amountCents / 100,
       currency: subscription.currencyCode,
