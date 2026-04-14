@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import {
   ActivityVisibility,
   JobStatus,
@@ -25,15 +25,30 @@ import { AiService } from '../ai/ai.service';
 import { DispatchDueJobsDto } from './dto/dispatch-due-jobs.dto';
 import { QueueLeadSendDto } from './dto/queue-lead-send.dto';
 import { RunJobDto } from './dto/run-job.dto';
+import { WorkersService } from '../workers/workers.service';
 
 @Injectable()
-export class ExecutionService {
+export class ExecutionService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliverabilityService: DeliverabilityService,
     private readonly workflowsService: WorkflowsService,
     private readonly aiService: AiService,
+    private readonly workersService: WorkersService,
   ) {}
+
+  onModuleInit() {
+    const timer = setInterval(() => {
+      this.dispatchDueJobs({ limit: 10 }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('[execution] dispatch loop error', message);
+      });
+    }, 10000);
+
+    if (typeof (timer as any).unref === 'function') {
+      (timer as any).unref();
+    }
+  }
 
   async queueLeadSend(leadId: string, dto: QueueLeadSendDto) {
     const lead = await this.prisma.lead.findUnique({
@@ -218,60 +233,10 @@ export class ExecutionService {
 
     try {
       let result: Record<string, unknown>;
-      if (job.type === JobType.FIRST_SEND || job.type === JobType.FOLLOWUP_SEND) {
-        const leadId = String(payload.leadId || '');
-        result = await this.runImmediateSendForLead(leadId, {
-          jobId: job.id,
-          workflowRunId,
-          jobType: job.type,
-          simulateDeliveryOnly: Boolean(payload.simulateDeliveryOnly),
-          note: typeof payload.note === 'string' ? payload.note : undefined,
-        });
-      } else if (job.type === JobType.MAILBOX_HEALTH_CHECK) {
+      if (job.type === JobType.MAILBOX_HEALTH_CHECK) {
         result = await this.deliverabilityService.refreshMailboxHealth(String(payload.mailboxId || ''));
-      } else if (job.type === JobType.LEAD_IMPORT) {
-        if (!job.clientId) {
-          throw new BadRequestException(`Job ${job.id} is missing clientId`);
-        }
-        result = await this.runLeadImportBootstrap(
-          {
-            id: job.id,
-            organizationId: job.organizationId,
-            clientId: job.clientId,
-            campaignId: job.campaignId,
-          },
-          payload,
-          workflowRunId,
-        );
-      } else if (job.type === JobType.INVOICE_GENERATION) {
-        if (!job.clientId) {
-          throw new BadRequestException(`Job ${job.id} is missing clientId`);
-        }
-        result = await this.runRevenueBootstrap(
-          {
-            id: job.id,
-            organizationId: job.organizationId,
-            clientId: job.clientId,
-            campaignId: job.campaignId,
-          },
-          payload,
-          workflowRunId,
-        );
-      } else if (job.type === JobType.REPLY_CLASSIFICATION) {
-        result = await this.runReplyClassification(String(payload.replyId || ''), {
-          workflowRunId,
-          jobId: job.id,
-        });
-      } else if (job.type === JobType.MEETING_HANDOFF) {
-        result = await this.runMeetingHandoff(String(payload.replyId || ''), {
-          workflowRunId,
-          jobId: job.id,
-        });
       } else {
-        result = {
-          skipped: true,
-          reason: `No executor implemented yet for ${job.type}`,
-        };
+        result = await this.workersService.run(job, { workflowRunId, payload });
       }
 
       await this.prisma.jobRun.create({

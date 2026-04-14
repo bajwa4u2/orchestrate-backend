@@ -6,6 +6,7 @@ import { AiModule } from '../ai/ai.module';
 import { MeetingsModule } from '../meetings/meetings.module';
 import { RepliesModule } from '../replies/replies.module';
 import { ExecutionController } from './execution.controller';
+import { WorkersModule } from '../workers/workers.module';
 import { ExecutionService } from './execution.service';
 
 @Module({
@@ -16,6 +17,7 @@ import { ExecutionService } from './execution.service';
     forwardRef(() => MeetingsModule),
     forwardRef(() => RepliesModule),
     forwardRef(() => DeliverabilityModule),
+    forwardRef(() => WorkersModule),
   ],
   controllers: [ExecutionController],
   providers: [ExecutionService],

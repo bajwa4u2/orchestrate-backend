@@ -28,6 +28,7 @@ import { StatementsModule } from './statements/statements.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { TemplatesModule } from './templates/templates.module';
 import { UsersModule } from './users/users.module';
+import { WorkersModule } from './workers/workers.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { UsersModule } from './users/users.module';
     ClientPortalModule,
     InvoicesModule,
     AiModule,
+    WorkersModule,
   ],
 })
 export class AppModule {}
