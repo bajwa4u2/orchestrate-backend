@@ -1237,8 +1237,8 @@ export class ExecutionService implements OnModuleInit {
     await this.prisma.lead.update({
       where: { id: reply.leadId },
       data: {
-        status: LeadStatus.BOOKED,
-        qualificationState: LeadQualificationState.CONVERTED,
+        status: LeadStatus.HANDOFF_PENDING,
+        qualificationState: LeadQualificationState.INTERESTED,
         lastContactAt: new Date(),
       },
     });

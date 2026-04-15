@@ -14,7 +14,7 @@ import {
   Min,
 } from 'class-validator';
 
-const leadStatuses = ['NEW', 'ENRICHED', 'QUALIFIED', 'CONTACTED', 'FOLLOWED_UP', 'REPLIED', 'INTERESTED', 'BOOKED', 'CLOSED_LOST', 'SUPPRESSED'] satisfies LeadStatus[];
+const leadStatuses = ['NEW', 'ENRICHED', 'QUALIFIED', 'CONTACTED', 'FOLLOWED_UP', 'REPLIED', 'INTERESTED', 'HANDOFF_PENDING', 'BOOKED', 'CLOSED_LOST', 'SUPPRESSED'] satisfies LeadStatus[];
 const leadSourceTypes = ['MANUAL', 'CSV_IMPORT', 'GOOGLE_MAPS', 'DIRECTORY', 'API', 'INTERNAL_GROWTH', 'REFERRAL', 'OTHER'] satisfies LeadSourceType[];
 
 export class CreateLeadDto {

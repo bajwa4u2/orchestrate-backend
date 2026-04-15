@@ -45,6 +45,7 @@ export class MeetingHandoffWorkerService implements JobWorker {
         campaign: true,
         client: true,
         meeting: true,
+        message: true,
       },
     });
 
@@ -144,13 +145,14 @@ export class MeetingHandoffWorkerService implements JobWorker {
           bodyText,
           sentAt: new Date(),
           externalMessageId,
-          threadKey: reply.messageId ?? reply.id,
+          threadKey: reply.message?.threadKey ?? reply.id,
           metadataJson: toPrismaJson({
             type: 'meeting_response',
             replyId: reply.id,
             meetingId: meeting.id,
             bookingUrl,
             transportMode,
+            providerThreadId: reply.message?.externalMessageId ?? null,
           }),
         },
       });
@@ -161,9 +163,18 @@ export class MeetingHandoffWorkerService implements JobWorker {
     await this.prisma.lead.update({
       where: { id: reply.leadId },
       data: {
-        status: LeadStatus.BOOKED,
-        qualificationState: LeadQualificationState.CONVERTED,
+        status: LeadStatus.HANDOFF_PENDING,
+        qualificationState: LeadQualificationState.INTERESTED,
         lastContactAt: new Date(),
+        metadataJson: toPrismaJson({
+          ...this.asObject(reply.lead?.metadataJson),
+          conversionState: {
+            stage: 'handoff_pending',
+            meetingId: meeting.id,
+            lastReplyId: reply.id,
+            handoffAt: new Date().toISOString(),
+          },
+        }),
       },
     });
 
@@ -197,6 +208,7 @@ export class MeetingHandoffWorkerService implements JobWorker {
           bookingUrl,
           responseMessageId: meetingResponseId,
           recipientEmail,
+          leadStatus: LeadStatus.HANDOFF_PENDING,
         }),
       },
     });
@@ -211,6 +223,7 @@ export class MeetingHandoffWorkerService implements JobWorker {
       requiresHumanReview,
       workflowRunId: context.workflowRunId,
       jobId: job.id,
+      leadStatus: LeadStatus.HANDOFF_PENDING,
     };
   }
 
@@ -261,13 +274,11 @@ export class MeetingHandoffWorkerService implements JobWorker {
     ].join('\n');
   }
 
-  private asObject(value: unknown): Record<string, unknown> {
-    return value && typeof value === 'object' && !Array.isArray(value)
-      ? { ...(value as Record<string, unknown>) }
-      : {};
+  private asObject(value: unknown): Record<string, any> {
+    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, any>) } : {};
   }
 
-  private readString(value: unknown): string | null {
+  private readString(value: unknown) {
     return typeof value === 'string' && value.trim().length ? value.trim() : null;
   }
 }

@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Job, JobType, Prisma } from '@prisma/client';
+import { AiService } from '../../ai/ai.service';
 import { PrismaService } from '../../database/prisma.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
@@ -7,7 +8,10 @@ import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 export class MessageGenerationWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.MESSAGE_GENERATION];
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly aiService: AiService,
+  ) {}
 
   async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
     const leadId = this.readString(context.payload.leadId);
@@ -54,9 +58,7 @@ export class MessageGenerationWorkerService implements JobWorker {
     }
 
     const sequence = await this.prisma.sequence.findFirst({
-      where: {
-        campaignId: input.campaignId,
-      },
+      where: { campaignId: input.campaignId },
       orderBy: [{ createdAt: 'asc' }],
       select: { id: true },
     });
@@ -76,8 +78,19 @@ export class MessageGenerationWorkerService implements JobWorker {
         })
       : null;
 
-    const subject = this.readString(step?.subjectTemplate) || this.defaultSubject(lead);
-    const body = this.readString(step?.bodyTemplate) || this.defaultBody(lead, input.note);
+    const templateSubject = this.readString(step?.subjectTemplate);
+    const templateBody = this.readString(step?.bodyTemplate);
+    const aiDraft = await this.aiService.generateOutboundDraftFromContext({
+      clientId: input.clientId,
+      campaignId: input.campaignId,
+      leadId: input.leadId,
+      stepOrderIndex: step?.orderIndex ?? desiredStep,
+      jobType: input.jobType,
+      note: [templateBody, input.note].filter(Boolean).join(' | ') || undefined,
+    });
+
+    const subject = templateSubject || this.readString(aiDraft.draft.subject) || this.defaultSubject(lead);
+    const body = templateBody || this.readString(aiDraft.draft.body) || this.defaultBody(lead, input.note);
 
     return {
       leadId: lead.id,
@@ -87,9 +100,13 @@ export class MessageGenerationWorkerService implements JobWorker {
       subject,
       body,
       metadata: {
-        usedSequenceTemplate: Boolean(step),
+        usedSequenceTemplate: Boolean(step && templateSubject && templateBody),
+        usedAiDraft: Boolean(aiDraft?.draft),
         currentStep,
         desiredStep,
+        aiTone: this.readString(aiDraft?.draft?.tone) ?? null,
+        aiIntent: this.readString(aiDraft?.draft?.intent) ?? null,
+        candidateCompany: aiDraft?.candidate?.companyName ?? null,
       } satisfies Prisma.JsonObject,
     };
   }

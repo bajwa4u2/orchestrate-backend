@@ -26,6 +26,7 @@ type InboundReplyInput = {
   subjectLine?: string;
   bodyText?: string;
   externalMessageId?: string;
+  providerThreadId?: string;
   threadKey?: string;
   receivedAt?: string | Date;
 };
@@ -63,16 +64,18 @@ export class RepliesService {
         fromEmail,
         messageId: matchedMessage.id,
         threadKey: input.threadKey ?? null,
+        providerThreadId: input.providerThreadId ?? null,
         externalMessageId: input.externalMessageId ?? null,
       },
       startedAt: new Date(),
     });
 
+    const receivedAt = this.resolveReceivedAt(input.receivedAt);
     const existingReply = await this.prisma.reply.findFirst({
       where: {
         messageId: matchedMessage.id,
         fromEmail,
-        receivedAt: this.resolveReceivedAt(input.receivedAt),
+        receivedAt,
       },
       select: { id: true },
     });
@@ -102,9 +105,10 @@ export class RepliesService {
         fromEmail,
         subjectLine: input.subjectLine?.trim() || null,
         bodyText: input.bodyText?.trim() || null,
-        receivedAt: this.resolveReceivedAt(input.receivedAt),
+        receivedAt,
         metadataJson: toPrismaJson({
           externalMessageId: input.externalMessageId ?? null,
+          providerThreadId: input.providerThreadId ?? null,
           threadKey: input.threadKey ?? null,
           mailboxEmail: input.mailboxEmail?.trim().toLowerCase() ?? null,
           matchedOutboundMessageId: matchedMessage.id,
@@ -193,13 +197,14 @@ export class RepliesService {
   private async resolveMatchedOutboundMessage(input: InboundReplyInput, fromEmail: string) {
     const mailboxEmail = input.mailboxEmail?.trim().toLowerCase();
     const externalMessageId = input.externalMessageId?.trim();
+    const providerThreadId = input.providerThreadId?.trim();
     const threadKey = input.threadKey?.trim();
 
-    if (externalMessageId) {
-      const byExternal = await this.prisma.outreachMessage.findFirst({
+    if (providerThreadId) {
+      const byInReplyTo = await this.prisma.outreachMessage.findFirst({
         where: {
-          externalMessageId,
           direction: 'OUTBOUND',
+          externalMessageId: providerThreadId,
         },
         select: {
           id: true,
@@ -210,7 +215,7 @@ export class RepliesService {
           mailboxId: true,
         },
       });
-      if (byExternal) return byExternal;
+      if (byInReplyTo) return byInReplyTo;
     }
 
     if (threadKey) {
@@ -235,6 +240,24 @@ export class RepliesService {
         },
       });
       if (byThread) return byThread;
+    }
+
+    if (externalMessageId) {
+      const byExternal = await this.prisma.outreachMessage.findFirst({
+        where: {
+          externalMessageId,
+          direction: 'OUTBOUND',
+        },
+        select: {
+          id: true,
+          organizationId: true,
+          clientId: true,
+          campaignId: true,
+          leadId: true,
+          mailboxId: true,
+        },
+      });
+      if (byExternal) return byExternal;
     }
 
     return this.prisma.outreachMessage.findFirst({

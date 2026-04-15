@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "LeadStatus" ADD VALUE 'HANDOFF_PENDING';

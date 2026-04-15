@@ -125,7 +125,9 @@ type InboundWebhookResult = {
   ok: boolean;
   ignored?: boolean;
   verified?: boolean;
+  deduped?: boolean;
   type?: string;
+  eventId?: string | null;
   emailId?: string | null;
   reply?: unknown;
 };
@@ -1262,41 +1264,104 @@ export class EmailsService {
   async handleInboundWebhook(rawPayload: string, headers: Record<string, unknown>): Promise<InboundWebhookResult> {
     const verified = this.verifyResendWebhook(rawPayload, headers);
     const event = this.parseInboundPayload(rawPayload);
+    const emailId = this.readString(event.data?.email_id) ?? null;
+    const eventId = this.readHeader(headers, 'svix-id') ?? emailId ?? null;
 
-    if (event.type !== 'email.received') {
+    const receipt = eventId
+      ? await this.prisma.webhookEventReceipt.upsert({
+          where: { provider_eventId: { provider: 'resend', eventId } },
+          update: {
+            eventType: event.type ?? 'unknown',
+            payloadJson: event as unknown as Prisma.InputJsonValue,
+          },
+          create: {
+            provider: 'resend',
+            eventId,
+            eventType: event.type ?? 'unknown',
+            status: 'received',
+            payloadJson: event as unknown as Prisma.InputJsonValue,
+          },
+        })
+      : null;
+
+    if (receipt?.processedAt) {
       return {
         ok: true,
-        ignored: true,
         verified,
+        deduped: true,
         type: event.type ?? 'unknown',
+        eventId,
+        emailId,
       };
     }
 
-    const emailId = this.readString(event.data?.email_id);
-    if (!emailId) {
-      throw new BadRequestException('Missing email.received data.email_id');
+    try {
+      if (event.type !== 'email.received') {
+        if (receipt) {
+          await this.prisma.webhookEventReceipt.update({
+            where: { id: receipt.id },
+            data: { status: 'ignored', processedAt: new Date() },
+          });
+        }
+
+        return {
+          ok: true,
+          ignored: true,
+          verified,
+          type: event.type ?? 'unknown',
+          eventId,
+          emailId,
+        };
+      }
+
+      if (!emailId) {
+        throw new BadRequestException('Missing email.received data.email_id');
+      }
+
+      const received = await this.fetchReceivedEmail(emailId);
+      const inbound = this.normalizeInboundEmail(event, received);
+
+      if (!inbound.fromEmail || !inbound.mailboxEmail) {
+        throw new BadRequestException('Inbound email is missing sender or mailbox address');
+      }
+
+      const reply = await this.repliesService.ingestInboundReply({
+        ...inbound,
+        fromEmail: inbound.fromEmail,
+        mailboxEmail: inbound.mailboxEmail,
+      });
+
+      if (receipt) {
+        await this.prisma.webhookEventReceipt.update({
+          where: { id: receipt.id },
+          data: {
+            status: 'processed',
+            processedAt: new Date(),
+            payloadJson: { event, reply } as unknown as Prisma.InputJsonValue,
+          },
+        });
+      }
+
+      return {
+        ok: true,
+        verified,
+        type: event.type,
+        eventId,
+        emailId,
+        reply,
+      };
+    } catch (error) {
+      if (receipt) {
+        await this.prisma.webhookEventReceipt.update({
+          where: { id: receipt.id },
+          data: {
+            status: 'failed',
+            errorMessage: error instanceof Error ? error.message : 'Inbound webhook processing failed',
+          },
+        });
+      }
+      throw error;
     }
-
-    const received = await this.fetchReceivedEmail(emailId);
-    const inbound = this.normalizeInboundEmail(event, received);
-
-    if (!inbound.fromEmail || !inbound.mailboxEmail) {
-      throw new BadRequestException('Inbound email is missing sender or mailbox address');
-    }
-
-    const reply = await this.repliesService.ingestInboundReply({
-      ...inbound,
-      fromEmail: inbound.fromEmail,
-      mailboxEmail: inbound.mailboxEmail,
-    });
-
-    return {
-      ok: true,
-      verified,
-      type: event.type,
-      emailId,
-      reply,
-    };
   }
 
   private parseInboundPayload(rawPayload: string): ResendWebhookEnvelope {
@@ -1408,7 +1473,8 @@ export class EmailsService {
       headers.get('in-reply-to');
 
     const references = this.normalizeMessageIdList(received.references ?? headers.get('references'));
-    const threadKey = inReplyTo ?? references[0] ?? messageId ?? this.readString(eventData.email_id) ?? null;
+    const providerThreadId = inReplyTo ?? references[0] ?? null;
+    const threadKey = providerThreadId ?? messageId ?? this.readString(eventData.email_id) ?? null;
 
     const bodyText = this.coalesceBodyText(received.text, received.html);
     const mailboxEmail = this.extractFirstEmail(received.to ?? eventData.to ?? []);
@@ -1420,6 +1486,7 @@ export class EmailsService {
       subjectLine: this.readString(received.subject) ?? this.readString(eventData.subject) ?? '',
       bodyText,
       externalMessageId: messageId ?? this.readString(eventData.email_id),
+      providerThreadId,
       threadKey,
       receivedAt:
         this.readString(received.created_at) ??

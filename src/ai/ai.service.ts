@@ -6,6 +6,7 @@ import {
   ContactEmailStatus,
   LeadQualificationState,
   LeadStatus,
+  JobType,
   MessageChannel,
   MessageDirection,
   MessageLifecycle,
@@ -104,7 +105,7 @@ export class AiService {
       callToAction: 'Book a meeting',
       bookingUrl: client.bookingUrl ?? undefined,
       complianceNotes: input.setup.constraints ?? [],
-      maxLeads: 12,
+      maxLeads: 24,
       dailySendCap: 25,
       sequenceStepCount: 3,
     };
@@ -437,7 +438,7 @@ export class AiService {
       callToAction: 'Book a meeting',
       bookingUrl: campaign.bookingUrlOverride ?? client.bookingUrl ?? undefined,
       complianceNotes: [],
-      maxLeads: 12,
+      maxLeads: 24,
       dailySendCap: 25,
       sequenceStepCount: 3,
     };
@@ -754,6 +755,172 @@ export class AiService {
       messageCount,
       status: 'READY_TO_LAUNCH',
     };
+  }
+
+
+  async generateOutboundDraftFromContext(input: {
+    clientId: string;
+    campaignId: string;
+    leadId: string;
+    stepOrderIndex: number;
+    jobType: JobType;
+    note?: string;
+  }) {
+    const lead = await this.prisma.lead.findUniqueOrThrow({
+      where: { id: input.leadId },
+      include: {
+        client: true,
+        campaign: true,
+        contact: true,
+        account: true,
+      },
+    });
+
+    const campaignMetadata = lead.campaign?.metadataJson && typeof lead.campaign.metadataJson === 'object' && !Array.isArray(lead.campaign.metadataJson)
+      ? (lead.campaign.metadataJson as Record<string, unknown>)
+      : {};
+    const strategySource = campaignMetadata.strategy && typeof campaignMetadata.strategy === 'object' && !Array.isArray(campaignMetadata.strategy)
+      ? (campaignMetadata.strategy as Record<string, unknown>)
+      : {};
+    const serviceProfile = campaignMetadata.serviceProfile && typeof campaignMetadata.serviceProfile === 'object' && !Array.isArray(campaignMetadata.serviceProfile)
+      ? (campaignMetadata.serviceProfile as Record<string, unknown>)
+      : {};
+    const scope = lead.client?.scopeJson && typeof lead.client.scopeJson === 'object' && !Array.isArray(lead.client.scopeJson)
+      ? (lead.client.scopeJson as Record<string, unknown>)
+      : {};
+
+    const geoTargets = [
+      ...this.readStringArray(strategySource.geoTargets),
+      ...this.readStringArray(serviceProfile.countries),
+      ...this.readStringArray(serviceProfile.regions),
+    ];
+    const industryTags = [
+      ...this.readStringArray(strategySource.industryTags),
+      ...this.readStringArray(scope.industries).map((item) => item),
+      lead.account?.industry ?? undefined,
+      lead.client?.industry ?? undefined,
+    ].filter(Boolean) as string[];
+
+    const strategy: StrategyBrief = {
+      icpName: this.readString(strategySource.icpName) ?? lead.client.displayName ?? lead.client.legalName,
+      campaignName: this.readString(strategySource.campaignName) ?? lead.campaign.name,
+      objective: this.readString(strategySource.objective) ?? lead.campaign.objective ?? 'Book qualified meetings with decision makers',
+      offerSummary: this.readString(strategySource.offerSummary) ?? lead.campaign.offerSummary ?? lead.client.outboundOffer ?? 'Structured outbound outreach and follow-up automation',
+      industryTags: Array.from(new Set(industryTags)).slice(0, 6),
+      geoTargets: Array.from(new Set(geoTargets.filter(Boolean))).slice(0, 8),
+      titleKeywords: this.readStringArray(strategySource.titleKeywords).length ? this.readStringArray(strategySource.titleKeywords) : [lead.contact?.title ?? 'Decision maker'],
+      exclusionKeywords: this.readStringArray(strategySource.exclusionKeywords),
+      painPoints: this.readStringArray(strategySource.painPoints).length
+        ? this.readStringArray(strategySource.painPoints)
+        : this.derivePainPoints(lead.client.outboundOffer, lead.account?.industry ?? lead.client.industry),
+      valueAngles: this.readStringArray(strategySource.valueAngles).length
+        ? this.readStringArray(strategySource.valueAngles)
+        : this.deriveValueAngles(lead.client.outboundOffer),
+      tone: this.readString(strategySource.tone) ?? 'professional-direct',
+      callToAction: this.readString(strategySource.callToAction) ?? 'Book a meeting',
+      bookingUrlOverride: lead.campaign.bookingUrlOverride ?? lead.client.bookingUrl ?? undefined,
+      segmentNotes: [
+        `Sequence step: ${input.stepOrderIndex}`,
+        `Job type: ${input.jobType}`,
+        input.note?.trim() || null,
+      ].filter(Boolean).join(' | '),
+    };
+
+    const candidate: LeadCandidate = {
+      companyName: lead.account?.companyName ?? lead.contact?.fullName ?? 'Prospect account',
+      domain: lead.account?.domain ?? undefined,
+      industry: lead.account?.industry ?? lead.client.industry ?? undefined,
+      employeeCount: lead.account?.employeeCount ?? undefined,
+      contactFullName: lead.contact?.fullName ?? 'Decision maker',
+      firstName: lead.contact?.firstName ?? undefined,
+      lastName: lead.contact?.lastName ?? undefined,
+      title: lead.contact?.title ?? 'Decision maker',
+      email: lead.contact?.email ?? undefined,
+      linkedinUrl: lead.contact?.linkedinUrl ?? undefined,
+      city: lead.contact?.city ?? lead.account?.city ?? undefined,
+      region: lead.contact?.region ?? lead.account?.region ?? undefined,
+      countryCode: lead.contact?.countryCode ?? lead.account?.countryCode ?? undefined,
+      timezone: lead.contact?.timezone ?? undefined,
+      reasonForFit: this.buildReasonForFit(lead, strategy, input.note),
+      qualificationNotes: input.note?.trim() || undefined,
+      priority: lead.priority,
+    };
+
+    try {
+      const draft = await this.writerAgent.generate(strategy, candidate);
+      return { strategy, candidate, draft };
+    } catch {
+      return {
+        strategy,
+        candidate,
+        draft: {
+          subject: `${lead.client.displayName} for ${candidate.companyName}`.slice(0, 140),
+          body: [
+            `Hi ${candidate.firstName || candidate.contactFullName.split(' ')[0] || 'there'},`,
+            '',
+            `I’m reaching out from ${lead.client.displayName}.`,
+            candidate.reasonForFit,
+            '',
+            strategy.valueAngles[0] ?? strategy.offerSummary,
+            '',
+            strategy.callToAction === 'Book a meeting' && strategy.bookingUrlOverride
+              ? `If useful, here is the booking link: ${strategy.bookingUrlOverride}`
+              : 'If this is relevant, happy to share a few concrete next steps.',
+            '',
+            'Best,',
+            lead.client.displayName,
+          ].join('\n'),
+          tone: strategy.tone,
+          intent: input.jobType,
+        },
+      };
+    }
+  }
+
+  private buildReasonForFit(lead: any, strategy: StrategyBrief, note?: string) {
+    const parts = [
+      note?.trim() || null,
+      lead.account?.companyName ? `${lead.account.companyName} appears aligned with ${strategy.objective.toLowerCase()}.` : null,
+      strategy.painPoints[0] ? `One likely friction point is ${strategy.painPoints[0].toLowerCase()}.` : null,
+      strategy.valueAngles[0] ? `We help through ${strategy.valueAngles[0].toLowerCase()}.` : null,
+    ].filter(Boolean);
+    return parts.join(' ');
+  }
+
+  private derivePainPoints(offer?: string | null, industry?: string | null) {
+    const industryLabel = industry?.trim() || 'your market';
+    return [
+      `inconsistent lead flow in ${industryLabel}`,
+      'manual follow-up slowing conversions',
+      'booked meetings getting lost between outreach and response handling',
+      offer?.trim() ? `low visibility into whether ${offer.trim()} is producing meetings` : null,
+    ].filter(Boolean) as string[];
+  }
+
+  private deriveValueAngles(offer?: string | null) {
+    return [
+      offer?.trim() || 'a structured outbound system',
+      'consistent follow-up without manual chasing',
+      'clean handoff from reply to meeting',
+    ].filter(Boolean) as string[];
+  }
+
+  private readString(value: unknown): string | undefined {
+    if (typeof value === 'string') {
+      const normalized = value.trim();
+      return normalized.length ? normalized : undefined;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return undefined;
+  }
+
+  private readStringArray(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : typeof item === 'object' && item ? String((item as Record<string, unknown>).label ?? (item as Record<string, unknown>).code ?? '').trim() : ''))
+      .filter(Boolean);
   }
 
   async generateGrowthMessages(input: GenerateGrowthMessagesDto) {

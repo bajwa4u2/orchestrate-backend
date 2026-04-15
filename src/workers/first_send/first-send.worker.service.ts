@@ -139,7 +139,13 @@ export class FirstSendWorkerService implements JobWorker {
     const status = input.simulateDeliveryOnly ? MessageStatus.SCHEDULED : MessageStatus.SENT;
     const sequenceStepOrder = generated.stepOrderIndex;
     const waitDays = FirstSendWorkerService.DEFAULT_FOLLOWUP_WAIT_DAYS;
-    const threadKey = `${lead.id}:${sequenceStepOrder}:${Date.now()}`;
+    const existingMetadata = this.asObject(lead.metadataJson);
+    const existingSequenceState = this.asObject(existingMetadata.sequenceState);
+    const rootThreadKey =
+      this.readString(existingSequenceState.rootThreadKey) ??
+      this.readString(existingSequenceState.threadKey) ??
+      `${lead.id}:${generated.sequenceId ?? 'default'}`;
+    const parentExternalMessageId = this.readString(existingSequenceState.lastExternalMessageId) ?? undefined;
 
     const transport = input.simulateDeliveryOnly
       ? null
@@ -174,7 +180,7 @@ export class FirstSendWorkerService implements JobWorker {
         bodyText: generated.body,
         sentAt: input.simulateDeliveryOnly ? null : new Date(),
         externalMessageId: transport?.externalMessageId ?? null,
-        threadKey,
+        threadKey: rootThreadKey,
         metadataJson: {
           simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
           mailboxEmail: mailbox.emailAddress,
@@ -185,6 +191,9 @@ export class FirstSendWorkerService implements JobWorker {
           sequenceStepOrder,
           waitDays,
           transportMode: transport?.mode ?? 'simulation',
+          providerThreadId: parentExternalMessageId ?? transport?.externalMessageId ?? null,
+          parentExternalMessageId: parentExternalMessageId ?? null,
+          threadRootKey: rootThreadKey,
         } as Prisma.InputJsonValue,
       },
     });
@@ -203,6 +212,9 @@ export class FirstSendWorkerService implements JobWorker {
             lastMessageId: message.id,
             lastSentAt: new Date().toISOString(),
             sequenceId: generated.sequenceId,
+            rootThreadKey,
+            threadKey: rootThreadKey,
+            lastExternalMessageId: transport?.externalMessageId ?? null,
           },
         }),
       },

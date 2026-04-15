@@ -272,6 +272,7 @@ export class LeadsService {
       case LeadStatus.REPLIED:
         return LeadQualificationState.REPLIED;
       case LeadStatus.INTERESTED:
+      case LeadStatus.HANDOFF_PENDING:
         return LeadQualificationState.INTERESTED;
       case LeadStatus.BOOKED:
         return LeadQualificationState.CONVERTED;

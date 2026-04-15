@@ -17,6 +17,7 @@ import { HealthModule } from './health/health.module';
 import { IntakeModule } from './intake/intake.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { LeadsModule } from './leads/leads.module';
+import { LeadSourcesModule } from './lead-sources/lead-sources.module';
 import { MeetingsModule } from './meetings/meetings.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { OperatorModule } from './operator/operator.module';
@@ -44,6 +45,7 @@ import { WorkersModule } from './workers/workers.module';
     ClientsModule,
     CampaignsModule,
     LeadsModule,
+    LeadSourcesModule,
     DeliverabilityModule,
     EmailsModule,
     RepliesModule,

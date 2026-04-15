@@ -41,6 +41,7 @@ export class FollowUpWorkerService implements JobWorker {
 
     if (
       lead.status === LeadStatus.INTERESTED ||
+      lead.status === LeadStatus.HANDOFF_PENDING ||
       lead.status === LeadStatus.BOOKED ||
       lead.status === LeadStatus.SUPPRESSED
     ) {
