@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AccessContextModule } from '../access-context/access-context.module';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowsModule } from '../workflows/workflows.module';
 import { AiController } from './ai.controller';
@@ -11,7 +12,7 @@ import { WriterAgent } from './agents/writer.agent';
 import { OpenAiProvider } from './providers/openai.provider';
 
 @Module({
-  imports: [ConfigModule, WorkflowsModule],
+  imports: [ConfigModule, WorkflowsModule, AccessContextModule],
   controllers: [AiController],
   providers: [
     PrismaService,
