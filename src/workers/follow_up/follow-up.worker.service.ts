@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, forwardRef } from '@nestjs/common';
 import { Job, JobStatus, JobType, LeadStatus } from '@prisma/client';
 import { toPrismaJson } from '../../common/utils/prisma-json';
 import { PrismaService } from '../../database/prisma.service';
@@ -11,6 +11,7 @@ export class FollowUpWorkerService implements JobWorker {
 
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => FirstSendWorkerService))
     private readonly firstSendWorker: FirstSendWorkerService,
   ) {}
 
