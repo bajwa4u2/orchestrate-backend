@@ -1,10 +1,22 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Job, JobType } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { toPrismaJson } from '../../common/utils/prisma-json';
+import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
 @Injectable()
-export class EnrichmentWorkerService {
+export class EnrichmentWorkerService implements JobWorker {
+  readonly jobTypes: JobType[] = [JobType.LEAD_ENRICHMENT];
+
   constructor(private readonly prisma: PrismaService) {}
+
+  async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
+    const leadId = this.readString(context.payload.leadId);
+    if (!leadId) {
+      throw new BadRequestException(`Job ${job.id} is missing leadId`);
+    }
+    return this.enrichLead(leadId);
+  }
 
   async enrichLead(leadId: string) {
     const lead = await this.prisma.lead.findUnique({
@@ -38,5 +50,9 @@ export class EnrichmentWorkerService {
   private extractDomain(email?: string | null) {
     if (!email || !email.includes('@')) return null;
     return email.split('@')[1].toLowerCase();
+  }
+
+  private readString(value: unknown) {
+    return typeof value === 'string' && value.trim().length ? value.trim() : undefined;
   }
 }

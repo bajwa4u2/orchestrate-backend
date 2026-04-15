@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, Post, Query } from '@nestjs/common';
+import { AccessContextService } from '../access-context/access-context.service';
 import { ClientsService } from './clients.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
@@ -7,16 +8,28 @@ import { UpdateClientProfileDto } from './dto/update-client-profile.dto';
 
 @Controller('clients')
 export class ClientsController {
-  constructor(private readonly clientsService: ClientsService) {}
+  constructor(
+    private readonly clientsService: ClientsService,
+    private readonly accessContextService: AccessContextService,
+  ) {}
 
   @Post()
-  create(@Body() dto: CreateClientDto) {
-    return this.clientsService.create(dto);
+  async create(@Headers() headers: Record<string, unknown>, @Body() dto: CreateClientDto) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.clientsService.create({
+      ...dto,
+      organizationId: context.organizationId!,
+      createdById: context.userId,
+    });
   }
 
   @Get()
-  list(@Query() query: ListClientsDto) {
-    return this.clientsService.list(query);
+  async list(@Headers() headers: Record<string, unknown>, @Query() query: ListClientsDto) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.clientsService.list({
+      ...query,
+      organizationId: context.organizationId!,
+    });
   }
 
   @Get('me/setup')

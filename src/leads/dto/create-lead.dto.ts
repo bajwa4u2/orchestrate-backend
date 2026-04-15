@@ -18,11 +18,13 @@ const leadStatuses = ['NEW', 'ENRICHED', 'QUALIFIED', 'CONTACTED', 'FOLLOWED_UP'
 const leadSourceTypes = ['MANUAL', 'CSV_IMPORT', 'GOOGLE_MAPS', 'DIRECTORY', 'API', 'INTERNAL_GROWTH', 'REFERRAL', 'OTHER'] satisfies LeadSourceType[];
 
 export class CreateLeadDto {
+  @IsOptional()
   @IsString()
-  organizationId!: string;
+  organizationId?: string;
 
+  @IsOptional()
   @IsString()
-  clientId!: string;
+  clientId?: string;
 
   @IsString()
   campaignId!: string;

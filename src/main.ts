@@ -13,11 +13,21 @@ function resolveAllowedOrigins() {
   ];
 }
 
+function validateCriticalEnvironment() {
+  const tokenSecret = process.env.AUTH_TOKEN_SECRET?.trim() || process.env.APP_SECRET?.trim();
+  if (!tokenSecret) {
+    throw new Error('Missing AUTH_TOKEN_SECRET or APP_SECRET');
+  }
+}
+
 async function bootstrap() {
+  validateCriticalEnvironment();
+
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
   });
 
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
   app.use(helmet());
 
   app.enableCors({

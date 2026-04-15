@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { NotFoundException, Injectable } from '@nestjs/common';
 import {
   ActivityVisibility,
   JobType,
@@ -24,15 +24,29 @@ export class LeadsService {
   ) {}
 
   async create(dto: CreateLeadDto) {
+    if (!dto.organizationId) {
+      throw new Error('organizationId is required');
+    }
+    if (!dto.clientId) {
+      throw new Error('clientId is required');
+    }
     return this.prisma.$transaction(async (tx) => {
-      const campaign = await tx.campaign.findUnique({
-        where: { id: dto.campaignId },
+      const campaign = await tx.campaign.findFirst({
+        where: {
+          id: dto.campaignId,
+          organizationId: dto.organizationId,
+          clientId: dto.clientId,
+        },
         select: {
           id: true,
           workflowRunId: true,
           generationState: true,
         },
       });
+
+      if (!campaign) {
+        throw new NotFoundException('Campaign not found in the active client workspace');
+      }
 
       let accountId = dto.accountId;
       let contactId = dto.contactId;
@@ -44,8 +58,8 @@ export class LeadsService {
       if (!accountId && dto.companyName) {
         const account = await tx.account.create({
           data: {
-            organizationId: dto.organizationId,
-            clientId: dto.clientId,
+            organizationId: dto.organizationId!,
+            clientId: dto.clientId!,
             companyName: dto.companyName,
             domain: dto.domain,
             industry: dto.industry,
@@ -63,8 +77,8 @@ export class LeadsService {
       if (!contactId && (dto.fullName || dto.email)) {
         const contact = await tx.contact.create({
           data: {
-            organizationId: dto.organizationId,
-            clientId: dto.clientId,
+            organizationId: dto.organizationId!,
+            clientId: dto.clientId!,
             accountId,
             fullName:
               dto.fullName || [dto.firstName, dto.lastName].filter(Boolean).join(' ') || dto.email || 'Unnamed Contact',
@@ -86,8 +100,8 @@ export class LeadsService {
       if (!leadSourceId && dto.sourceName && dto.sourceType) {
         const leadSource = await tx.leadSource.create({
           data: {
-            organizationId: dto.organizationId,
-            clientId: dto.clientId,
+            organizationId: dto.organizationId!,
+            clientId: dto.clientId!,
             campaignId: dto.campaignId,
             workflowRunId,
             name: dto.sourceName,
@@ -102,8 +116,8 @@ export class LeadsService {
 
       const lead = await tx.lead.create({
         data: {
-          organizationId: dto.organizationId,
-          clientId: dto.clientId,
+          organizationId: dto.organizationId!,
+          clientId: dto.clientId!,
           campaignId: dto.campaignId,
           accountId,
           contactId,
@@ -126,8 +140,8 @@ export class LeadsService {
 
       await tx.activityEvent.create({
         data: {
-          organizationId: dto.organizationId,
-          clientId: dto.clientId,
+          organizationId: dto.organizationId!,
+          clientId: dto.clientId!,
           campaignId: dto.campaignId,
           workflowRunId,
           kind: 'LEAD_IMPORTED',
@@ -193,6 +207,17 @@ export class LeadsService {
     ]);
 
     return { items, meta: { page, limit, total } };
+  }
+
+  async assertLeadAccessible(organizationId: string, clientId: string, leadId: string) {
+    const lead = await this.prisma.lead.findFirst({
+      where: { id: leadId, organizationId, clientId },
+      select: { id: true },
+    });
+    if (!lead) {
+      throw new NotFoundException('Lead not found in the active client workspace');
+    }
+    return lead;
   }
 
   async launchTestSend(leadId: string) {

@@ -14,6 +14,7 @@ type SessionPayload = {
   clientId?: string;
   memberRole?: MemberRole;
   surface?: 'operator' | 'client';
+  iat?: number;
   exp: number;
 };
 
@@ -23,10 +24,13 @@ export class AccessContextService {
 
   async buildFromHeaders(headers: Record<string, unknown>, surface: 'operator' | 'client' | 'system' = 'system') {
     const session = this.readSession(headers);
-    const userId = session?.sub || this.readHeader(headers, 'x-user-id');
-    const organizationId = session?.organizationId || this.readHeader(headers, 'x-organization-id');
-    const clientId = session?.clientId || this.readHeader(headers, 'x-client-id');
-    const roleValue = session?.memberRole || this.readHeader(headers, 'x-member-role');
+    const allowHeaderFallback = surface === 'system' && !session;
+
+    const userId = session?.sub || (allowHeaderFallback ? this.readHeader(headers, 'x-user-id') : undefined);
+    const organizationId =
+      session?.organizationId || (allowHeaderFallback ? this.readHeader(headers, 'x-organization-id') : undefined);
+    const clientId = session?.clientId || (allowHeaderFallback ? this.readHeader(headers, 'x-client-id') : undefined);
+    const roleValue = session?.memberRole || (allowHeaderFallback ? this.readHeader(headers, 'x-member-role') : undefined);
     const memberRole = roleValue && MEMBER_ROLE_VALUES.includes(roleValue as MemberRole)
       ? (roleValue as MemberRole)
       : undefined;
@@ -37,7 +41,7 @@ export class AccessContextService {
       clientId,
       memberRole,
       surface: session?.surface || surface,
-      email: session?.email || this.readHeader(headers, 'x-user-email'),
+      email: session?.email || (allowHeaderFallback ? this.readHeader(headers, 'x-user-email') : undefined),
     };
 
     if (!userId || !organizationId) {
@@ -53,9 +57,12 @@ export class AccessContextService {
       throw new UnauthorizedException('User is not an active member of the requested organization');
     }
 
+    this.assertSessionStillValid(session, membership.user.metadataJson);
+
     context.memberRole = membership.role;
     context.membershipId = membership.id;
     context.email = membership.user.email;
+
     if (!context.clientId && context.surface === 'client') {
       const client = await this.prisma.client.findFirst({
         where: {
@@ -72,6 +79,7 @@ export class AccessContextService {
       });
       context.clientId = client?.id;
     }
+
     return context;
   }
 
@@ -115,14 +123,59 @@ export class AccessContextService {
   private verifyToken(token: string) {
     const [encoded, signature] = token.split('.');
     if (!encoded || !signature) return null;
-    const secret = process.env.AUTH_TOKEN_SECRET?.trim() || process.env.APP_SECRET?.trim() || 'orchestrate-dev-secret';
+
+    const secret = process.env.AUTH_TOKEN_SECRET?.trim() || process.env.APP_SECRET?.trim();
+    if (!secret) {
+      throw new UnauthorizedException('Authentication is not configured');
+    }
+
     const expectedSignature = createHmac('sha256', secret).update(encoded).digest('base64url');
     if (Buffer.byteLength(signature) !== Buffer.byteLength(expectedSignature)) return null;
     if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) return null;
-    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as SessionPayload;
+
+    let payload: SessionPayload;
+    try {
+      payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as SessionPayload;
+    } catch {
+      return null;
+    }
+
     if (payload.typ !== 'session') return null;
     if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
     return payload;
+  }
+
+  private assertSessionStillValid(session: SessionPayload | null, metadataJson: unknown) {
+    if (!session?.iat) {
+      return;
+    }
+
+    const metadata = this.asObject(metadataJson);
+    const auth = this.asObject(metadata.auth);
+    const invalidBeforeRaw = this.readString(auth.sessionInvalidBefore);
+    if (!invalidBeforeRaw) {
+      return;
+    }
+
+    const invalidBeforeMs = Date.parse(invalidBeforeRaw);
+    if (Number.isNaN(invalidBeforeMs)) {
+      return;
+    }
+
+    if (session.iat * 1000 <= invalidBeforeMs) {
+      throw new UnauthorizedException('Session is no longer active');
+    }
+  }
+
+  private asObject(value: unknown): Record<string, unknown> {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return {};
+  }
+
+  private readString(value: unknown) {
+    return typeof value === 'string' && value.trim().length ? value.trim() : undefined;
   }
 
   private readHeader(headers: Record<string, unknown>, key: string) {

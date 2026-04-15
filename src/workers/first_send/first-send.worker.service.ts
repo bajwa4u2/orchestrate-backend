@@ -20,6 +20,7 @@ import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 @Injectable()
 export class FirstSendWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.FIRST_SEND];
+  private static readonly DEFAULT_FOLLOWUP_WAIT_DAYS = 2;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -61,6 +62,7 @@ export class FirstSendWorkerService implements JobWorker {
         client: true,
       },
     });
+
     if (!lead) {
       throw new NotFoundException(`Lead ${input.leadId} not found`);
     }
@@ -84,6 +86,7 @@ export class FirstSendWorkerService implements JobWorker {
       clientId: lead.clientId,
       emailAddress: email,
     });
+
     if (suppression) {
       await this.prisma.lead.update({
         where: { id: lead.id },
@@ -106,6 +109,7 @@ export class FirstSendWorkerService implements JobWorker {
       organizationId: lead.organizationId,
       clientId: lead.clientId,
     });
+
     if (!mailbox) {
       throw new BadRequestException(`No active mailbox available for lead ${lead.id}`);
     }
@@ -116,6 +120,7 @@ export class FirstSendWorkerService implements JobWorker {
       campaignId: lead.campaignId,
       mailbox,
     });
+
     if (!policyCheck.allowed) {
       throw new BadRequestException(policyCheck.reason || 'Mailbox blocked by send policy');
     }
@@ -129,9 +134,12 @@ export class FirstSendWorkerService implements JobWorker {
       note: input.note,
     });
 
-    const lifecycle = input.simulateDeliveryOnly ? MessageLifecycle.SCHEDULED : MessageLifecycle.DISPATCHED;
+    const lifecycle =
+      input.simulateDeliveryOnly ? MessageLifecycle.SCHEDULED : MessageLifecycle.DISPATCHED;
     const status = input.simulateDeliveryOnly ? MessageStatus.SCHEDULED : MessageStatus.SENT;
-    const threadKey = `${lead.id}:${generated.sequenceStepOrder}:${Date.now()}`;
+    const sequenceStepOrder = generated.stepOrderIndex;
+    const waitDays = FirstSendWorkerService.DEFAULT_FOLLOWUP_WAIT_DAYS;
+    const threadKey = `${lead.id}:${sequenceStepOrder}:${Date.now()}`;
 
     const transport = input.simulateDeliveryOnly
       ? null
@@ -139,13 +147,13 @@ export class FirstSendWorkerService implements JobWorker {
           toEmail: email,
           toName: lead.contact?.fullName ?? lead.contact?.firstName ?? undefined,
           subject: generated.subject,
-          bodyText: generated.bodyText,
+          bodyText: generated.body,
           category: 'hello',
           replyToEmail: mailbox.emailAddress,
           templateVariables: {
             lead_id: lead.id,
             campaign_id: lead.campaignId,
-            sequence_step: generated.sequenceStepOrder,
+            sequence_step: sequenceStepOrder,
           },
         });
 
@@ -163,7 +171,7 @@ export class FirstSendWorkerService implements JobWorker {
         source: 'SYSTEM_GENERATED',
         lifecycle,
         subjectLine: generated.subject,
-        bodyText: generated.bodyText,
+        bodyText: generated.body,
         sentAt: input.simulateDeliveryOnly ? null : new Date(),
         externalMessageId: transport?.externalMessageId ?? null,
         threadKey,
@@ -172,11 +180,10 @@ export class FirstSendWorkerService implements JobWorker {
           mailboxEmail: mailbox.emailAddress,
           jobType: input.jobType,
           workflowRunId: input.workflowRunId,
-          generatedDraftMessageId: generated.draftMessageId,
           sequenceId: generated.sequenceId,
           sequenceStepId: generated.sequenceStepId,
-          sequenceStepOrder: generated.sequenceStepOrder,
-          waitDays: generated.waitDays,
+          sequenceStepOrder,
+          waitDays,
           transportMode: transport?.mode ?? 'simulation',
         } as Prisma.InputJsonValue,
       },
@@ -192,7 +199,7 @@ export class FirstSendWorkerService implements JobWorker {
         metadataJson: toPrismaJson({
           ...this.asObject(lead.metadataJson),
           sequenceState: {
-            currentStep: generated.sequenceStepOrder,
+            currentStep: sequenceStepOrder,
             lastMessageId: message.id,
             lastSentAt: new Date().toISOString(),
             sequenceId: generated.sequenceId,
@@ -224,19 +231,27 @@ export class FirstSendWorkerService implements JobWorker {
           leadId: lead.id,
           messageId: message.id,
           mailboxId: mailbox.id,
-          sequenceStepOrder: generated.sequenceStepOrder,
+          sequenceStepOrder,
           externalMessageId: transport?.externalMessageId ?? null,
         } as Prisma.InputJsonValue,
       },
     });
 
     if (!input.simulateDeliveryOnly && input.jobType === JobType.FIRST_SEND) {
-      const scheduledFor = new Date(Date.now() + generated.waitDays * 24 * 60 * 60 * 1000);
-      const dedupeKey = `${JobType.FOLLOWUP_SEND}:${lead.id}:${generated.sequenceStepOrder + 1}:${scheduledFor.toISOString().slice(0, 10)}`;
+      const scheduledFor = new Date(Date.now() + waitDays * 24 * 60 * 60 * 1000);
+      const dedupeKey = `${JobType.FOLLOWUP_SEND}:${lead.id}:${sequenceStepOrder + 1}:${scheduledFor.toISOString().slice(0, 10)}`;
+
       const existingFollowUp = await this.prisma.job.findFirst({
         where: {
           dedupeKey,
-          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED] },
+          status: {
+            in: [
+              JobStatus.QUEUED,
+              JobStatus.RUNNING,
+              JobStatus.RETRY_SCHEDULED,
+              JobStatus.SUCCEEDED,
+            ],
+          },
         },
         select: { id: true },
       });
@@ -271,15 +286,17 @@ export class FirstSendWorkerService implements JobWorker {
       mailbox: mailbox.emailAddress,
       externalMessageId: transport?.externalMessageId ?? null,
       status: input.jobType === JobType.FOLLOWUP_SEND ? LeadStatus.FOLLOWED_UP : LeadStatus.CONTACTED,
-      sequenceStepOrder: generated.sequenceStepOrder,
-      nextWaitDays: generated.waitDays,
+      sequenceStepOrder,
+      nextWaitDays: waitDays,
       simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
       jobId: input.job.id,
     };
   }
 
   private asObject(value: unknown): Record<string, unknown> {
-    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(value as Record<string, unknown>) }
+      : {};
   }
 
   private readString(value: unknown): string | null {

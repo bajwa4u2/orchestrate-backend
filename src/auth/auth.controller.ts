@@ -43,8 +43,8 @@ export class AuthController {
   }
 
   @Post('logout')
-  logout() {
-    return this.authService.logout();
+  logout(@Headers() headers: Record<string, unknown>) {
+    return this.authService.logout(headers);
   }
 
   @Post('password/request-reset')

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { Job, JobType } from '@prisma/client';
 import { AlertGenerationWorkerService } from './alert_generation/alert-generation.worker.service';
 import { EnrichmentWorkerService } from './enrichment/enrichment.worker.service';
@@ -14,7 +14,7 @@ import { ScoringWorkerService } from './scoring/scoring.worker.service';
 import { JobWorker, WorkerContext } from './worker.types';
 
 @Injectable()
-export class WorkersService {
+export class WorkersService implements OnModuleInit {
   private readonly registry = new Map<JobType, JobWorker>();
 
   constructor(
@@ -31,11 +31,37 @@ export class WorkersService {
     public readonly invoiceGenerationWorker: InvoiceGenerationWorkerService,
   ) {
     this.register(this.leadImportWorker);
+    this.register(this.messageGenerationWorker);
     this.register(this.firstSendWorker);
     this.register(this.followUpWorker);
     this.register(this.replyClassificationWorker);
     this.register(this.meetingHandoffWorker);
+    this.register(this.inboxSyncWorker);
+    this.register(this.enrichmentWorker);
+    this.register(this.scoringWorker);
+    this.register(this.alertGenerationWorker);
     this.register(this.invoiceGenerationWorker);
+  }
+
+  onModuleInit() {
+    const expectedJobTypes: JobType[] = [
+      JobType.LEAD_IMPORT,
+      JobType.LEAD_ENRICHMENT,
+      JobType.LEAD_SCORING,
+      JobType.MESSAGE_GENERATION,
+      JobType.FIRST_SEND,
+      JobType.FOLLOWUP_SEND,
+      JobType.INBOX_SYNC,
+      JobType.REPLY_CLASSIFICATION,
+      JobType.MEETING_HANDOFF,
+      JobType.INVOICE_GENERATION,
+      JobType.ALERT_EVALUATION,
+    ];
+
+    const missing = expectedJobTypes.filter((jobType) => !this.registry.has(jobType));
+    if (missing.length) {
+      throw new Error(`Missing worker registrations: ${missing.join(', ')}`);
+    }
   }
 
   async run(job: Job, context: WorkerContext) {

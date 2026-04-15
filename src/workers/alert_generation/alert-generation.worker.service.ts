@@ -1,10 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { JobStatus } from '@prisma/client';
+import { Job, JobStatus, JobType } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
 @Injectable()
-export class AlertGenerationWorkerService {
+export class AlertGenerationWorkerService implements JobWorker {
+  readonly jobTypes: JobType[] = [JobType.ALERT_EVALUATION];
+
   constructor(private readonly prisma: PrismaService) {}
+
+  async run(job: Job): Promise<WorkerRunResult> {
+    return this.generateAlerts({ organizationId: job.organizationId, clientId: job.clientId ?? undefined });
+  }
 
   async generateAlerts(input: { organizationId?: string; clientId?: string } = {}) {
     const failedJobs = await this.prisma.job.findMany({

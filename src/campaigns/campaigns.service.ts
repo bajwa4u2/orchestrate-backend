@@ -23,10 +23,17 @@ export class CampaignsService {
   ) {}
 
   async create(dto: CreateCampaignDto) {
+    if (!dto.organizationId) {
+      throw new Error('organizationId is required');
+    }
+    if (!dto.clientId) {
+      throw new Error('clientId is required');
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const workflow = await this.workflowsService.createWorkflowRun(
         {
-          clientId: dto.clientId,
+          clientId: dto.clientId!,
           lane: WorkflowLane.GROWTH,
           type: WorkflowType.CAMPAIGN_GENERATION,
           status: WorkflowStatus.RUNNING,
@@ -60,8 +67,8 @@ export class CampaignsService {
 
       const campaign = await tx.campaign.create({
         data: {
-          organizationId: dto.organizationId,
-          clientId: dto.clientId,
+          organizationId: dto.organizationId!,
+          clientId: dto.clientId!,
           icpId: dto.icpId,
           segmentId: dto.segmentId,
           createdById: dto.createdById,
@@ -85,8 +92,8 @@ export class CampaignsService {
 
       await tx.activityEvent.create({
         data: {
-          organizationId: dto.organizationId,
-          clientId: dto.clientId,
+          organizationId: dto.organizationId!,
+          clientId: dto.clientId!,
           campaignId: campaign.id,
           actorUserId: dto.createdById,
           workflowRunId: workflow.id,

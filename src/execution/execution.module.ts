@@ -1,4 +1,5 @@
 import { Module, forwardRef } from '@nestjs/common';
+import { AccessContextModule } from '../access-context/access-context.module';
 import { DatabaseModule } from '../database/database.module';
 import { DeliverabilityModule } from '../deliverability/deliverability.module';
 import { WorkflowsModule } from '../workflows/workflows.module';
@@ -8,12 +9,15 @@ import { RepliesModule } from '../replies/replies.module';
 import { ExecutionController } from './execution.controller';
 import { WorkersModule } from '../workers/workers.module';
 import { ExecutionService } from './execution.service';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
   imports: [
+    AccessContextModule,
     DatabaseModule,
     WorkflowsModule,
     AiModule,
+    SubscriptionsModule,
     forwardRef(() => MeetingsModule),
     forwardRef(() => RepliesModule),
     forwardRef(() => DeliverabilityModule),

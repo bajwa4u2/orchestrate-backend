@@ -26,6 +26,7 @@ import { DispatchDueJobsDto } from './dto/dispatch-due-jobs.dto';
 import { QueueLeadSendDto } from './dto/queue-lead-send.dto';
 import { RunJobDto } from './dto/run-job.dto';
 import { WorkersService } from '../workers/workers.service';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 @Injectable()
 export class ExecutionService implements OnModuleInit {
@@ -35,9 +36,15 @@ export class ExecutionService implements OnModuleInit {
     private readonly workflowsService: WorkflowsService,
     private readonly aiService: AiService,
     private readonly workersService: WorkersService,
+    private readonly subscriptionsService: SubscriptionsService,
   ) {}
 
   onModuleInit() {
+    const executionDispatchEnabled = process.env.EXECUTION_DISPATCH_ENABLED?.trim().toLowerCase() === 'true';
+    if (!executionDispatchEnabled) {
+      return;
+    }
+
     const timer = setInterval(() => {
       this.dispatchDueJobs({ limit: 10 }).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -58,6 +65,16 @@ export class ExecutionService implements OnModuleInit {
 
     if (!lead) {
       throw new NotFoundException(`Lead ${leadId} not found`);
+    }
+
+    await this.subscriptionsService.assertClientCapability(
+      lead.organizationId,
+      lead.clientId,
+      'execution.queue',
+    );
+
+    if (lead.campaign.status !== 'ACTIVE' && lead.campaign.status !== 'READY') {
+      throw new BadRequestException(`Lead ${lead.id} cannot be queued while campaign is ${lead.campaign.status}`);
     }
 
     const jobType = dto.jobType ?? JobType.FIRST_SEND;
@@ -163,6 +180,7 @@ export class ExecutionService implements OnModuleInit {
       },
       orderBy: [{ scheduledFor: 'asc' }, { createdAt: 'asc' }],
       take: limit,
+      select: { id: true, type: true, status: true, queueName: true },
     });
 
     if (dto.dryRun) {
@@ -170,13 +188,16 @@ export class ExecutionService implements OnModuleInit {
         ok: true,
         dryRun: true,
         count: jobs.length,
-        jobs: jobs.map((job) => ({ id: job.id, type: job.type, status: job.status, queueName: job.queueName })),
+        jobs,
       };
     }
 
     const results: Awaited<ReturnType<ExecutionService['runJob']>>[] = [];
     for (const job of jobs) {
-      results.push(await this.runJob(job.id, { dryRun: false }));
+      const result = await this.runJob(job.id, { dryRun: false });
+      if ((result as any)?.skipped !== true) {
+        results.push(result);
+      }
     }
 
     return {
@@ -210,49 +231,46 @@ export class ExecutionService implements OnModuleInit {
       };
     }
 
-    if (job.status !== JobStatus.QUEUED && job.status !== JobStatus.RETRY_SCHEDULED) {
-      throw new BadRequestException(`Job ${job.id} is not runnable from status ${job.status}`);
+    const runnableJob = await this.claimRunnableJob(jobId);
+    if (!runnableJob) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'job_not_claimed',
+        jobId,
+      };
     }
-
-    await this.prisma.job.update({
-      where: { id: job.id },
-      data: {
-        status: JobStatus.RUNNING,
-        startedAt: new Date(),
-        attemptCount: { increment: 1 },
-      },
-    });
 
     if (workflowRunId) {
       await this.workflowsService.startWorkflowRun(workflowRunId, {
-        jobId: job.id,
-        jobType: job.type,
-        queueName: job.queueName,
+        jobId: runnableJob.id,
+        jobType: runnableJob.type,
+        queueName: runnableJob.queueName,
       });
     }
 
     try {
       let result: Record<string, unknown>;
-      if (job.type === JobType.MAILBOX_HEALTH_CHECK) {
+      if (runnableJob.type === JobType.MAILBOX_HEALTH_CHECK) {
         result = await this.deliverabilityService.refreshMailboxHealth(String(payload.mailboxId || ''));
       } else {
-        result = await this.workersService.run(job, { workflowRunId, payload });
+        result = await this.workersService.run(runnableJob, { workflowRunId, payload });
       }
 
       await this.prisma.jobRun.create({
         data: {
-          jobId: job.id,
+          jobId: runnableJob.id,
           workflowRunId,
-          runNumber: (job.attemptCount || 0) + 1,
+          runNumber: runnableJob.attemptCount,
           status: JobStatus.SUCCEEDED,
-          startedAt: job.startedAt ?? new Date(),
+          startedAt: runnableJob.startedAt ?? new Date(),
           finishedAt: new Date(),
           logJson: result as Prisma.InputJsonValue,
         },
       });
 
       await this.prisma.job.update({
-        where: { id: job.id },
+        where: { id: runnableJob.id },
         data: {
           status: JobStatus.SUCCEEDED,
           finishedAt: new Date(),
@@ -263,38 +281,38 @@ export class ExecutionService implements OnModuleInit {
 
       if (workflowRunId) {
         await this.workflowsService.completeWorkflowRun(workflowRunId, {
-          jobId: job.id,
-          jobType: job.type,
+          jobId: runnableJob.id,
+          jobType: runnableJob.type,
           result,
         });
       }
 
       return {
         ok: true,
-        jobId: job.id,
+        jobId: runnableJob.id,
         workflowRunId,
         status: JobStatus.SUCCEEDED,
         result,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown execution error';
-      const shouldRetry = job.attemptCount + 1 < job.maxAttempts;
+      const shouldRetry = runnableJob.attemptCount < runnableJob.maxAttempts;
       const retryAt = shouldRetry ? new Date(Date.now() + 15 * 60 * 1000) : null;
 
       await this.prisma.jobRun.create({
         data: {
-          jobId: job.id,
+          jobId: runnableJob.id,
           workflowRunId,
-          runNumber: (job.attemptCount || 0) + 1,
+          runNumber: runnableJob.attemptCount,
           status: shouldRetry ? JobStatus.RETRY_SCHEDULED : JobStatus.FAILED,
-          startedAt: job.startedAt ?? new Date(),
+          startedAt: runnableJob.startedAt ?? new Date(),
           finishedAt: new Date(),
           errorMessage: message,
         },
       });
 
       await this.prisma.job.update({
-        where: { id: job.id },
+        where: { id: runnableJob.id },
         data: {
           status: shouldRetry ? JobStatus.RETRY_SCHEDULED : JobStatus.FAILED,
           finishedAt: shouldRetry ? null : new Date(),
@@ -306,13 +324,13 @@ export class ExecutionService implements OnModuleInit {
       if (workflowRunId) {
         if (shouldRetry) {
           await this.workflowsService.markWorkflowWaiting(workflowRunId, {
-            jobId: job.id,
+            jobId: runnableJob.id,
             error: message,
             retryAt: retryAt?.toISOString() ?? null,
           });
         } else {
           await this.workflowsService.failWorkflowRun(workflowRunId, {
-            jobId: job.id,
+            jobId: runnableJob.id,
             error: message,
           });
         }
@@ -320,7 +338,7 @@ export class ExecutionService implements OnModuleInit {
 
       return {
         ok: false,
-        jobId: job.id,
+        jobId: runnableJob.id,
         workflowRunId,
         status: shouldRetry ? JobStatus.RETRY_SCHEDULED : JobStatus.FAILED,
         retryAt,
@@ -1394,6 +1412,28 @@ Orchestrate`,
       'Best,',
       'Orchestrate',
     ].join('\n');
+  }
+
+  private async claimRunnableJob(jobId: string) {
+    const now = new Date();
+    const claimed = await this.prisma.job.updateMany({
+      where: {
+        id: jobId,
+        status: { in: [JobStatus.QUEUED, JobStatus.RETRY_SCHEDULED] },
+        OR: [{ scheduledFor: null }, { scheduledFor: { lte: now } }],
+      },
+      data: {
+        status: JobStatus.RUNNING,
+        startedAt: now,
+        attemptCount: { increment: 1 },
+      },
+    });
+
+    if (claimed.count === 0) {
+      return null;
+    }
+
+    return this.prisma.job.findUnique({ where: { id: jobId } });
   }
 
   private resolveWorkflowType(jobType: JobType): WorkflowType {

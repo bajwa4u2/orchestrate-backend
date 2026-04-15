@@ -6,11 +6,13 @@ const campaignStatuses = ['DRAFT', 'READY', 'ACTIVE', 'PAUSED', 'COMPLETED', 'AR
 const channels = ['EMAIL'] satisfies MessageChannel[];
 
 export class CreateCampaignDto {
+  @IsOptional()
   @IsString()
-  organizationId!: string;
+  organizationId?: string;
 
+  @IsOptional()
   @IsString()
-  clientId!: string;
+  clientId?: string;
 
   @IsOptional()
   @IsString()

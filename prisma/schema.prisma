@@ -1697,6 +1697,23 @@ model JobRun {
   @@index([workflowRunId])
 }
 
+model WebhookEventReceipt {
+  id           String    @id @default(cuid())
+  provider     String
+  eventId      String
+  eventType    String
+  status       String
+  processedAt  DateTime?
+  errorMessage String?
+  payloadJson  Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([provider, eventId])
+  @@index([provider, status])
+  @@index([createdAt])
+}
+
 model ActivityEvent {
   id             String             @id @default(cuid())
   organizationId String

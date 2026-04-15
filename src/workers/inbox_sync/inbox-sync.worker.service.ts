@@ -1,10 +1,21 @@
-import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { Job, JobType } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
 @Injectable()
-export class InboxSyncWorkerService {
+export class InboxSyncWorkerService implements JobWorker {
+  readonly jobTypes: JobType[] = [JobType.INBOX_SYNC];
+
   constructor(private readonly prisma: PrismaService) {}
+
+  async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
+    return this.runMailboxSync({
+      organizationId: job.organizationId,
+      clientId: job.clientId ?? undefined,
+      campaignId: this.readString(context.payload.campaignId) ?? job.campaignId ?? undefined,
+    });
+  }
 
   async runMailboxSync(input: { clientId?: string; organizationId?: string; campaignId?: string } = {}) {
     const unmatchedReplies = await this.prisma.reply.findMany({
@@ -25,5 +36,9 @@ export class InboxSyncWorkerService {
       unmatchedReplyCount: unmatchedReplies.length,
       unmatchedReplies,
     };
+  }
+
+  private readString(value: unknown) {
+    return typeof value === 'string' && value.trim().length ? value.trim() : undefined;
   }
 }
