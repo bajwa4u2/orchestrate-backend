@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, forwardRef } from '@nestjs/common';
 import {
   ActivityVisibility,
   Job,
@@ -21,6 +21,7 @@ export class MeetingHandoffWorkerService implements JobWorker {
 
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => EmailsService))
     private readonly emailsService: EmailsService,
   ) {}
 
