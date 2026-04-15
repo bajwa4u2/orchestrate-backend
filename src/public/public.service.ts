@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { MeetingStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
 import { CreatePublicContactDto, PublicInquiryTypeDto } from './dto/create-public-contact.dto';
@@ -14,17 +15,46 @@ export class PublicService {
   ) {}
 
   async getOverview() {
+    const [
+      leadsActive,
+      outreachSent,
+      repliesReceived,
+      meetingsScheduled,
+      invoiceTotals,
+      paymentTotals,
+      publicInquiryCount,
+    ] = await Promise.all([
+      this.prisma.lead.count(),
+      this.prisma.outreachMessage.count({ where: { sentAt: { not: null } } }),
+      this.prisma.reply.count(),
+      this.prisma.meeting.count({ where: { status: MeetingStatus.BOOKED } }),
+      this.prisma.invoice.aggregate({
+        _sum: {
+          totalCents: true,
+          amountPaidCents: true,
+          balanceDueCents: true,
+        },
+      }),
+      this.prisma.payment.aggregate({
+        _sum: {
+          amountCents: true,
+        },
+      }),
+      this.prisma.publicInquiry.count(),
+    ]);
+
     return {
-      leadsActive: 34,
-      outreachSent: 126,
-      repliesReceived: 18,
-      meetingsScheduled: 6,
-      invoicesIssuedAmount: 12400,
-      paymentsClearedAmount: 8200,
-      paymentsDueAmount: 4200,
+      leadsActive,
+      outreachSent,
+      repliesReceived,
+      meetingsScheduled,
+      invoicesIssuedAmount: Math.round((invoiceTotals._sum.totalCents ?? 0) / 100),
+      paymentsClearedAmount: Math.round((invoiceTotals._sum.amountPaidCents ?? paymentTotals._sum.amountCents ?? 0) / 100),
+      paymentsDueAmount: Math.round((invoiceTotals._sum.balanceDueCents ?? 0) / 100),
+      inquiriesReceived: publicInquiryCount,
       status: {
-        source: 'foundation',
-        note: 'Replace in PublicService with database aggregation once the live orchestrate database service and current module files are wired in this backend.',
+        source: 'database',
+        note: 'Live operational aggregates from the current orchestrate database.',
       },
     };
   }

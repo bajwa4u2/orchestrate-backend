@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccessContextModule } from '../access-context/access-context.module';
 import { DatabaseModule } from '../database/database.module';
 import { EmailsModule } from '../emails/emails.module';
 import { WorkflowsModule } from '../workflows/workflows.module';
@@ -11,7 +12,7 @@ import { InvoicePdfService } from './invoice-pdf.service';
 import { InvoicesService } from './invoices.service';
 
 @Module({
-  imports: [DatabaseModule, EmailsModule, WorkflowsModule],
+  imports: [DatabaseModule, EmailsModule, WorkflowsModule, AccessContextModule],
   controllers: [InvoicesController],
   providers: [
     InvoicesService,

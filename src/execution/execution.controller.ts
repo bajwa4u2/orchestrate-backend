@@ -1,7 +1,5 @@
-import { Body, Controller, Headers, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Headers, Param, Post } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
-import { PrismaService } from '../database/prisma.service';
-import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { DispatchDueJobsDto } from './dto/dispatch-due-jobs.dto';
 import { QueueLeadSendDto } from './dto/queue-lead-send.dto';
 import { RunJobDto } from './dto/run-job.dto';
@@ -12,8 +10,6 @@ export class ExecutionController {
   constructor(
     private readonly executionService: ExecutionService,
     private readonly accessContextService: AccessContextService,
-    private readonly subscriptionsService: SubscriptionsService,
-    private readonly prisma: PrismaService,
   ) {}
 
   @Post('leads/:leadId/queue-first-send')
@@ -22,14 +18,7 @@ export class ExecutionController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'execution.queue',
-    );
-    await this.assertLeadAccessible(context.organizationId!, context.clientId!, leadId);
-
+    await this.accessContextService.requireOperator(headers);
     return this.executionService.queueLeadSend(leadId, {
       ...dto,
       jobType: 'FIRST_SEND',
@@ -42,14 +31,7 @@ export class ExecutionController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'execution.queue',
-    );
-    await this.assertLeadAccessible(context.organizationId!, context.clientId!, leadId);
-
+    await this.accessContextService.requireOperator(headers);
     return this.executionService.queueLeadSend(leadId, {
       ...dto,
       jobType: 'FOLLOWUP_SEND',
@@ -57,36 +39,17 @@ export class ExecutionController {
   }
 
   @Post('dispatch-due')
-  async dispatchDue(
-    @Headers() headers: Record<string, unknown>,
-    @Body() dto: DispatchDueJobsDto,
-    @Query('organizationId') organizationId?: string,
-  ) {
+  async dispatchDue(@Headers() headers: Record<string, unknown>, @Body() dto: DispatchDueJobsDto) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.executionService.dispatchDueJobs({
       ...dto,
-      organizationId: organizationId || context.organizationId,
+      organizationId: context.organizationId!,
     });
   }
 
   @Post('jobs/:jobId/run')
-  async runJob(
-    @Headers() headers: Record<string, unknown>,
-    @Param('jobId') jobId: string,
-    @Body() dto: RunJobDto,
-  ) {
+  async runJob(@Headers() headers: Record<string, unknown>, @Param('jobId') jobId: string, @Body() dto: RunJobDto) {
     await this.accessContextService.requireOperator(headers);
     return this.executionService.runJob(jobId, dto);
-  }
-
-  private async assertLeadAccessible(organizationId: string, clientId: string, leadId: string) {
-    const lead = await this.prisma.lead.findFirst({
-      where: { id: leadId, organizationId, clientId },
-      select: { id: true },
-    });
-
-    if (!lead) {
-      throw new NotFoundException('Lead not found in the active client workspace');
-    }
   }
 }

@@ -28,7 +28,6 @@ type SessionPayload = {
   memberRole?: MemberRole;
   fullName?: string;
   surface?: SessionSurface;
-  iat?: number;
   exp: number;
 };
 
@@ -375,37 +374,7 @@ export class AuthService {
     });
   }
 
-  async logout(headers: Record<string, unknown>) {
-    const context = await this.accessContextService.buildFromHeaders(headers);
-    if (!context.userId) {
-      return { ok: true };
-    }
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: context.userId },
-      select: { id: true, metadataJson: true },
-    });
-
-    if (!user) {
-      return { ok: true };
-    }
-
-    const metadata = this.asObject(user.metadataJson);
-    const auth = this.asObject(metadata.auth);
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        metadataJson: {
-          ...metadata,
-          auth: {
-            ...auth,
-            sessionInvalidBefore: new Date().toISOString(),
-          },
-        },
-      },
-    });
-
+  async logout() {
     return { ok: true };
   }
 
@@ -768,11 +737,7 @@ export class AuthService {
 
   private signToken(payload: SessionPayload) {
     const secret = this.getTokenSecret();
-    const normalizedPayload: SessionPayload = {
-      ...payload,
-      iat: payload.iat ?? Math.floor(Date.now() / 1000),
-    };
-    const encoded = Buffer.from(JSON.stringify(normalizedPayload), 'utf8').toString('base64url');
+    const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
     const signature = createHmac('sha256', secret).update(encoded).digest('base64url');
     return `${encoded}.${signature}`;
   }
@@ -782,20 +747,10 @@ export class AuthService {
     if (!encoded || !signature) throw new UnauthorizedException('Invalid token');
     const secret = this.getTokenSecret();
     const expectedSignature = createHmac('sha256', secret).update(encoded).digest('base64url');
-    if (Buffer.byteLength(signature) !== Buffer.byteLength(expectedSignature)) {
-      throw new UnauthorizedException('Invalid token');
-    }
     if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
       throw new UnauthorizedException('Invalid token');
     }
-
-    let payload: SessionPayload;
-    try {
-      payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as SessionPayload;
-    } catch {
-      throw new UnauthorizedException('Invalid token');
-    }
-
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as SessionPayload;
     if (payload.typ != expectedType) throw new UnauthorizedException('Invalid token type');
     if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
       throw new UnauthorizedException('Token has expired');
@@ -803,10 +758,11 @@ export class AuthService {
     return payload;
   }
 
+
   private getTokenSecret() {
     const secret = process.env.AUTH_TOKEN_SECRET?.trim() || process.env.APP_SECRET?.trim();
     if (!secret) {
-      throw new UnauthorizedException('Authentication is not configured');
+      throw new UnauthorizedException('Missing AUTH_TOKEN_SECRET or APP_SECRET');
     }
     return secret;
   }

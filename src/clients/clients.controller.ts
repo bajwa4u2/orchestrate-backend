@@ -19,7 +19,6 @@ export class ClientsController {
     return this.clientsService.create({
       ...dto,
       organizationId: context.organizationId!,
-      createdById: context.userId,
     });
   }
 
@@ -33,33 +32,38 @@ export class ClientsController {
   }
 
   @Get('me/setup')
-  getSetup(@Headers() headers: Record<string, unknown>) {
+  async getSetup(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.getSetup(headers);
   }
 
   @Post('me/setup')
-  saveSetup(
+  async saveSetup(
     @Headers() headers: Record<string, unknown>,
     @Body() dto: CreateClientSetupDto,
   ) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.saveSetup(headers, dto);
   }
 
   @Post('me/deactivate')
-  deactivate(@Headers() headers: Record<string, unknown>) {
+  async deactivate(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.deactivateAccount(headers);
   }
 
   @Get('me/profile')
-  getProfile(@Headers() headers: Record<string, unknown>) {
+  async getProfile(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.getProfile(headers);
   }
 
   @Post('me/profile')
-  saveProfile(
+  async saveProfile(
     @Headers() headers: Record<string, unknown>,
     @Body() dto: UpdateClientProfileDto,
   ) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.saveProfile(headers, dto);
   }
 }

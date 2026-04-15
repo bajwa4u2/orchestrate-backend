@@ -1,7 +1,6 @@
 import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { QueueLeadSendDto } from '../execution/dto/queue-lead-send.dto';
-import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { ListLeadsDto } from './dto/list-leads.dto';
 import { LeadsService } from './leads.service';
@@ -11,50 +10,29 @@ export class LeadsController {
   constructor(
     private readonly leadsService: LeadsService,
     private readonly accessContextService: AccessContextService,
-    private readonly subscriptionsService: SubscriptionsService,
   ) {}
 
   @Post()
   async create(@Headers() headers: Record<string, unknown>, @Body() dto: CreateLeadDto) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'leads.write',
-    );
-
+    const context = await this.accessContextService.requireOperator(headers);
     return this.leadsService.create({
       ...dto,
       organizationId: context.organizationId!,
-      clientId: context.clientId!,
     });
   }
 
   @Get()
   async list(@Headers() headers: Record<string, unknown>, @Query() query: ListLeadsDto) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'leads.read',
-    );
-
+    const context = await this.accessContextService.requireOperator(headers);
     return this.leadsService.list({
       ...query,
       organizationId: context.organizationId!,
-      clientId: context.clientId!,
     });
   }
 
   @Post(':leadId/test-send')
   async testSend(@Headers() headers: Record<string, unknown>, @Param('leadId') leadId: string) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'execution.queue',
-    );
-    await this.leadsService.assertLeadAccessible(context.organizationId!, context.clientId!, leadId);
+    await this.accessContextService.requireOperator(headers);
     return this.leadsService.launchTestSend(leadId);
   }
 
@@ -64,13 +42,7 @@ export class LeadsController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'execution.queue',
-    );
-    await this.leadsService.assertLeadAccessible(context.organizationId!, context.clientId!, leadId);
+    await this.accessContextService.requireOperator(headers);
     return this.leadsService.queueFirstSend(leadId, dto);
   }
 
@@ -80,13 +52,7 @@ export class LeadsController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    const context = await this.accessContextService.requireClient(headers);
-    await this.subscriptionsService.assertClientCapability(
-      context.organizationId!,
-      context.clientId!,
-      'execution.queue',
-    );
-    await this.leadsService.assertLeadAccessible(context.organizationId!, context.clientId!, leadId);
+    await this.accessContextService.requireOperator(headers);
     return this.leadsService.queueFollowUp(leadId, dto);
   }
 }
