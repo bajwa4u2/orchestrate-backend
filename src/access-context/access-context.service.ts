@@ -1,10 +1,12 @@
 import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { MemberRole } from '@prisma/client';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../database/prisma.service';
 import { RequestContext } from '../common/types/request-context.type';
-import { createHmac, timingSafeEqual } from 'crypto';
 
 const MEMBER_ROLE_VALUES = ['OWNER', 'ADMIN', 'OPERATOR', 'ANALYST', 'BILLING', 'VIEWER'] satisfies MemberRole[];
+
+type AccessSurface = 'operator' | 'client' | 'system';
 
 type SessionPayload = {
   typ: 'session' | 'email_verification' | 'password_reset';
@@ -21,12 +23,20 @@ type SessionPayload = {
 export class AccessContextService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async buildFromHeaders(headers: Record<string, unknown>, surface: 'operator' | 'client' | 'system' = 'system') {
+  async buildFromHeaders(headers: Record<string, unknown>, surface: AccessSurface = 'system') {
     const session = this.readSession(headers);
-    const userId = session?.sub || this.readHeader(headers, 'x-user-id');
-    const organizationId = session?.organizationId || this.readHeader(headers, 'x-organization-id');
-    const clientId = session?.clientId || this.readHeader(headers, 'x-client-id');
-    const roleValue = session?.memberRole || this.readHeader(headers, 'x-member-role');
+
+    if ((surface === 'operator' || surface === 'client') && !session) {
+      throw new UnauthorizedException('Missing signed session');
+    }
+
+    const allowHeaderFallback = surface === 'system' && this.allowSystemHeaderFallback();
+
+    const userId = session?.sub || (allowHeaderFallback ? this.readHeader(headers, 'x-user-id') : undefined);
+    const organizationId =
+      session?.organizationId || (allowHeaderFallback ? this.readHeader(headers, 'x-organization-id') : undefined);
+    const clientId = session?.clientId || (allowHeaderFallback ? this.readHeader(headers, 'x-client-id') : undefined);
+    const roleValue = session?.memberRole || (allowHeaderFallback ? this.readHeader(headers, 'x-member-role') : undefined);
     const memberRole = roleValue && MEMBER_ROLE_VALUES.includes(roleValue as MemberRole)
       ? (roleValue as MemberRole)
       : undefined;
@@ -37,7 +47,7 @@ export class AccessContextService {
       clientId,
       memberRole,
       surface: session?.surface || surface,
-      email: session?.email || this.readHeader(headers, 'x-user-email'),
+      email: session?.email || (allowHeaderFallback ? this.readHeader(headers, 'x-user-email') : undefined),
     };
 
     if (!userId || !organizationId) {
@@ -56,6 +66,8 @@ export class AccessContextService {
     context.memberRole = membership.role;
     context.membershipId = membership.id;
     context.email = membership.user.email;
+    context.surface = session?.surface || surface;
+
     if (!context.clientId && context.surface === 'client') {
       const client = await this.prisma.client.findFirst({
         where: {
@@ -72,6 +84,7 @@ export class AccessContextService {
       });
       context.clientId = client?.id;
     }
+
     return context;
   }
 
@@ -102,6 +115,10 @@ export class AccessContextService {
     }
 
     return context;
+  }
+
+  private allowSystemHeaderFallback() {
+    return (process.env.ALLOW_SYSTEM_HEADER_CONTEXT?.trim() || '').toLowerCase() === 'true';
   }
 
   private readSession(headers: Record<string, unknown>) {

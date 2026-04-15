@@ -556,7 +556,7 @@ export class ExecutionService implements OnModuleInit {
   }
 
   private async runLeadImportBootstrap(
-    job: { id: string; organizationId: string; clientId: string; campaignId: string | null },
+    job: { id: string; organizationId: string; clientId: string | null; campaignId: string | null },
     payload: Record<string, unknown>,
     workflowRunId?: string,
   ) {
@@ -662,7 +662,7 @@ export class ExecutionService implements OnModuleInit {
   }
 
   private async runRevenueBootstrap(
-    job: { id: string; organizationId: string; clientId: string; campaignId: string | null },
+    job: { id: string; organizationId: string; clientId: string | null; campaignId: string | null },
     payload: Record<string, unknown>,
     workflowRunId?: string,
   ) {

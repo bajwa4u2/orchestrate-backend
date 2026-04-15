@@ -1,4 +1,5 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Headers, Post } from '@nestjs/common';
+import { AccessContextService } from '../access-context/access-context.service';
 import { AiService } from './ai.service';
 import {
   ActivateGrowthWorkspaceDto,
@@ -11,35 +12,47 @@ import {
 
 @Controller('v1/ai')
 export class AiController {
-  constructor(private readonly aiService: AiService) {}
+  constructor(
+    private readonly aiService: AiService,
+    private readonly accessContextService: AccessContextService,
+  ) {}
 
   @Post('growth/activate')
-  async activateGrowth(@Body() dto: ActivateGrowthWorkspaceDto) {
+  async activateGrowth(@Headers() headers: Record<string, string>, @Body() dto: ActivateGrowthWorkspaceDto) {
+    await this.accessContextService.requireOperator(headers);
     return this.aiService.activateGrowthWorkspace(dto);
   }
 
   @Post('growth/messages/generate')
-  async generateGrowthMessages(@Body() dto: GenerateGrowthMessagesDto) {
+  async generateGrowthMessages(@Headers() headers: Record<string, string>, @Body() dto: GenerateGrowthMessagesDto) {
+    await this.accessContextService.requireOperator(headers);
     return this.aiService.generateGrowthMessages(dto);
   }
 
   @Post('growth/sequence/generate')
-  async generateGrowthSequence(@Body() dto: GenerateGrowthSequenceDto) {
+  async generateGrowthSequence(@Headers() headers: Record<string, string>, @Body() dto: GenerateGrowthSequenceDto) {
+    await this.accessContextService.requireOperator(headers);
     return this.aiService.generateGrowthSequence(dto);
   }
 
   @Post('revenue/reminder/generate')
-  async generateReminder(@Body() dto: GenerateReminderDto) {
+  async generateReminder(@Headers() headers: Record<string, string>, @Body() dto: GenerateReminderDto) {
+    await this.accessContextService.requireOperator(headers);
     return this.aiService.generateReminder(dto);
   }
 
   @Post('revenue/agreement/generate-draft')
-  async generateAgreementDraft(@Body() dto: GenerateAgreementDraftDto) {
+  async generateAgreementDraft(@Headers() headers: Record<string, string>, @Body() dto: GenerateAgreementDraftDto) {
+    await this.accessContextService.requireOperator(headers);
     return this.aiService.generateAgreementDraft(dto);
   }
 
   @Post('revenue/statement/generate-summary')
-  async generateStatementSummary(@Body() dto: GenerateStatementSummaryDto) {
+  async generateStatementSummary(
+    @Headers() headers: Record<string, string>,
+    @Body() dto: GenerateStatementSummaryDto,
+  ) {
+    await this.accessContextService.requireOperator(headers);
     return this.aiService.generateStatementSummary(dto);
   }
 }

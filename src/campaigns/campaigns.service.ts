@@ -115,11 +115,6 @@ export class CampaignsService {
         {
           campaignId: campaign.id,
           title: campaign.name,
-          resultJson: {
-            campaignId: campaign.id,
-            status: campaign.status,
-            generationState: campaign.generationState,
-          },
         },
         tx,
       );
@@ -128,8 +123,6 @@ export class CampaignsService {
         workflow.id,
         {
           campaignId: campaign.id,
-          generationState: campaign.generationState,
-          status: campaign.status,
         },
         tx,
       );
@@ -140,18 +133,10 @@ export class CampaignsService {
 
   async list(query: ListCampaignsDto) {
     const { page, limit, skip, take } = buildPagination(query.page, query.limit);
+
     const where = {
       ...(query.organizationId ? { organizationId: query.organizationId } : {}),
       ...(query.clientId ? { clientId: query.clientId } : {}),
-      ...(query.search
-        ? {
-            OR: [
-              { name: { contains: query.search, mode: 'insensitive' as const } },
-              { objective: { contains: query.search, mode: 'insensitive' as const } },
-              { offerSummary: { contains: query.search, mode: 'insensitive' as const } },
-            ],
-          }
-        : {}),
     };
 
     const [items, total] = await this.prisma.$transaction([
@@ -166,5 +151,48 @@ export class CampaignsService {
     ]);
 
     return { items, meta: { page, limit, total } };
+  }
+
+  // ✅ NEW: ACTIVATION LOGIC
+  async activateCampaign(input: { campaignId: string; organizationId: string }) {
+    const campaign = await this.prisma.campaign.findFirst({
+      where: {
+        id: input.campaignId,
+        organizationId: input.organizationId,
+      },
+    });
+
+    if (!campaign) {
+      throw new Error('Campaign not found');
+    }
+
+    if (campaign.status === 'ACTIVE') {
+      return { ok: true, alreadyActive: true };
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        status: 'ACTIVE',
+        generationState: 'ACTIVE',
+      },
+    });
+
+    const job = await this.prisma.job.create({
+      data: {
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        campaignId: campaign.id,
+        type: 'LEAD_IMPORT',
+        status: 'QUEUED',
+        queueName: 'activation',
+        scheduledFor: new Date(),
+        payloadJson: {
+          campaignId: campaign.id,
+        },
+      },
+    });
+
+    return { ok: true, jobId: job.id };
   }
 }

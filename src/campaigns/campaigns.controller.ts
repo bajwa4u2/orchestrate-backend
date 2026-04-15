@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Query, Param } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { CampaignsService } from './campaigns.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
@@ -26,6 +26,20 @@ export class CampaignsController {
     const context = await this.accessContextService.requireOperator(headers);
     return this.campaignsService.list({
       ...query,
+      organizationId: context.organizationId!,
+    });
+  }
+
+  // ✅ NEW: Activation endpoint
+  @Post(':id/activate')
+  async activate(
+    @Headers() headers: Record<string, unknown>,
+    @Param('id') campaignId: string,
+  ) {
+    const context = await this.accessContextService.requireOperator(headers);
+
+    return this.campaignsService.activateCampaign({
+      campaignId,
       organizationId: context.organizationId!,
     });
   }
