@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit, Type } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Job, JobType } from '@prisma/client';
 import { AlertGenerationWorkerService } from './alert_generation/alert-generation.worker.service';
 import { EnrichmentWorkerService } from './enrichment/enrichment.worker.service';
@@ -17,33 +18,31 @@ import { JobWorker, WorkerContext } from './worker.types';
 export class WorkersService implements OnModuleInit {
   private readonly registry = new Map<JobType, JobWorker>();
 
-  constructor(
-    public readonly leadImportWorker: LeadImportWorkerService,
-    public readonly messageGenerationWorker: MessageGenerationWorkerService,
-    public readonly firstSendWorker: FirstSendWorkerService,
-    public readonly followUpWorker: FollowUpWorkerService,
-    public readonly replyClassificationWorker: ReplyClassificationWorkerService,
-    public readonly meetingHandoffWorker: MeetingHandoffWorkerService,
-    public readonly inboxSyncWorker: InboxSyncWorkerService,
-    public readonly enrichmentWorker: EnrichmentWorkerService,
-    public readonly scoringWorker: ScoringWorkerService,
-    public readonly alertGenerationWorker: AlertGenerationWorkerService,
-    public readonly invoiceGenerationWorker: InvoiceGenerationWorkerService,
-  ) {
-    this.register(this.leadImportWorker);
-    this.register(this.messageGenerationWorker);
-    this.register(this.firstSendWorker);
-    this.register(this.followUpWorker);
-    this.register(this.replyClassificationWorker);
-    this.register(this.meetingHandoffWorker);
-    this.register(this.inboxSyncWorker);
-    this.register(this.enrichmentWorker);
-    this.register(this.scoringWorker);
-    this.register(this.alertGenerationWorker);
-    this.register(this.invoiceGenerationWorker);
-  }
+  constructor(private readonly moduleRef: ModuleRef) {}
 
   onModuleInit() {
+    const workerTypes: Array<Type<JobWorker>> = [
+      LeadImportWorkerService,
+      MessageGenerationWorkerService,
+      FirstSendWorkerService,
+      FollowUpWorkerService,
+      ReplyClassificationWorkerService,
+      MeetingHandoffWorkerService,
+      InboxSyncWorkerService,
+      EnrichmentWorkerService,
+      ScoringWorkerService,
+      AlertGenerationWorkerService,
+      InvoiceGenerationWorkerService,
+    ];
+
+    for (const workerType of workerTypes) {
+      const worker = this.moduleRef.get(workerType, { strict: false });
+      if (!worker) {
+        throw new Error(`Worker provider unavailable: ${workerType.name}`);
+      }
+      this.register(worker);
+    }
+
     const expectedJobTypes: JobType[] = [
       JobType.LEAD_IMPORT,
       JobType.LEAD_ENRICHMENT,
