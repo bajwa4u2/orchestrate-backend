@@ -380,7 +380,6 @@ export class ClientsService {
     };
   }
 
-
   async getCampaignProfile(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
     const metadata = this.asObject(client.metadataJson);
@@ -417,6 +416,7 @@ export class ClientsService {
     const metadata = this.asObject(client.metadataJson);
     const setup = this.asObject(metadata.setup);
     const currentScope = this.readStructuredScope(setup.scope ?? client.scopeJson);
+    const commercial = await this.resolveCommercialState(client.id);
 
     const countries = dto.countries !== undefined
       ? this.normalizeCountries(dto.countries)
@@ -468,8 +468,10 @@ export class ClientsService {
       priorityMarkets,
     );
 
+    const effectiveLane = commercial.service ?? currentScope.lane;
+
     const scope = this.buildScopeJson({
-      lane: currentScope.lane,
+      lane: effectiveLane,
       mode: recommendedTier,
       countries,
       regions,
@@ -488,12 +490,12 @@ export class ClientsService {
         area: this.buildAreaSummary(regions, metros),
         industry: industries[0]?.label ?? null,
         scopeJson: scope as unknown as Prisma.InputJsonValue,
-        selectedPlan: currentScope.lane,
+        selectedPlan: effectiveLane,
         metadataJson: toPrismaJson({
           ...metadata,
           setup: {
             ...setup,
-            serviceType: currentScope.lane,
+            serviceType: effectiveLane,
             scopeMode: recommendedTier,
             countries,
             regions,
@@ -503,7 +505,7 @@ export class ClientsService {
             excludeGeo,
             priorityMarkets,
             notes,
-            selectedPlan: currentScope.lane,
+            selectedPlan: effectiveLane,
             selectedTier: recommendedTier,
             recommendedPlan: scope.recommendedPlan,
             scope,
@@ -512,7 +514,7 @@ export class ClientsService {
       },
     });
 
-    const commercial = await this.resolveCommercialState(updated.id);
+    const refreshedCommercial = await this.resolveCommercialState(updated.id);
 
     return {
       success: true,
@@ -530,22 +532,55 @@ export class ClientsService {
         priorityMarkets: scope.priorityMarkets,
         notes: scope.notes,
         recommendedPlan: scope.recommendedPlan,
-        subscriptionAlignment: this.buildSubscriptionAlignment(commercial, scope),
+        subscriptionAlignment: this.buildSubscriptionAlignment(refreshedCommercial, scope),
       },
     };
   }
-
 
   async startCampaign(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
     const metadata = this.asObject(client.metadataJson);
     const setup = this.asObject(metadata.setup);
-    const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
+    const storedScope = this.readStructuredScope(setup.scope ?? client.scopeJson);
     const commercial = await this.resolveCommercialState(client.id);
-    const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, scope);
 
-    if (!subscriptionAlignment.matchesCurrentSubscription) {
-      const message = this.buildUpgradeMessage(scope);
+    if (!commercial.service || !commercial.tier) {
+      return {
+        success: false,
+        status: 'upgrade_required',
+        clientId: client.id,
+        organizationId: client.organizationId,
+        message: 'An active subscription is required before this campaign can start.',
+        campaignId: null,
+        jobId: null,
+      };
+    }
+
+    const effectiveScope =
+      storedScope.lane === commercial.service
+        ? storedScope
+        : this.buildScopeJson({
+            lane: commercial.service,
+            mode: storedScope.mode,
+            countries: storedScope.countries,
+            regions: storedScope.regions,
+            metros: storedScope.metros,
+            industries: storedScope.industries,
+            includeGeo: storedScope.includeGeo,
+            excludeGeo: storedScope.excludeGeo,
+            priorityMarkets: storedScope.priorityMarkets,
+            notes: storedScope.notes,
+          });
+
+    const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, effectiveScope);
+
+    if (commercial.tier !== effectiveScope.mode) {
+      const message = this.buildUpgradeMessage({
+        scope: effectiveScope,
+        currentService: commercial.service,
+        currentTier: commercial.tier,
+      });
+
       return {
         success: false,
         status: 'upgrade_required',
@@ -555,6 +590,27 @@ export class ClientsService {
         campaignId: null,
         jobId: null,
       };
+    }
+
+    if (storedScope.lane !== effectiveScope.lane) {
+      await this.prisma.client.update({
+        where: { id: client.id },
+        data: {
+          selectedPlan: effectiveScope.lane,
+          scopeJson: effectiveScope as unknown as Prisma.InputJsonValue,
+          metadataJson: toPrismaJson({
+            ...metadata,
+            setup: {
+              ...setup,
+              serviceType: effectiveScope.lane,
+              selectedPlan: effectiveScope.lane,
+              selectedTier: effectiveScope.mode,
+              recommendedPlan: effectiveScope.recommendedPlan,
+              scope: effectiveScope,
+            },
+          }),
+        },
+      });
     }
 
     let campaign = await this.prisma.campaign.findFirst({
@@ -576,23 +632,23 @@ export class ClientsService {
         name: 'Primary Automation',
         status: 'READY',
         channel: 'EMAIL',
-        objective: this.buildCampaignObjective(scope),
-        offerSummary: this.buildCampaignOfferSummary(scope),
+        objective: this.buildCampaignObjective(effectiveScope),
+        offerSummary: this.buildCampaignOfferSummary(effectiveScope),
         bookingUrlOverride: client.bookingUrl ?? undefined,
         timezone: client.primaryTimezone ?? undefined,
         metadataJson: {
           source: 'client_campaign_start',
           setupSource: 'client_campaign_profile',
-          lane: scope.lane,
-          mode: scope.mode,
-          countries: scope.countries,
-          regions: scope.regions,
-          metros: scope.metros,
-          industries: scope.industries,
-          includeGeo: scope.includeGeo,
-          excludeGeo: scope.excludeGeo,
-          priorityMarkets: scope.priorityMarkets,
-          notes: scope.notes,
+          lane: effectiveScope.lane,
+          mode: effectiveScope.mode,
+          countries: effectiveScope.countries,
+          regions: effectiveScope.regions,
+          metros: effectiveScope.metros,
+          industries: effectiveScope.industries,
+          includeGeo: effectiveScope.includeGeo,
+          excludeGeo: effectiveScope.excludeGeo,
+          priorityMarkets: effectiveScope.priorityMarkets,
+          notes: effectiveScope.notes,
         },
       } as any);
 
@@ -615,17 +671,36 @@ export class ClientsService {
       message: Boolean((activation as any).alreadyActive)
         ? 'Your campaign is already running.'
         : 'Your campaign has started. We are finding businesses and preparing outreach now.',
+      subscriptionAlignment,
     };
   }
 
-  private buildUpgradeMessage(scope: ScopeJson) {
-    if (scope.mode === 'precision') {
-      return 'Expand your plan to target city-level markets and advanced targeting.';
+  private buildUpgradeMessage(input: {
+    scope: ScopeJson;
+    currentService: string | null;
+    currentTier: string | null;
+  }) {
+    const { scope, currentService, currentTier } = input;
+
+    if (!currentService || !currentTier) {
+      return 'An active subscription is required before this campaign can start.';
     }
-    if (scope.mode === 'multi') {
-      return 'Expand your plan to target multiple countries.';
+
+    if (currentTier !== scope.mode) {
+      if (scope.mode === 'precision') {
+        return 'Your current plan does not include precision targeting for city-level markets or advanced controls.';
+      }
+      if (scope.mode === 'multi') {
+        return 'Your current plan does not include multi-country targeting.';
+      }
+      return 'Your current plan does not match this campaign targeting.';
     }
-    return 'Update your plan to start this campaign with the current targeting.';
+
+    if (currentService !== scope.lane) {
+      return `Your active subscription is on the ${currentService} lane. This campaign has been aligned to that lane so it can start.`;
+    }
+
+    return 'Your current subscription does not match this campaign setup.';
   }
 
   private buildCampaignObjective(scope: ScopeJson) {
@@ -711,7 +786,6 @@ export class ClientsService {
     return client;
   }
 
-
   private buildSubscriptionAlignment(
     commercial: {
       status: string;
@@ -734,7 +808,9 @@ export class ClientsService {
       recommendedService,
       recommendedTier,
       matchesCurrentSubscription:
-        currentService === recommendedService && currentTier === recommendedTier,
+        currentTier === recommendedTier &&
+        (currentService === recommendedService || currentService === 'revenue'),
+      exactServiceMatch: currentService === recommendedService,
       upgradeSuggested:
         this.tierRank(recommendedTier) > this.tierRank(currentTier),
       downgradePossible:
@@ -1110,24 +1186,26 @@ export class ClientsService {
     }
 
     const planCode = subscription.plan?.code ?? null;
+    const normalizedPlanCode = typeof planCode === 'string' ? planCode.trim().toUpperCase() : null;
+
     const service =
-      typeof planCode === 'string' && planCode.includes('REVENUE')
+      normalizedPlanCode?.includes('REVENUE')
         ? 'revenue'
-        : typeof planCode === 'string' && planCode.includes('OPPORTUNITY')
+        : normalizedPlanCode?.includes('OPPORTUNITY')
           ? 'opportunity'
           : null;
 
     const tier =
-      typeof planCode === 'string' && planCode.includes('PRECISION')
+      normalizedPlanCode?.includes('PRECISION')
         ? 'precision'
-        : typeof planCode === 'string' && planCode.includes('MULTI')
+        : normalizedPlanCode?.includes('MULTI')
           ? 'multi'
-          : typeof planCode === 'string' && planCode.includes('FOCUSED')
+          : normalizedPlanCode?.includes('FOCUSED')
             ? 'focused'
             : null;
 
     return {
-      status: subscription.status.toString(),
+      status: subscription.status.toString().toLowerCase(),
       service,
       tier,
       planCode,
