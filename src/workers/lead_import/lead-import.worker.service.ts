@@ -599,8 +599,12 @@ export class LeadImportWorkerService implements JobWorker {
       ...this.readStringArray(strategy.geoTargets),
       ...this.readScopeLabels(clientScope.countries),
       ...this.readScopeLabels(clientScope.regions),
+      ...this.readScopeLabels(clientScope.metros),
       ...this.readStringArray(serviceProfile.countries),
       ...this.readStringArray(serviceProfile.regions),
+      ...this.readStringArray(setup.countries),
+      ...this.readStringArray(setup.regions),
+      ...this.readStringArray(setup.metros),
     ]);
 
     const titleKeywords = this.uniqueNonEmpty([
@@ -720,7 +724,19 @@ export class LeadImportWorkerService implements JobWorker {
   private readStringArray(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return value
-      .map((item) => this.readString(item))
+      .map((item) => {
+        if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+          return this.readString(String(item));
+        }
+        const record = this.asObject(item);
+        return (
+          this.readString(record.label) ??
+          this.readString(record.code) ??
+          this.readString(record.regionLabel) ??
+          this.readString(record.regionCode) ??
+          this.readString(record.name)
+        );
+      })
       .filter((item): item is string => Boolean(item));
   }
 

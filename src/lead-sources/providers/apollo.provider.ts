@@ -69,6 +69,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
   private readonly logger = new Logger(ApolloProvider.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://api.apollo.io/api/v1';
+  private peopleSearch404Logged = false;
 
   constructor(private readonly configService: ConfigService) {
     const apiKey = this.configService.get<string>('APOLLO_API_KEY');
@@ -180,13 +181,26 @@ export class ApolloProvider implements LeadSourceProviderContract {
     }
 
     const response = await fetch(url, {
-      method: 'GET',
-      headers: this.headers(),
+      method: 'POST',
+      headers: {
+        ...this.headers(),
+        'content-type': 'application/json',
+        'cache-control': 'no-cache',
+      },
     });
 
     if (!response.ok) {
       const message = await this.safeReadText(response);
-      this.logger.warn(`Apollo people search failed (${response.status}): ${message}`);
+      if (response.status === 404) {
+        if (!this.peopleSearch404Logged) {
+          this.peopleSearch404Logged = true;
+          this.logger.warn(
+            `Apollo people search returned 404 once. Orchestrate will continue without Apollo while this endpoint is unavailable: ${message}`,
+          );
+        }
+      } else {
+        this.logger.warn(`Apollo people search failed (${response.status}): ${message}`);
+      }
       return [];
     }
 

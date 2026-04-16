@@ -443,7 +443,23 @@ export class AiService {
       sequenceStepCount: 3,
     };
 
-    const strategy = await this.strategyAgent.generate(serviceProfile);
+    const rawStrategy = await this.strategyAgent.generate(serviceProfile);
+    const strategy = this.normalizeStrategyBrief(rawStrategy, {
+      icpName: businessName,
+      campaignName: campaign.name,
+      objective: campaign.objective ?? 'Book qualified meetings with decision makers',
+      offerSummary: campaign.offerSummary ?? client.outboundOffer ?? 'Structured outbound outreach and follow-up automation',
+      industryTags: industries,
+      geoTargets: [...countries, ...regions],
+      titleKeywords: serviceProfile.buyerRoles,
+      exclusionKeywords: [],
+      painPoints: this.derivePainPoints(client.outboundOffer, client.industry),
+      valueAngles: this.deriveValueAngles(client.outboundOffer),
+      tone: serviceProfile.tone,
+      callToAction: serviceProfile.callToAction,
+      bookingUrlOverride: serviceProfile.bookingUrl,
+      segmentNotes: undefined,
+    });
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
@@ -888,6 +904,99 @@ export class AiService {
     return parts.join(' ');
   }
 
+
+  private readStoredStrategy(value: Prisma.JsonValue | null | undefined): StrategyBrief | null {
+    const metadata = value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+    const raw = metadata.strategy && typeof metadata.strategy === 'object' && !Array.isArray(metadata.strategy)
+      ? (metadata.strategy as Record<string, unknown>)
+      : metadata;
+    if (!raw || !Object.keys(raw).length) {
+      return null;
+    }
+    return this.normalizeStrategyBrief(raw, {
+      icpName: 'Ideal customer profile',
+      campaignName: 'Campaign',
+      objective: 'Book qualified meetings with decision makers',
+      offerSummary: 'Structured outbound outreach and follow-up automation',
+      industryTags: [],
+      geoTargets: [],
+      titleKeywords: ['Decision maker'],
+      exclusionKeywords: [],
+      painPoints: this.derivePainPoints(undefined, undefined),
+      valueAngles: this.deriveValueAngles(undefined),
+      tone: 'professional-direct',
+      callToAction: 'Book a meeting',
+      bookingUrlOverride: undefined,
+      segmentNotes: undefined,
+    });
+  }
+
+  private normalizeStrategyBrief(
+    value: unknown,
+    fallback: {
+      icpName: string;
+      campaignName: string;
+      objective: string;
+      offerSummary: string;
+      industryTags: string[];
+      geoTargets: string[];
+      titleKeywords: string[];
+      exclusionKeywords: string[];
+      painPoints: string[];
+      valueAngles: string[];
+      tone: string;
+      callToAction: string;
+      bookingUrlOverride?: string;
+      segmentNotes?: string;
+    },
+  ): StrategyBrief {
+    const raw =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {};
+
+    return {
+      icpName: this.readString(raw.icpName) ?? fallback.icpName,
+      campaignName: this.readString(raw.campaignName) ?? fallback.campaignName,
+      objective: this.readString(raw.objective) ?? fallback.objective,
+      offerSummary: this.readString(raw.offerSummary) ?? fallback.offerSummary,
+      industryTags: this.uniqueStringArray([
+        ...this.readStringArray(raw.industryTags),
+        ...fallback.industryTags,
+      ]).slice(0, 6),
+      geoTargets: this.uniqueStringArray([
+        ...this.readStringArray(raw.geoTargets),
+        ...fallback.geoTargets,
+      ]).slice(0, 8),
+      titleKeywords: this.uniqueStringArray([
+        ...this.readStringArray(raw.titleKeywords),
+        ...fallback.titleKeywords,
+      ]).slice(0, 8),
+      exclusionKeywords: this.uniqueStringArray([
+        ...this.readStringArray(raw.exclusionKeywords),
+        ...fallback.exclusionKeywords,
+      ]).slice(0, 8),
+      painPoints: this.uniqueStringArray([
+        ...this.readStringArray(raw.painPoints),
+        ...fallback.painPoints,
+      ]).slice(0, 6),
+      valueAngles: this.uniqueStringArray([
+        ...this.readStringArray(raw.valueAngles),
+        ...fallback.valueAngles,
+      ]).slice(0, 6),
+      tone: this.readString(raw.tone) ?? fallback.tone,
+      callToAction: this.readString(raw.callToAction) ?? fallback.callToAction,
+      bookingUrlOverride: this.readString(raw.bookingUrlOverride) ?? fallback.bookingUrlOverride,
+      segmentNotes: this.readString(raw.segmentNotes) ?? fallback.segmentNotes,
+    };
+  }
+
+  private uniqueStringArray(values: Array<string | undefined>) {
+    return Array.from(new Set(values.map((item) => item?.trim() ?? '').filter(Boolean)));
+  }
+
   private derivePainPoints(offer?: string | null, industry?: string | null) {
     const industryLabel = industry?.trim() || 'your market';
     return [
@@ -949,7 +1058,7 @@ export class AiService {
       },
     });
 
-    const strategy = (campaign.metadataJson as StrategyBrief | null) ?? null;
+    const strategy = this.readStoredStrategy(campaign.metadataJson);
 
     if (!strategy) {
       return {
@@ -1045,7 +1154,7 @@ export class AiService {
       },
     });
 
-    const strategy = (campaign.metadataJson as StrategyBrief | null) ?? null;
+    const strategy = this.readStoredStrategy(campaign.metadataJson);
 
     if (!strategy) {
       return {
