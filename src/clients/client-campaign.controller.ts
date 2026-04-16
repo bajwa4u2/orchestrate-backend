@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Patch } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Patch, Post } from '@nestjs/common';
 import { ClientsService } from './clients.service';
 import { UpdateCampaignProfileDto } from './dto/update-campaign-profile.dto';
 
@@ -18,4 +18,10 @@ export class ClientCampaignController {
   ) {
     return this.clientsService.updateCampaignProfile(headers, dto);
   }
+
+  @Post('start')
+  startCampaign(@Headers() headers: Record<string, unknown>) {
+    return this.clientsService.startCampaign(headers);
+  }
 }
+

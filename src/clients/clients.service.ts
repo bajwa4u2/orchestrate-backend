@@ -10,6 +10,7 @@ import { buildPagination } from '../common/utils/pagination';
 import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
 import { StripeService } from '../billing/stripe/stripe.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
@@ -56,6 +57,7 @@ export class ClientsService {
     private readonly accessContextService: AccessContextService,
     private readonly prisma: PrismaService,
     private readonly stripeService: StripeService,
+    private readonly campaignsService: CampaignsService,
   ) {}
 
   create(dto: CreateClientDto) {
@@ -531,6 +533,118 @@ export class ClientsService {
         subscriptionAlignment: this.buildSubscriptionAlignment(commercial, scope),
       },
     };
+  }
+
+
+  async startCampaign(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
+    const metadata = this.asObject(client.metadataJson);
+    const setup = this.asObject(metadata.setup);
+    const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
+    const commercial = await this.resolveCommercialState(client.id);
+    const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, scope);
+
+    if (!subscriptionAlignment.matchesCurrentSubscription) {
+      const message = this.buildUpgradeMessage(scope);
+      return {
+        success: false,
+        status: 'upgrade_required',
+        clientId: client.id,
+        organizationId: client.organizationId,
+        message,
+        campaignId: null,
+        jobId: null,
+      };
+    }
+
+    let campaign = await this.prisma.campaign.findFirst({
+      where: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        code: 'PRIMARY_AUTOMATION',
+        status: { in: ['READY', 'ACTIVE', 'PAUSED', 'DRAFT'] as any },
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: { id: true, status: true },
+    });
+
+    if (!campaign) {
+      const created = await this.campaignsService.create({
+        organizationId: client.organizationId,
+        clientId: client.id,
+        code: 'PRIMARY_AUTOMATION',
+        name: 'Primary Automation',
+        status: 'READY',
+        channel: 'EMAIL',
+        objective: this.buildCampaignObjective(scope),
+        offerSummary: this.buildCampaignOfferSummary(scope),
+        bookingUrlOverride: client.bookingUrl ?? undefined,
+        timezone: client.primaryTimezone ?? undefined,
+        metadataJson: {
+          source: 'client_campaign_start',
+          setupSource: 'client_campaign_profile',
+          lane: scope.lane,
+          mode: scope.mode,
+          countries: scope.countries,
+          regions: scope.regions,
+          metros: scope.metros,
+          industries: scope.industries,
+          includeGeo: scope.includeGeo,
+          excludeGeo: scope.excludeGeo,
+          priorityMarkets: scope.priorityMarkets,
+          notes: scope.notes,
+        },
+      } as any);
+
+      campaign = { id: created.id, status: created.status };
+    }
+
+    const activation = await this.campaignsService.activateCampaign({
+      campaignId: campaign.id,
+      organizationId: client.organizationId,
+    });
+
+    return {
+      success: true,
+      status: 'active',
+      clientId: client.id,
+      organizationId: client.organizationId,
+      campaignId: campaign.id,
+      jobId: activation.jobId ?? null,
+      alreadyActive: Boolean((activation as any).alreadyActive),
+      message: Boolean((activation as any).alreadyActive)
+        ? 'Your campaign is already running.'
+        : 'Your campaign has started. We are finding businesses and preparing outreach now.',
+    };
+  }
+
+  private buildUpgradeMessage(scope: ScopeJson) {
+    if (scope.mode === 'precision') {
+      return 'Expand your plan to target city-level markets and advanced targeting.';
+    }
+    if (scope.mode === 'multi') {
+      return 'Expand your plan to target multiple countries.';
+    }
+    return 'Update your plan to start this campaign with the current targeting.';
+  }
+
+  private buildCampaignObjective(scope: ScopeJson) {
+    if (scope.lane === 'revenue') {
+      return 'Revenue operations are being launched from your saved targeting and service coverage.';
+    }
+    return 'We are launching outbound outreach from your saved targeting to generate qualified meetings.';
+  }
+
+  private buildCampaignOfferSummary(scope: ScopeJson) {
+    const industry = scope.industries[0]?.label;
+    if (scope.lane === 'revenue') {
+      return industry
+        ? `Revenue operations are being prepared for ${industry} targets using your saved campaign coverage.`
+        : 'Revenue operations are being prepared using your saved campaign coverage.';
+    }
+    return industry
+      ? `We are finding ${industry} prospects and preparing outreach using your saved targeting.`
+      : 'We are finding prospects and preparing outreach using your saved targeting.';
   }
 
   private buildProfileResponse(client: any) {
