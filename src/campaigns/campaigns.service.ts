@@ -12,6 +12,7 @@ import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowsService } from '../workflows/workflows.service';
+import { WorkersService } from '../workers/workers.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { ListCampaignsDto } from './dto/list-campaigns.dto';
 
@@ -20,6 +21,7 @@ export class CampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workflowsService: WorkflowsService,
+    private readonly workersService: WorkersService,
   ) {}
 
   async create(dto: CreateCampaignDto) {
@@ -153,7 +155,6 @@ export class CampaignsService {
     return { items, meta: { page, limit, total } };
   }
 
-  // ✅ NEW: ACTIVATION LOGIC
   async activateCampaign(input: { campaignId: string; organizationId: string }) {
     const campaign = await this.prisma.campaign.findFirst({
       where: {
@@ -191,6 +192,11 @@ export class CampaignsService {
           campaignId: campaign.id,
         },
       },
+    });
+
+    await this.workersService.run(job, {
+      workflowRunId: campaign.workflowRunId ?? undefined,
+      payload: ((job.payloadJson ?? {}) as Record<string, unknown>) || {},
     });
 
     return { ok: true, jobId: job.id };
