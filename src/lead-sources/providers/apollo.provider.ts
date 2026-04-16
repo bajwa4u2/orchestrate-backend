@@ -115,9 +115,10 @@ export class ApolloProvider implements LeadSourceProviderContract {
       };
     }
 
-    const enriched = await this.bulkEnrichPeople(searchPeople.slice(0, maxResults));
+    const sourcePeople = searchPeople.slice(0, maxResults);
+    const enriched = await this.bulkEnrichPeople(sourcePeople);
     const prospects = enriched
-      .map((item, index) => this.toLeadCandidate(item, index, input))
+      .map((item, index) => this.toLeadCandidate(item, sourcePeople[index], index, input))
       .filter((item): item is ExternalLeadCandidate => Boolean(item));
 
     this.logger.log(
@@ -179,9 +180,8 @@ export class ApolloProvider implements LeadSourceProviderContract {
     }
 
     const response = await fetch(url, {
-      method: 'POST',
+      method: 'GET',
       headers: this.headers(),
-      body: JSON.stringify({}),
     });
 
     if (!response.ok) {
@@ -257,26 +257,41 @@ export class ApolloProvider implements LeadSourceProviderContract {
 
   private toLeadCandidate(
     item: ApolloBulkMatchResponseItem,
+    source: ApolloApiSearchPerson | undefined,
     index: number,
     input: LeadSourceSearchInput,
   ): ExternalLeadCandidate | null {
-    const person = item.person;
+    const person = item.person ?? this.toBulkFallbackPerson(source ?? {});
     if (!person) return null;
 
-    const fullName = this.readString(person.name)
-      ?? [this.readString(person.first_name), this.readString(person.last_name)].filter(Boolean).join(' ')
-      ?? 'Decision maker';
-    const companyName = this.readString(person.organization?.name);
+    const fullName =
+      this.readString(person.name) ||
+      [this.readString(person.first_name), this.readString(person.last_name)].filter(Boolean).join(' ') ||
+      this.readString(source?.name) ||
+      [this.readString(source?.first_name), this.readString(source?.last_name)].filter(Boolean).join(' ') ||
+      'Decision maker';
+    const companyName =
+      this.readString(person.organization?.name) ||
+      this.readString(source?.organization?.name);
     if (!companyName) return null;
 
-    const email = this.readString(person.email)?.toLowerCase() ?? undefined;
-    const firstName = this.readString(person.first_name) ?? undefined;
-    const lastName = this.readString(person.last_name) ?? undefined;
-    const title = this.readString(person.title) ?? undefined;
-    const domain = this.readString(person.organization?.primary_domain) ?? undefined;
-    const industry = this.readString(person.organization?.industry) ?? input.targeting.industry ?? undefined;
-    const region = this.readString(person.state) ?? undefined;
-    const countryCode = this.normalizeCountry(this.readString(person.country));
+    const email = this.readString((person as any).email)?.toLowerCase() ?? undefined;
+    const firstName = this.readString(person.first_name) ?? this.readString(source?.first_name) ?? undefined;
+    const lastName = this.readString(person.last_name) ?? this.readString(source?.last_name) ?? undefined;
+    const title = this.readString(person.title) ?? this.readString(source?.title) ?? undefined;
+    const domain =
+      this.readString(person.organization?.primary_domain) ??
+      this.readString(source?.organization?.primary_domain) ??
+      undefined;
+    const industry =
+      this.readString(person.organization?.industry) ??
+      this.readString(source?.organization?.industry) ??
+      input.targeting.industry ??
+      undefined;
+    const city = this.readString(person.city) ?? this.readString(source?.city) ?? undefined;
+    const region = this.readString(person.state) ?? this.readString(source?.state) ?? undefined;
+    const countryCode =
+      this.normalizeCountry(this.readString(person.country) ?? this.readString(source?.country));
 
     return {
       provider: this.provider,
@@ -296,8 +311,8 @@ export class ApolloProvider implements LeadSourceProviderContract {
       title,
       email,
       emailStatus: this.readString(person.email_status) ?? undefined,
-      linkedinUrl: this.readString(person.linkedin_url) ?? undefined,
-      city: this.readString(person.city) ?? undefined,
+      linkedinUrl: this.readString(person.linkedin_url) ?? this.readString(source?.linkedin_url) ?? undefined,
+      city,
       region,
       countryCode,
       reasonForFit: this.buildReasonForFit({
