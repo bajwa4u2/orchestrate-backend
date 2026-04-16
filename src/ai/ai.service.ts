@@ -749,6 +749,7 @@ export class AiService {
       workflowRunId,
       campaignId: campaign.id,
       sequenceId,
+      leadIds: leadRows.map((item) => item.id),
       leadCount: leadRows.length,
       sendableLeadIds: leadRows.filter((item) => item.sendable).map((item) => item.id),
       sendableLeadCount: leadRows.filter((item) => item.sendable).length,

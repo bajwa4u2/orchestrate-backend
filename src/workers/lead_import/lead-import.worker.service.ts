@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   ContactEmailStatus,
   Job,
@@ -21,6 +22,8 @@ import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 @Injectable()
 export class LeadImportWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.LEAD_IMPORT];
+
+  private readonly logger = new Logger(LeadImportWorkerService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -52,17 +55,6 @@ export class LeadImportWorkerService implements JobWorker {
       orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
     });
 
-    const existingSendableLeads = await this.prisma.lead.findMany({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-        contact: { email: { not: null } },
-      },
-      select: { id: true },
-      take: 25,
-      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-    });
-
     let createdLeadIds: string[] = [];
     if (!existingVisibleLeads.length) {
       createdLeadIds = await this.bootstrapLeadsFromClientAssets({
@@ -77,29 +69,38 @@ export class LeadImportWorkerService implements JobWorker {
       });
     }
 
-    const visibleLeadIds = [...existingVisibleLeads.map((item) => item.id), ...createdLeadIds].slice(0, 25);
+    const visibleLeads = await this.prisma.lead.findMany({
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+      },
+      select: { id: true },
+      take: 25,
+      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+    });
 
-    const sendableLeads = visibleLeadIds.length
-      ? await this.prisma.lead.findMany({
-          where: {
-            id: { in: visibleLeadIds },
-            contact: { email: { not: null } },
-          },
-          select: { id: true },
-          take: 25,
-          orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-        })
-      : [];
+    const sendableLeads = await this.prisma.lead.findMany({
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+        contact: { email: { not: null } },
+      },
+      select: { id: true },
+      take: 25,
+      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+    });
 
-    const sendableLeadIds = sendableLeads.map((item) => item.id);
+    const candidateLeadIds = sendableLeads.map((item) => item.id).slice(0, 25);
 
     const queuedMessageGenerationJobIds: string[] = [];
-    for (const leadId of sendableLeadIds) {
+    for (const leadId of candidateLeadIds) {
       const dedupeKey = `first_send:${leadId}`;
       const existing = await this.prisma.job.findFirst({
         where: {
           dedupeKey,
-          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED] },
+          status: {
+            in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED],
+          },
         },
         select: { id: true },
       });
@@ -126,26 +127,36 @@ export class LeadImportWorkerService implements JobWorker {
       queuedMessageGenerationJobIds.push(firstSendJob.id);
     }
 
+    const visibleLeadCount = visibleLeads.length;
+    const sendableLeadCount = candidateLeadIds.length;
+
     await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
-        status: visibleLeadIds.length ? 'ACTIVE' : 'READY',
-        generationState: visibleLeadIds.length ? 'LEADS_READY' : 'TARGETING_READY',
+        status: visibleLeadCount ? 'ACTIVE' : 'READY',
+        generationState: visibleLeadCount
+          ? sendableLeadCount
+            ? 'ACTIVE'
+            : 'LEADS_READY'
+          : 'TARGETING_READY',
         metadataJson: toPrismaJson({
           ...this.asObject(campaign.metadataJson),
           activation: {
             lastBootstrapAt: new Date().toISOString(),
-            bootstrapStatus: queuedMessageGenerationJobIds.length
+            bootstrapStatus: sendableLeadCount
               ? 'launch_queued'
-              : visibleLeadIds.length
-              ? 'leads_discovered_no_sendable'
-              : 'blocked_no_sendable_leads',
+              : visibleLeadCount
+                ? 'leads_ready_non_sendable'
+                : 'blocked_no_sendable_leads',
             createdLeadCount: createdLeadIds.length,
-            visibleLeadCount: visibleLeadIds.length,
+            visibleLeadCount,
+            sendableLeadCount,
             queuedFirstSendCount: queuedMessageGenerationJobIds.length,
-            blockedReason: visibleLeadIds.length
+            blockedReason: sendableLeadCount
               ? null
-              : 'No leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
+              : visibleLeadCount
+                ? 'Leads were discovered, but no contact email was available yet.'
+                : 'No visible leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
           },
         }),
       },
@@ -155,9 +166,11 @@ export class LeadImportWorkerService implements JobWorker {
       ok: true,
       campaignId: campaign.id,
       createdLeadCount: createdLeadIds.length,
+      visibleLeadCount,
+      sendableLeadCount,
       queuedFirstSendCount: queuedMessageGenerationJobIds.length,
       queuedJobIds: queuedMessageGenerationJobIds,
-      waitingForLeadSource: visibleLeadIds.length === 0,
+      waitingForLeadSource: visibleLeadCount === 0,
     };
   }
 
@@ -221,7 +234,9 @@ export class LeadImportWorkerService implements JobWorker {
     const metadata = this.asObject(client?.metadataJson);
     const setup = this.asObject(metadata.setup);
     const scope = this.asObject(client?.scopeJson);
-    const seedProspects = this.readSeedProspects(setup.seedProspects ?? metadata.seedProspects ?? scope.seedProspects);
+    const seedProspects = this.readSeedProspects(
+      setup.seedProspects ?? metadata.seedProspects ?? scope.seedProspects,
+    );
 
     for (const prospect of seedProspects.slice(0, 25)) {
       const existing = await this.prisma.contact.findFirst({
@@ -317,14 +332,24 @@ export class LeadImportWorkerService implements JobWorker {
       return apolloLeadIds;
     }
 
-    const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
-      clientId: input.clientId,
-      campaignId: input.campaignId,
-      workflowRunId: input.workflowRunId,
-      workflowTitle: 'Automatic client launch',
-    });
-
-    return aiBootstrap.sendableLeadIds ?? [];
+    try {
+      const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
+        clientId: input.clientId,
+        campaignId: input.campaignId,
+        workflowRunId: input.workflowRunId,
+        workflowTitle: 'Automatic client launch',
+      });
+      return (aiBootstrap.leadIds && aiBootstrap.leadIds.length > 0)
+        ? aiBootstrap.leadIds
+        : (aiBootstrap.sendableLeadIds ?? []);
+    } catch (error) {
+      this.logger.warn(
+        `AI bootstrap failed for campaign ${input.campaignId}; continuing without AI-generated leads: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return [];
+    }
   }
 
   private async importApolloProspects(input: {
@@ -404,14 +429,16 @@ export class LeadImportWorkerService implements JobWorker {
     prospect: ExternalLeadCandidate;
   }) {
     const email = this.readString(input.prospect.email)?.toLowerCase() ?? null;
-    const contactFullName =
-      this.readString(input.prospect.contactFullName) ??
-      [this.readString(input.prospect.firstName), this.readString(input.prospect.lastName)].filter(Boolean).join(' ') ||
-      'Apollo Contact';
 
     let accountId: string | null = null;
     const normalizedDomain = this.normalizeDomain(input.prospect.domain);
     const companyName = this.readString(input.prospect.companyName);
+    const fullName =
+      this.readString(input.prospect.contactFullName) ||
+      [this.readString(input.prospect.firstName), this.readString(input.prospect.lastName)]
+        .filter(Boolean)
+        .join(' ') ||
+      'Apollo Contact';
 
     if (normalizedDomain || companyName) {
       const existingAccount = await this.prisma.account.findFirst({
@@ -452,26 +479,30 @@ export class LeadImportWorkerService implements JobWorker {
       accountId = account.id;
     }
 
-    const contactMatchClauses: Prisma.ContactWhereInput[] = [];
+    const contactWhere: Array<Record<string, unknown>> = [];
     if (email) {
-      contactMatchClauses.push({ email });
+      contactWhere.push({ email });
     }
-    contactMatchClauses.push({
-      fullName: contactFullName,
-      ...(accountId ? { accountId } : {}),
-    });
+    if (fullName) {
+      contactWhere.push({
+        fullName,
+        ...(accountId ? { accountId } : {}),
+      });
+    }
 
-    const existingContact = await this.prisma.contact.findFirst({
-      where: {
-        clientId: input.clientId,
-        OR: contactMatchClauses,
-      },
-      select: { id: true },
-    });
+    let contactId: string | null = null;
+    if (contactWhere.length) {
+      const existingContact = await this.prisma.contact.findFirst({
+        where: {
+          clientId: input.clientId,
+          OR: contactWhere as Prisma.ContactWhereInput[],
+        },
+        select: { id: true },
+      });
+      contactId = existingContact?.id ?? null;
+    }
 
-    let contactId = existingContact?.id ?? null;
-
-    if (!contactId) {
+    if (!contactId && (fullName || email)) {
       const contact = await this.prisma.contact.create({
         data: {
           organizationId: input.organizationId,
@@ -479,10 +510,10 @@ export class LeadImportWorkerService implements JobWorker {
           accountId: accountId ?? undefined,
           firstName: this.readString(input.prospect.firstName) ?? undefined,
           lastName: this.readString(input.prospect.lastName) ?? undefined,
-          fullName: contactFullName,
+          fullName: fullName,
           title: this.readString(input.prospect.title) ?? undefined,
           email: email ?? undefined,
-          emailStatus: email ? this.mapEmailStatus(input.prospect.emailStatus) : undefined,
+          emailStatus: this.mapEmailStatus(input.prospect.emailStatus),
           linkedinUrl: this.readString(input.prospect.linkedinUrl) ?? undefined,
           timezone: this.readString(input.prospect.timezone) ?? undefined,
           city: this.readString(input.prospect.city) ?? undefined,
@@ -534,6 +565,7 @@ export class LeadImportWorkerService implements JobWorker {
           providerOrganizationId: input.prospect.providerOrganizationId,
           reasonForFit: input.prospect.reasonForFit,
           qualificationNotes: input.prospect.qualificationNotes ?? null,
+          hasEmail: Boolean(email),
         }),
       },
       select: { id: true },
@@ -582,7 +614,9 @@ export class LeadImportWorkerService implements JobWorker {
       ...this.readStringArray(setup.excludeKeywords),
     ]);
 
-    const employeeRanges = this.readEmployeeRanges(clientScope.companySizes ?? setup.companySizes ?? serviceProfile.companySizes);
+    const employeeRanges = this.readEmployeeRanges(
+      clientScope.companySizes ?? setup.companySizes ?? serviceProfile.companySizes,
+    );
     const seniorities = this.deriveSeniorities(titleKeywords);
 
     return {
@@ -621,7 +655,11 @@ export class LeadImportWorkerService implements JobWorker {
   private normalizeDomain(value?: string | null) {
     const domain = this.readString(value);
     if (!domain) return null;
-    return domain.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/$/, '').toLowerCase();
+    return domain
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .replace(/\/$/, '')
+      .toLowerCase();
   }
 
   private deriveSeniorities(titles: string[]) {
@@ -630,7 +668,13 @@ export class LeadImportWorkerService implements JobWorker {
       const lowered = title.toLowerCase();
       if (lowered.includes('owner')) detected.add('owner');
       if (lowered.includes('founder')) detected.add('founder');
-      if (lowered.includes('chief') || lowered.includes('ceo') || lowered.includes('cto') || lowered.includes('cmo')) detected.add('c_suite');
+      if (
+        lowered.includes('chief') ||
+        lowered.includes('ceo') ||
+        lowered.includes('cto') ||
+        lowered.includes('cmo')
+      )
+        detected.add('c_suite');
       if (lowered.includes('vp')) detected.add('vp');
       if (lowered.includes('head')) detected.add('head');
       if (lowered.includes('director')) detected.add('director');
@@ -642,7 +686,11 @@ export class LeadImportWorkerService implements JobWorker {
   private readEmployeeRanges(value: unknown) {
     const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
     const mapped = values
-      .map((item) => this.readString(typeof item === 'string' ? item : this.asObject(item).label ?? this.asObject(item).code))
+      .map((item) =>
+        this.readString(
+          typeof item === 'string' ? item : this.asObject(item).label ?? this.asObject(item).code,
+        ),
+      )
       .filter(Boolean)
       .map((item) => this.mapEmployeeRange(item as string))
       .filter(Boolean) as string[];
@@ -660,7 +708,9 @@ export class LeadImportWorkerService implements JobWorker {
   }
 
   private asObject(value: unknown): Record<string, any> {
-    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, any>) } : {};
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(value as Record<string, any>) }
+      : {};
   }
 
   private readString(value: unknown): string | null {
@@ -678,12 +728,20 @@ export class LeadImportWorkerService implements JobWorker {
     if (!Array.isArray(value)) return [];
     return value
       .map((item) => this.asObject(item))
-      .map((item) => this.readString(item.label) ?? this.readString(item.code) ?? this.readString(item.regionLabel) ?? this.readString(item.regionCode))
+      .map(
+        (item) =>
+          this.readString(item.label) ??
+          this.readString(item.code) ??
+          this.readString(item.regionLabel) ??
+          this.readString(item.regionCode),
+      )
       .filter((item): item is string => Boolean(item));
   }
 
   private uniqueNonEmpty(values: Array<string | undefined | null>) {
-    return Array.from(new Set(values.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)));
+    return Array.from(
+      new Set(values.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)),
+    );
   }
 
   private readSeedProspects(value: unknown): Array<any> {
@@ -693,7 +751,8 @@ export class LeadImportWorkerService implements JobWorker {
       .map((item) => {
         const email = this.readString(item.email)?.toLowerCase();
         const fullName =
-          this.readString(item.fullName) ?? [this.readString(item.firstName), this.readString(item.lastName)].filter(Boolean).join(' ');
+          this.readString(item.fullName) ??
+          [this.readString(item.firstName), this.readString(item.lastName)].filter(Boolean).join(' ');
         if (!email || !fullName) return null;
         return {
           companyName: this.readString(item.companyName) ?? undefined,
