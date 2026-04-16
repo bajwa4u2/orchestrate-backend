@@ -322,6 +322,8 @@ export class ExecutionService implements OnModuleInit {
         },
       });
 
+      await this.updateCampaignActivationFailure(job, message, shouldRetry, retryAt);
+
       if (workflowRunId) {
         if (shouldRetry) {
           await this.workflowsService.markWorkflowWaiting(workflowRunId, {
@@ -346,6 +348,53 @@ export class ExecutionService implements OnModuleInit {
         error: message,
       };
     }
+  }
+
+
+  private async updateCampaignActivationFailure(
+    job: { type: JobType; campaignId: string | null },
+    message: string,
+    shouldRetry: boolean,
+    retryAt: Date | null,
+  ) {
+    if (job.type !== JobType.LEAD_IMPORT || !job.campaignId) {
+      return;
+    }
+
+    const campaign = await this.prisma.campaign.findUnique({
+      where: { id: job.campaignId },
+      select: {
+        id: true,
+        status: true,
+        generationState: true,
+        metadataJson: true,
+      },
+    });
+
+    if (!campaign) {
+      return;
+    }
+
+    const currentMetadata = this.asObject(campaign.metadataJson);
+    const currentActivation = this.asObject(currentMetadata.activation);
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        status: 'READY',
+        generationState: 'TARGETING_READY',
+        metadataJson: toPrismaJson({
+          ...currentMetadata,
+          activation: {
+            ...currentActivation,
+            bootstrapStatus: shouldRetry ? 'activation_retry_scheduled' : 'activation_failed',
+            lastError: message,
+            retryAt: retryAt?.toISOString() ?? null,
+            failedAt: new Date().toISOString(),
+          },
+        }),
+      },
+    });
   }
 
   async runImmediateSendForLead(
@@ -573,6 +622,28 @@ export class ExecutionService implements OnModuleInit {
       throw new NotFoundException(`Campaign ${campaignId} not found`);
     }
 
+    const currentMetadata = this.asObject(campaign.metadataJson);
+    const currentActivation = this.asObject(currentMetadata.activation);
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        status: 'READY',
+        generationState: 'TARGETING_READY',
+        metadataJson: toPrismaJson({
+          ...currentMetadata,
+          activation: {
+            ...currentActivation,
+            bootstrapStatus: 'activation_in_progress',
+            startedAt: new Date().toISOString(),
+            lastError: null,
+            retryAt: null,
+            failedAt: null,
+          },
+        }),
+      },
+    });
+
     const existingSendableLeads = await this.prisma.lead.findMany({
       where: {
         campaignId: campaign.id,
@@ -602,10 +673,12 @@ export class ExecutionService implements OnModuleInit {
       await this.prisma.campaign.update({
         where: { id: campaign.id },
         data: {
+          status: 'READY',
           generationState: 'TARGETING_READY',
           metadataJson: toPrismaJson({
-            ...this.asObject(campaign.metadataJson),
+            ...currentMetadata,
             activation: {
+              ...currentActivation,
               lastBootstrapAt: new Date().toISOString(),
               bootstrapStatus: 'awaiting_lead_source',
               bootstrapReason: 'No contacts or seed prospects were available for automatic launch.',
@@ -641,10 +714,13 @@ export class ExecutionService implements OnModuleInit {
         status: 'ACTIVE',
         generationState: 'ACTIVE',
         metadataJson: toPrismaJson({
-          ...this.asObject(campaign.metadataJson),
+          ...currentMetadata,
           activation: {
+            ...currentActivation,
             lastBootstrapAt: new Date().toISOString(),
-            bootstrapStatus: 'launch_queued',
+            completedAt: new Date().toISOString(),
+            bootstrapStatus: 'activation_completed',
+            launchStatus: 'launch_queued',
             createdLeadCount: createdLeadIds.length,
             queuedFirstSendCount: queuedJobs.length,
           },

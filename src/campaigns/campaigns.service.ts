@@ -1,5 +1,7 @@
 import {
   ActivityVisibility,
+  JobStatus,
+  JobType,
   Prisma,
   RecordSource,
   WorkflowLane,
@@ -169,15 +171,122 @@ export class CampaignsService {
       throw new Error('Campaign not found');
     }
 
-    if (campaign.status === 'ACTIVE') {
-      return { ok: true, alreadyActive: true };
+    const metadata = this.asObject(campaign.metadataJson);
+    const activation = this.asObject(metadata.activation);
+    const activationVersion = this.readPositiveInt(activation.version) ?? 1;
+    const dedupeKey = `campaign_activation:${campaign.id}:${activationVersion}`;
+
+    if (campaign.status === 'ACTIVE' || campaign.generationState === 'ACTIVE') {
+      const activeMetadata = {
+        ...metadata,
+        activation: {
+          ...activation,
+          version: activationVersion,
+          bootstrapStatus: 'activation_completed',
+          completedAt:
+            this.readString(activation.completedAt) ??
+            this.readString(activation.lastBootstrapAt) ??
+            new Date().toISOString(),
+        },
+      };
+
+      if (this.readString(activation.bootstrapStatus) !== 'activation_completed') {
+        await this.prisma.campaign.update({
+          where: { id: campaign.id },
+          data: {
+            metadataJson: toPrismaJson(activeMetadata),
+          },
+        });
+      }
+
+      return {
+        ok: true,
+        status: 'active',
+        generationState: campaign.generationState ?? 'ACTIVE',
+        bootstrapStatus: 'activation_completed',
+        deduped: true,
+        message: 'Campaign is already active.',
+      };
     }
+
+    const existingActivationJob = await this.prisma.job.findFirst({
+      where: {
+        campaignId: campaign.id,
+        type: JobType.LEAD_IMPORT,
+        dedupeKey,
+        status: {
+          in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingActivationJob) {
+      const bootstrapStatus =
+        existingActivationJob.status === JobStatus.RETRY_SCHEDULED
+          ? 'activation_retry_scheduled'
+          : 'activation_in_progress';
+
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: 'READY',
+          generationState: 'TARGETING_READY',
+          metadataJson: toPrismaJson({
+            ...metadata,
+            activation: {
+              ...activation,
+              version: activationVersion,
+              requestedAt:
+                this.readString(activation.requestedAt) ?? existingActivationJob.createdAt.toISOString(),
+              bootstrapStatus,
+              jobId: existingActivationJob.id,
+              dedupeKey,
+              retryAt:
+                existingActivationJob.status === JobStatus.RETRY_SCHEDULED
+                  ? existingActivationJob.scheduledFor?.toISOString() ?? null
+                  : null,
+            },
+          }),
+        },
+      });
+
+      return {
+        ok: true,
+        status: 'activating',
+        generationState: 'TARGETING_READY',
+        bootstrapStatus,
+        jobId: existingActivationJob.id,
+        deduped: true,
+        message:
+          bootstrapStatus === 'activation_retry_scheduled'
+            ? 'Campaign activation is waiting for its retry window.'
+            : 'Campaign activation is already in progress.',
+      };
+    }
+
+    const requestedAt = new Date();
+    const nextMetadata = {
+      ...metadata,
+      activation: {
+        ...activation,
+        version: activationVersion,
+        requestedAt: requestedAt.toISOString(),
+        bootstrapStatus: 'activation_requested',
+        lastError: null,
+        retryAt: null,
+        failedAt: null,
+        completedAt: null,
+        dedupeKey,
+      },
+    };
 
     const activatedCampaign = await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
-        status: 'ACTIVE',
-        generationState: 'ACTIVE',
+        status: 'READY',
+        generationState: 'TARGETING_READY',
+        metadataJson: toPrismaJson(nextMetadata),
       },
     });
 
@@ -186,13 +295,30 @@ export class CampaignsService {
         organizationId: activatedCampaign.organizationId,
         clientId: activatedCampaign.clientId,
         campaignId: activatedCampaign.id,
-        type: 'LEAD_IMPORT',
-        status: 'QUEUED',
+        type: JobType.LEAD_IMPORT,
+        status: JobStatus.QUEUED,
         queueName: 'activation',
-        scheduledFor: new Date(),
+        dedupeKey,
+        scheduledFor: requestedAt,
         payloadJson: {
           campaignId: activatedCampaign.id,
+          workflowRunId: activatedCampaign.workflowRunId ?? null,
+          activationVersion,
+          requestedAt: requestedAt.toISOString(),
         },
+      },
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: activatedCampaign.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...nextMetadata,
+          activation: {
+            ...this.asObject(nextMetadata.activation),
+            jobId: job.id,
+          },
+        }),
       },
     });
 
@@ -208,6 +334,37 @@ export class CampaignsService {
       });
     });
 
-    return { ok: true, jobId: job.id };
+    return {
+      ok: true,
+      status: 'activating',
+      generationState: 'TARGETING_READY',
+      bootstrapStatus: 'activation_requested',
+      jobId: job.id,
+      deduped: false,
+      message: 'Campaign activation has started. We are preparing the first lead bootstrap now.',
+    };
+  }
+
+  private asObject(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  }
+
+  private readPositiveInt(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  private readString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim().length ? value.trim() : null;
   }
 }
