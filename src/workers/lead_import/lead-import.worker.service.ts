@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   ContactEmailStatus,
   Job,
@@ -21,7 +21,6 @@ import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 @Injectable()
 export class LeadImportWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.LEAD_IMPORT];
-  private readonly logger = new Logger(LeadImportWorkerService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -43,6 +42,16 @@ export class LeadImportWorkerService implements JobWorker {
       throw new NotFoundException(`Campaign ${campaignId} not found`);
     }
 
+    const existingVisibleLeads = await this.prisma.lead.findMany({
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+      },
+      select: { id: true },
+      take: 25,
+      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+    });
+
     const existingSendableLeads = await this.prisma.lead.findMany({
       where: {
         campaignId: campaign.id,
@@ -55,7 +64,7 @@ export class LeadImportWorkerService implements JobWorker {
     });
 
     let createdLeadIds: string[] = [];
-    if (!existingSendableLeads.length) {
+    if (!existingVisibleLeads.length) {
       createdLeadIds = await this.bootstrapLeadsFromClientAssets({
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
@@ -68,10 +77,24 @@ export class LeadImportWorkerService implements JobWorker {
       });
     }
 
-    const candidateLeadIds = [...existingSendableLeads.map((item) => item.id), ...createdLeadIds].slice(0, 25);
+    const visibleLeadIds = [...existingVisibleLeads.map((item) => item.id), ...createdLeadIds].slice(0, 25);
+
+    const sendableLeads = visibleLeadIds.length
+      ? await this.prisma.lead.findMany({
+          where: {
+            id: { in: visibleLeadIds },
+            contact: { email: { not: null } },
+          },
+          select: { id: true },
+          take: 25,
+          orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+        })
+      : [];
+
+    const sendableLeadIds = sendableLeads.map((item) => item.id);
 
     const queuedMessageGenerationJobIds: string[] = [];
-    for (const leadId of candidateLeadIds) {
+    for (const leadId of sendableLeadIds) {
       const dedupeKey = `first_send:${leadId}`;
       const existing = await this.prisma.job.findFirst({
         where: {
@@ -106,18 +129,23 @@ export class LeadImportWorkerService implements JobWorker {
     await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
-        status: candidateLeadIds.length ? 'ACTIVE' : 'READY',
-        generationState: candidateLeadIds.length ? 'ACTIVE' : 'TARGETING_READY',
+        status: visibleLeadIds.length ? 'ACTIVE' : 'READY',
+        generationState: visibleLeadIds.length ? 'LEADS_READY' : 'TARGETING_READY',
         metadataJson: toPrismaJson({
           ...this.asObject(campaign.metadataJson),
           activation: {
             lastBootstrapAt: new Date().toISOString(),
-            bootstrapStatus: candidateLeadIds.length ? 'launch_queued' : 'blocked_no_sendable_leads',
+            bootstrapStatus: queuedMessageGenerationJobIds.length
+              ? 'launch_queued'
+              : visibleLeadIds.length
+              ? 'leads_discovered_no_sendable'
+              : 'blocked_no_sendable_leads',
             createdLeadCount: createdLeadIds.length,
+            visibleLeadCount: visibleLeadIds.length,
             queuedFirstSendCount: queuedMessageGenerationJobIds.length,
-            blockedReason: candidateLeadIds.length
+            blockedReason: visibleLeadIds.length
               ? null
-              : 'No sendable leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
+              : 'No leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
           },
         }),
       },
@@ -129,7 +157,7 @@ export class LeadImportWorkerService implements JobWorker {
       createdLeadCount: createdLeadIds.length,
       queuedFirstSendCount: queuedMessageGenerationJobIds.length,
       queuedJobIds: queuedMessageGenerationJobIds,
-      waitingForLeadSource: candidateLeadIds.length === 0,
+      waitingForLeadSource: visibleLeadIds.length === 0,
     };
   }
 
@@ -289,22 +317,14 @@ export class LeadImportWorkerService implements JobWorker {
       return apolloLeadIds;
     }
 
-    try {
-      const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
-        clientId: input.clientId,
-        campaignId: input.campaignId,
-        workflowRunId: input.workflowRunId,
-        workflowTitle: 'Automatic client launch',
-      });
+    const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
+      clientId: input.clientId,
+      campaignId: input.campaignId,
+      workflowRunId: input.workflowRunId,
+      workflowTitle: 'Automatic client launch',
+    });
 
-      return aiBootstrap.sendableLeadIds ?? [];
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(
-        `AI bootstrap failed for campaign ${input.campaignId}; continuing without AI-generated leads. ${message}`,
-      );
-      return [];
-    }
+    return aiBootstrap.sendableLeadIds ?? [];
   }
 
   private async importApolloProspects(input: {
@@ -384,9 +404,10 @@ export class LeadImportWorkerService implements JobWorker {
     prospect: ExternalLeadCandidate;
   }) {
     const email = this.readString(input.prospect.email)?.toLowerCase() ?? null;
-    if (!email) {
-      return null;
-    }
+    const contactFullName =
+      this.readString(input.prospect.contactFullName) ??
+      [this.readString(input.prospect.firstName), this.readString(input.prospect.lastName)].filter(Boolean).join(' ') ||
+      'Apollo Contact';
 
     let accountId: string | null = null;
     const normalizedDomain = this.normalizeDomain(input.prospect.domain);
@@ -431,16 +452,19 @@ export class LeadImportWorkerService implements JobWorker {
       accountId = account.id;
     }
 
+    const contactMatchClauses: Prisma.ContactWhereInput[] = [];
+    if (email) {
+      contactMatchClauses.push({ email });
+    }
+    contactMatchClauses.push({
+      fullName: contactFullName,
+      ...(accountId ? { accountId } : {}),
+    });
+
     const existingContact = await this.prisma.contact.findFirst({
       where: {
         clientId: input.clientId,
-        OR: [
-          { email },
-          {
-            fullName: input.prospect.contactFullName,
-            ...(accountId ? { accountId } : {}),
-          },
-        ],
+        OR: contactMatchClauses,
       },
       select: { id: true },
     });
@@ -455,10 +479,10 @@ export class LeadImportWorkerService implements JobWorker {
           accountId: accountId ?? undefined,
           firstName: this.readString(input.prospect.firstName) ?? undefined,
           lastName: this.readString(input.prospect.lastName) ?? undefined,
-          fullName: input.prospect.contactFullName,
+          fullName: contactFullName,
           title: this.readString(input.prospect.title) ?? undefined,
-          email,
-          emailStatus: this.mapEmailStatus(input.prospect.emailStatus),
+          email: email ?? undefined,
+          emailStatus: email ? this.mapEmailStatus(input.prospect.emailStatus) : undefined,
           linkedinUrl: this.readString(input.prospect.linkedinUrl) ?? undefined,
           timezone: this.readString(input.prospect.timezone) ?? undefined,
           city: this.readString(input.prospect.city) ?? undefined,
