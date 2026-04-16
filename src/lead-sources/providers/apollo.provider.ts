@@ -79,8 +79,25 @@ export class ApolloProvider implements LeadSourceProviderContract {
   }
 
   async search(input: LeadSourceSearchInput): Promise<ExternalLeadSearchResult> {
-    const maxResults = this.clamp(input.targeting.maxResults, 1, 25);
-    const searchPeople = await this.searchPeople(input, Math.min(maxResults, 25));
+    const maxResults = this.clamp(input.targeting.maxResults, 1, 10);
+
+    let searchPeople = await this.searchPeople(input, Math.min(maxResults, 10), {
+      includeIndustries: true,
+      includeSeniorities: true,
+      includeEmployeeRanges: false,
+      includeKeywords: true,
+    });
+
+    // One controlled fallback pass only if the strict pass returns nothing.
+    if (!searchPeople.length) {
+      searchPeople = await this.searchPeople(input, Math.min(maxResults, 10), {
+        includeIndustries: false,
+        includeSeniorities: true,
+        includeEmployeeRanges: false,
+        includeKeywords: false,
+      });
+    }
+
     if (!searchPeople.length) {
       return {
         provider: this.provider,
@@ -103,6 +120,10 @@ export class ApolloProvider implements LeadSourceProviderContract {
       .map((item, index) => this.toLeadCandidate(item, index, input))
       .filter((item): item is ExternalLeadCandidate => Boolean(item));
 
+    this.logger.log(
+      `Apollo search produced ${searchPeople.length} candidate people and ${prospects.length} mapped prospects (${prospects.filter((item) => Boolean(item.email)).length} with email).`,
+    );
+
     return {
       provider: this.provider,
       providerRef: 'apollo:mixed_people/api_search',
@@ -119,31 +140,46 @@ export class ApolloProvider implements LeadSourceProviderContract {
     };
   }
 
-  private async searchPeople(input: LeadSourceSearchInput, perPage: number): Promise<ApolloApiSearchPerson[]> {
+  private async searchPeople(
+    input: LeadSourceSearchInput,
+    perPage: number,
+    options: {
+      includeIndustries: boolean;
+      includeSeniorities: boolean;
+      includeEmployeeRanges: boolean;
+      includeKeywords: boolean;
+    },
+  ): Promise<ApolloApiSearchPerson[]> {
     const url = new URL(`${this.baseUrl}/mixed_people/api_search`);
-    const titles = this.uniqueNonEmpty(input.targeting.titleKeywords).slice(0, 10);
-    const geoTargets = this.uniqueNonEmpty(input.targeting.geoTargets).slice(0, 10);
-    const industries = this.uniqueNonEmpty(input.targeting.industries).slice(0, 5);
-    const employeeRanges = this.uniqueNonEmpty(input.targeting.employeeRanges).slice(0, 5);
-    const seniorities = this.uniqueNonEmpty(input.targeting.seniorities).slice(0, 5);
+    const titles = this.uniqueNonEmpty(input.targeting.titleKeywords).slice(0, 8);
+    const geoTargets = this.uniqueNonEmpty(input.targeting.geoTargets).slice(0, 8);
+    const industries = this.uniqueNonEmpty(input.targeting.industries).slice(0, 3);
+    const employeeRanges = this.uniqueNonEmpty(input.targeting.employeeRanges).slice(0, 3);
+    const seniorities = this.uniqueNonEmpty(input.targeting.seniorities).slice(0, 3);
 
     for (const title of titles) url.searchParams.append('person_titles[]', title);
     for (const location of geoTargets) url.searchParams.append('organization_locations[]', location);
-    for (const industry of industries) url.searchParams.append('organization_industries[]', industry);
-    for (const range of employeeRanges) url.searchParams.append('organization_num_employees_ranges[]', range);
-    for (const seniority of seniorities) url.searchParams.append('person_seniorities[]', seniority);
+    if (options.includeIndustries) {
+      for (const industry of industries) url.searchParams.append('organization_industries[]', industry);
+    }
+    if (options.includeEmployeeRanges) {
+      for (const range of employeeRanges) url.searchParams.append('organization_num_employees_ranges[]', range);
+    }
+    if (options.includeSeniorities) {
+      for (const seniority of seniorities) url.searchParams.append('person_seniorities[]', seniority);
+    }
+
     url.searchParams.set('include_similar_titles', 'true');
-    url.searchParams.set('contact_email_status[]', 'verified');
     url.searchParams.set('page', '1');
     url.searchParams.set('per_page', String(perPage));
 
-    const keywords = this.buildKeywordQuery(input);
+    const keywords = options.includeKeywords ? this.buildKeywordQuery(input) : '';
     if (keywords) {
       url.searchParams.set('q_keywords', keywords);
     }
 
     const response = await fetch(url, {
-      method: 'POST',
+      method: 'GET',
       headers: this.headers(),
     });
 
@@ -154,7 +190,13 @@ export class ApolloProvider implements LeadSourceProviderContract {
     }
 
     const payload = (await response.json()) as ApolloApiSearchResponse;
-    return Array.isArray(payload.people) ? payload.people : [];
+    const people = Array.isArray(payload.people) ? payload.people : [];
+
+    this.logger.log(
+      `Apollo people search returned ${people.length} results (titles=${titles.length}, geos=${geoTargets.length}, industries=${options.includeIndustries ? industries.length : 0}, seniorities=${options.includeSeniorities ? seniorities.length : 0}, keywords=${keywords ? 'yes' : 'no'}).`,
+    );
+
+    return people;
   }
 
   private async bulkEnrichPeople(items: ApolloApiSearchPerson[]): Promise<ApolloBulkMatchResponseItem[]> {
@@ -243,9 +285,10 @@ export class ApolloProvider implements LeadSourceProviderContract {
       companyName,
       domain,
       industry,
-      employeeCount: typeof person.organization?.estimated_num_employees === 'number'
-        ? person.organization.estimated_num_employees
-        : undefined,
+      employeeCount:
+        typeof person.organization?.estimated_num_employees === 'number'
+          ? person.organization.estimated_num_employees
+          : undefined,
       contactFullName: fullName,
       firstName,
       lastName,
@@ -272,11 +315,10 @@ export class ApolloProvider implements LeadSourceProviderContract {
 
   private buildKeywordQuery(input: LeadSourceSearchInput) {
     const terms = this.uniqueNonEmpty([
-      input.targeting.industry,
       input.targeting.offerSummary,
       input.targeting.objective,
       ...input.targeting.exclusionKeywords.map((item) => `-${item}`),
-    ]).slice(0, 8);
+    ]).slice(0, 6);
     return terms.join(' ');
   }
 
