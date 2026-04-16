@@ -179,8 +179,9 @@ export class ApolloProvider implements LeadSourceProviderContract {
     }
 
     const response = await fetch(url, {
-      method: 'GET',
+      method: 'POST',
       headers: this.headers(),
+      body: JSON.stringify({}),
     });
 
     if (!response.ok) {
