@@ -455,8 +455,8 @@ export class AiService {
       exclusionKeywords: [],
       painPoints: this.derivePainPoints(client.outboundOffer, client.industry),
       valueAngles: this.deriveValueAngles(client.outboundOffer),
-      tone: serviceProfile.tone,
-      callToAction: serviceProfile.callToAction,
+      tone: serviceProfile.tone ?? 'professional',
+      callToAction: serviceProfile.callToAction ?? 'Open to a quick conversation?',
       bookingUrlOverride: serviceProfile.bookingUrl,
       segmentNotes: undefined,
     });
