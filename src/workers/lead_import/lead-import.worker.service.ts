@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   ContactEmailStatus,
   Job,
@@ -21,6 +21,7 @@ import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 @Injectable()
 export class LeadImportWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.LEAD_IMPORT];
+  private readonly logger = new Logger(LeadImportWorkerService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -288,14 +289,22 @@ export class LeadImportWorkerService implements JobWorker {
       return apolloLeadIds;
     }
 
-    const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
-      clientId: input.clientId,
-      campaignId: input.campaignId,
-      workflowRunId: input.workflowRunId,
-      workflowTitle: 'Automatic client launch',
-    });
+    try {
+      const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
+        clientId: input.clientId,
+        campaignId: input.campaignId,
+        workflowRunId: input.workflowRunId,
+        workflowTitle: 'Automatic client launch',
+      });
 
-    return aiBootstrap.sendableLeadIds ?? [];
+      return aiBootstrap.sendableLeadIds ?? [];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `AI bootstrap failed for campaign ${input.campaignId}; continuing without AI-generated leads. ${message}`,
+      );
+      return [];
+    }
   }
 
   private async importApolloProspects(input: {
