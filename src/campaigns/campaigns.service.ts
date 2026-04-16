@@ -7,7 +7,7 @@ import {
   WorkflowTrigger,
   WorkflowType,
 } from '@prisma/client';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
@@ -18,6 +18,8 @@ import { ListCampaignsDto } from './dto/list-campaigns.dto';
 
 @Injectable()
 export class CampaignsService {
+  private readonly logger = new Logger(CampaignsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly workflowsService: WorkflowsService,
@@ -171,7 +173,7 @@ export class CampaignsService {
       return { ok: true, alreadyActive: true };
     }
 
-    await this.prisma.campaign.update({
+    const activatedCampaign = await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
         status: 'ACTIVE',
@@ -181,22 +183,29 @@ export class CampaignsService {
 
     const job = await this.prisma.job.create({
       data: {
-        organizationId: campaign.organizationId,
-        clientId: campaign.clientId,
-        campaignId: campaign.id,
+        organizationId: activatedCampaign.organizationId,
+        clientId: activatedCampaign.clientId,
+        campaignId: activatedCampaign.id,
         type: 'LEAD_IMPORT',
         status: 'QUEUED',
         queueName: 'activation',
         scheduledFor: new Date(),
         payloadJson: {
-          campaignId: campaign.id,
+          campaignId: activatedCampaign.id,
         },
       },
     });
 
-    await this.workersService.run(job, {
-      workflowRunId: campaign.workflowRunId ?? undefined,
+    const context = {
+      workflowRunId: activatedCampaign.workflowRunId ?? undefined,
       payload: ((job.payloadJson ?? {}) as Record<string, unknown>) || {},
+    };
+
+    setImmediate(() => {
+      void this.workersService.run(job, context).catch((error: unknown) => {
+        const message = error instanceof Error ? error.stack ?? error.message : String(error);
+        this.logger.error(`Failed to process activation job ${job.id}`, message);
+      });
     });
 
     return { ok: true, jobId: job.id };
