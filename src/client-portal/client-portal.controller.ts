@@ -21,6 +21,12 @@ export class ClientPortalController {
     return this.clientPortalService.overview(context.organizationId!, context.clientId!);
   }
 
+  @Get('leads')
+  async leads(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.clientPortalService.leads(context.organizationId!, context.clientId!);
+  }
+
   @Get('invoices')
   async invoices(@Headers() headers: Record<string, unknown>) {
     const context = await this.accessContextService.requireClient(headers);
