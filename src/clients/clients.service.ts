@@ -704,7 +704,10 @@ export class ClientsService {
       clientId: client.id,
       organizationId: client.organizationId,
       campaignId: campaign.id,
-      jobId: activation.jobId ?? refreshedCampaign?.activation.jobId ?? null,
+      jobId: 
+        ('jobId' in activation ? activation.jobId : null) ??
+        refreshedCampaign?.activation?.jobId ?? 
+        null,
       alreadyActive:
         Boolean((activation as any).alreadyActive) ||
         (typeof activation.status === 'string' && activation.status.toLowerCase() == 'active'),
@@ -911,7 +914,10 @@ export class ClientsService {
       clientId: client.id,
       organizationId: client.organizationId,
       campaignId: campaign.id,
-      jobId: activation.jobId ?? refreshedCampaign?.activation.jobId ?? null,
+      jobId: 
+        ('jobId' in activation ? activation.jobId : null) ??
+        refreshedCampaign?.activation?.jobId ?? 
+        null,
       generationState: refreshedCampaign?.generationState ?? (activation.generationState ?? null),
       bootstrapStatus:
         refreshedCampaign?.activation.bootstrapStatus ??
