@@ -229,18 +229,30 @@ export class ExecutionService implements OnModuleInit {
       };
     }
 
-    if (job.status !== JobStatus.QUEUED && job.status !== JobStatus.RETRY_SCHEDULED) {
-      throw new BadRequestException(`Job ${job.id} is not runnable from status ${job.status}`);
-    }
-
-    await this.prisma.job.update({
-      where: { id: job.id },
+    const startedAt = new Date();
+    const claim = await this.prisma.job.updateMany({
+      where: {
+        id: job.id,
+        status: { in: [JobStatus.QUEUED, JobStatus.RETRY_SCHEDULED] },
+      },
       data: {
         status: JobStatus.RUNNING,
-        startedAt: new Date(),
+        startedAt,
         attemptCount: { increment: 1 },
       },
     });
+
+    if (claim.count === 0) {
+      const current = await this.prisma.job.findUnique({ where: { id: job.id } });
+      throw new BadRequestException(
+        `Job ${job.id} is not runnable from status ${current?.status ?? job.status}`,
+      );
+    }
+
+    const claimedJob = await this.prisma.job.findUnique({ where: { id: job.id } });
+    if (!claimedJob) {
+      throw new NotFoundException(`Job ${job.id} not found after claim`);
+    }
 
     if (workflowRunId) {
       await this.workflowsService.startWorkflowRun(workflowRunId, {
@@ -262,9 +274,9 @@ export class ExecutionService implements OnModuleInit {
         data: {
           jobId: job.id,
           workflowRunId,
-          runNumber: (job.attemptCount || 0) + 1,
+          runNumber: claimedJob.attemptCount || 1,
           status: JobStatus.SUCCEEDED,
-          startedAt: job.startedAt ?? new Date(),
+          startedAt: claimedJob.startedAt ?? startedAt,
           finishedAt: new Date(),
           logJson: result as Prisma.InputJsonValue,
         },
@@ -297,16 +309,16 @@ export class ExecutionService implements OnModuleInit {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown execution error';
-      const shouldRetry = job.attemptCount + 1 < job.maxAttempts;
+      const shouldRetry = claimedJob.attemptCount < claimedJob.maxAttempts;
       const retryAt = shouldRetry ? new Date(Date.now() + 15 * 60 * 1000) : null;
 
       await this.prisma.jobRun.create({
         data: {
           jobId: job.id,
           workflowRunId,
-          runNumber: (job.attemptCount || 0) + 1,
+          runNumber: claimedJob.attemptCount || 1,
           status: shouldRetry ? JobStatus.RETRY_SCHEDULED : JobStatus.FAILED,
-          startedAt: job.startedAt ?? new Date(),
+          startedAt: claimedJob.startedAt ?? startedAt,
           finishedAt: new Date(),
           errorMessage: message,
         },

@@ -48,34 +48,64 @@ export class LeadImportWorkerService implements JobWorker {
     const campaignMetadata = this.asObject(campaign.metadataJson);
     const activation = this.asObject(campaignMetadata.activation);
     const activationBootstrapStatus = this.readString(activation.bootstrapStatus);
-    const terminalBootstrapStates = new Set([
-      'launch_queued',
-      'leads_ready_non_sendable',
-      'blocked_no_sendable_leads',
-      'activation_completed',
-    ]);
+    const activationJobId = this.readString(activation.jobId) ?? this.readString(activation.currentJobId);
 
-    if (!terminalBootstrapStates.has(activationBootstrapStatus ?? '')) {
-      await this.prisma.campaign.update({
-        where: { id: campaign.id },
-        data: {
-          status: 'READY',
-          generationState: 'TARGETING_READY',
-          metadataJson: toPrismaJson({
-            ...campaignMetadata,
-            activation: {
-              ...activation,
-              bootstrapStatus: 'activation_in_progress',
-              jobId: job.id,
-              lastJobId: job.id,
-              lastBootstrapAt: new Date().toISOString(),
-              retryAt: null,
-              failedAt: null,
-            },
-          }),
-        },
-      });
+    if (activationJobId && activationJobId !== job.id) {
+      this.logger.log(
+        `Skipping lead import for campaign ${campaign.id}; activation is owned by job ${activationJobId}.`,
+      );
+      return {
+        ok: true,
+        campaignId: campaign.id,
+        createdLeadCount: 0,
+        visibleLeadCount: 0,
+        sendableLeadCount: 0,
+        queuedFirstSendCount: 0,
+        queuedJobIds: [],
+        waitingForLeadSource: false,
+      };
     }
+
+    if (
+      activationBootstrapStatus &&
+      ['activation_completed', 'launch_queued', 'leads_ready_non_sendable', 'blocked_no_sendable_leads'].includes(
+        activationBootstrapStatus,
+      )
+    ) {
+      this.logger.log(
+        `Skipping lead import for campaign ${campaign.id}; bootstrap already settled at ${activationBootstrapStatus}.`,
+      );
+      return {
+        ok: true,
+        campaignId: campaign.id,
+        createdLeadCount: 0,
+        visibleLeadCount: 0,
+        sendableLeadCount: 0,
+        queuedFirstSendCount: 0,
+        queuedJobIds: [],
+        waitingForLeadSource: activationBootstrapStatus === 'blocked_no_sendable_leads',
+      };
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...campaignMetadata,
+          activation: {
+            ...activation,
+            jobId: job.id,
+            currentJobId: job.id,
+            bootstrapStatus: 'activation_in_progress',
+            startedAt: new Date().toISOString(),
+            lastError: null,
+            retryAt: null,
+            failedAt: null,
+            bootstrapSkippedReason: null,
+          },
+        }),
+      },
+    });
 
     const existingVisibleLeads = await this.prisma.lead.findMany({
       where: {
@@ -88,19 +118,7 @@ export class LeadImportWorkerService implements JobWorker {
     });
 
     let createdLeadIds: string[] = [];
-    let bootstrapSkippedReason: string | null = null;
-
-    if (existingVisibleLeads.length) {
-      bootstrapSkippedReason = 'visible_leads_already_exist';
-      this.logger.log(
-        `Lead import bootstrap skipped for campaign ${campaign.id} because ${existingVisibleLeads.length} visible leads already exist.`,
-      );
-    } else if (terminalBootstrapStates.has(activationBootstrapStatus ?? '')) {
-      bootstrapSkippedReason = activationBootstrapStatus ?? 'terminal_bootstrap_state';
-      this.logger.log(
-        `Lead import bootstrap skipped for campaign ${campaign.id} because activation is already in terminal state: ${bootstrapSkippedReason}.`,
-      );
-    } else {
+    if (!existingVisibleLeads.length) {
       createdLeadIds = await this.bootstrapLeadsFromClientAssets({
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
@@ -173,11 +191,6 @@ export class LeadImportWorkerService implements JobWorker {
 
     const visibleLeadCount = visibleLeads.length;
     const sendableLeadCount = candidateLeadIds.length;
-    const completedBootstrapStatus = sendableLeadCount
-      ? 'launch_queued'
-      : visibleLeadCount
-        ? 'leads_ready_non_sendable'
-        : 'blocked_no_sendable_leads';
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
@@ -192,20 +205,24 @@ export class LeadImportWorkerService implements JobWorker {
           ...campaignMetadata,
           activation: {
             ...activation,
-            lastBootstrapAt: new Date().toISOString(),
-            bootstrapStatus: completedBootstrapStatus,
             jobId: job.id,
-            lastJobId: job.id,
+            currentJobId: job.id,
+            lastBootstrapAt: new Date().toISOString(),
+            bootstrapStatus: sendableLeadCount
+              ? 'launch_queued'
+              : visibleLeadCount
+                ? 'leads_ready_non_sendable'
+                : 'blocked_no_sendable_leads',
             createdLeadCount: createdLeadIds.length,
             visibleLeadCount,
             sendableLeadCount,
             queuedFirstSendCount: queuedMessageGenerationJobIds.length,
+            completedAt: sendableLeadCount ? new Date().toISOString() : null,
             blockedReason: sendableLeadCount
               ? null
               : visibleLeadCount
                 ? 'Leads were discovered, but no contact email was available yet.'
                 : 'No visible leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
-            bootstrapSkippedReason,
           },
         }),
       },

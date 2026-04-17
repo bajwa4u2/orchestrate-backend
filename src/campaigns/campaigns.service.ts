@@ -14,7 +14,6 @@ import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowsService } from '../workflows/workflows.service';
-import { WorkersService } from '../workers/workers.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { ListCampaignsDto } from './dto/list-campaigns.dto';
 
@@ -25,7 +24,6 @@ export class CampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workflowsService: WorkflowsService,
-    private readonly workersService: WorkersService,
   ) {}
 
   async create(dto: CreateCampaignDto) {
@@ -320,18 +318,6 @@ export class CampaignsService {
           },
         }),
       },
-    });
-
-    const context = {
-      workflowRunId: activatedCampaign.workflowRunId ?? undefined,
-      payload: ((job.payloadJson ?? {}) as Record<string, unknown>) || {},
-    };
-
-    setImmediate(() => {
-      void this.workersService.run(job, context).catch((error: unknown) => {
-        const message = error instanceof Error ? error.stack ?? error.message : String(error);
-        this.logger.error(`Failed to process activation job ${job.id}`, message);
-      });
     });
 
     return {
