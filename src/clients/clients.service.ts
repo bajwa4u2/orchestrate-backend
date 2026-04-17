@@ -387,12 +387,18 @@ export class ClientsService {
     const setup = this.asObject(metadata.setup);
     const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
     const commercial = await this.resolveCommercialState(client.id);
-    const campaign = await this.findPrimaryAutomationCampaign(client.organizationId, client.id);
+    const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, scope);
+    const campaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
 
     return {
       success: true,
       clientId: client.id,
       organizationId: client.organizationId,
+      status: campaign?.status.toLowerCase() ?? 'ready',
+      generationState: campaign?.generationState ?? null,
+      bootstrapStatus: campaign?.activation.bootstrapStatus ?? null,
+      jobId: campaign?.activation.jobId ?? null,
+      campaign,
       campaignProfile: {
         serviceType: scope.lane,
         scopeMode: scope.mode,
@@ -405,8 +411,10 @@ export class ClientsService {
         priorityMarkets: scope.priorityMarkets,
         notes: scope.notes,
         recommendedPlan: scope.recommendedPlan,
-        subscriptionAlignment: this.buildSubscriptionAlignment(commercial, scope),
-        campaign: this.buildCampaignActivationPayload(campaign),
+        subscriptionAlignment,
+        generationState: campaign?.generationState ?? null,
+        metadataJson: campaign?.metadataJson ?? null,
+        activation: campaign?.activation ?? null,
       },
     };
   }
@@ -555,7 +563,6 @@ export class ClientsService {
         message: 'Activate a valid subscription before starting this campaign.',
         campaignId: null,
         jobId: null,
-        campaign: null,
       };
     }
 
@@ -568,7 +575,6 @@ export class ClientsService {
         message: this.buildUpgradeMessage(scope, subscriptionAlignment),
         campaignId: null,
         jobId: null,
-        campaign: null,
       };
     }
 
@@ -586,7 +592,7 @@ export class ClientsService {
       notes: scope.notes,
     });
 
-    if (effectiveLane !== scope.lane) {
+    if (effectiveLane != scope.lane) {
       await this.prisma.client.update({
         where: { id: client.id },
         data: {
@@ -607,7 +613,15 @@ export class ClientsService {
       });
     }
 
-    let campaign = await this.findPrimaryAutomationCampaign(client.organizationId, client.id);
+    let campaign = await this.prisma.campaign.findFirst({
+      where: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        code: 'PRIMARY_AUTOMATION',
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: { id: true, status: true },
+    });
 
     if (!campaign) {
       const created = await this.campaignsService.create({
@@ -637,95 +651,58 @@ export class ClientsService {
         },
       } as any);
 
-      campaign = await this.findPrimaryAutomationCampaign(client.organizationId, client.id, created.id);
+      campaign = { id: created.id, status: created.status };
     }
 
     const activation = await this.campaignsService.activateCampaign({
-      campaignId: campaign!.id,
+      campaignId: campaign.id,
       organizationId: client.organizationId,
     });
 
-    const refreshedCampaign =
-      (await this.findPrimaryAutomationCampaign(client.organizationId, client.id, campaign!.id)) ?? campaign;
+    const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
 
     return {
       success: true,
-      status: activation.status,
+      status: typeof activation.status === 'string' ? activation.status : 'activating',
       clientId: client.id,
       organizationId: client.organizationId,
-      campaignId: refreshedCampaign?.id ?? campaign!.id,
-      generationState: activation.generationState ?? refreshedCampaign?.generationState ?? null,
-      bootstrapStatus: activation.bootstrapStatus ?? null,
-      jobId: activation.jobId ?? null,
-      deduped: Boolean(activation.deduped),
-      message: activation.message,
-      campaign: this.buildCampaignActivationPayload(refreshedCampaign),
+      campaignId: campaign.id,
+      jobId: activation.jobId ?? refreshedCampaign?.activation.jobId ?? null,
+      alreadyActive:
+        Boolean((activation as any).alreadyActive) ||
+        (typeof activation.status === 'string' && activation.status.toLowerCase() == 'active'),
+      generationState: refreshedCampaign?.generationState ?? (activation.generationState ?? null),
+      bootstrapStatus:
+        refreshedCampaign?.activation.bootstrapStatus ??
+        (typeof activation.bootstrapStatus === 'string' ? activation.bootstrapStatus : null),
+      message:
+        typeof activation.message === 'string' && activation.message.trim().length
+          ? activation.message
+          : Boolean((activation as any).alreadyActive)
+            ? 'Your campaign is already running.'
+            : 'Your campaign activation has started. We are preparing leads now.',
+      campaign: refreshedCampaign,
+      campaignProfile: {
+        serviceType: effectiveScope.lane,
+        scopeMode: effectiveScope.mode,
+        countries: effectiveScope.countries,
+        regions: effectiveScope.regions,
+        metros: effectiveScope.metros,
+        industries: effectiveScope.industries,
+        includeGeo: effectiveScope.includeGeo,
+        excludeGeo: effectiveScope.excludeGeo,
+        priorityMarkets: effectiveScope.priorityMarkets,
+        notes: effectiveScope.notes,
+        recommendedPlan: effectiveScope.recommendedPlan,
+        subscriptionAlignment,
+        generationState:
+          refreshedCampaign?.generationState ?? (activation.generationState ?? null),
+        metadataJson: refreshedCampaign?.metadataJson ?? null,
+        activation: refreshedCampaign?.activation ?? null,
+      },
     };
   }
 
-
-
-  private async findPrimaryAutomationCampaign(
-    organizationId: string,
-    clientId: string,
-    preferredCampaignId?: string,
-  ) {
-    if (preferredCampaignId) {
-      const preferred = await this.prisma.campaign.findFirst({
-        where: {
-          id: preferredCampaignId,
-          organizationId,
-          clientId,
-        },
-      });
-      if (preferred) return preferred;
-    }
-
-    return this.prisma.campaign.findFirst({
-      where: {
-        organizationId,
-        clientId,
-        code: 'PRIMARY_AUTOMATION',
-      },
-      orderBy: [{ updatedAt: 'desc' }],
-    });
-  }
-
-  private buildCampaignActivationPayload(
-    campaign:
-      | {
-          id: string;
-          status: string;
-          generationState: string | null;
-          metadataJson: unknown;
-          updatedAt?: Date;
-        }
-      | null
-      | undefined,
-  ) {
-    if (!campaign) return null;
-
-    const metadata = this.asObject(campaign.metadataJson);
-    const activation = this.asObject(metadata.activation);
-
-    return {
-      id: campaign.id,
-      status: campaign.status,
-      generationState: campaign.generationState,
-      activation: {
-        version: this.readPositiveInt(activation.version),
-        bootstrapStatus: this.readString(activation.bootstrapStatus),
-        requestedAt: this.readString(activation.requestedAt),
-        retryAt: this.readString(activation.retryAt),
-        completedAt: this.readString(activation.completedAt),
-        failedAt: this.readString(activation.failedAt),
-        jobId: this.readString(activation.jobId),
-        dedupeKey: this.readString(activation.dedupeKey),
-        lastError: this.readString(activation.lastError),
-      },
-      updatedAt: campaign.updatedAt?.toISOString() ?? null,
-    };
-  }
   private buildUpgradeMessage(
     scope: ScopeJson,
     subscriptionAlignment?: {
@@ -767,6 +744,56 @@ export class ClientsService {
       ? `We are finding ${industry} prospects and preparing outreach using your saved targeting.`
       : 'We are finding prospects and preparing outreach using your saved targeting.';
   }
+  private async findPrimaryCampaignSnapshot(organizationId: string, clientId: string) {
+    const campaign = await this.prisma.campaign.findFirst({
+      where: {
+        organizationId,
+        clientId,
+        code: 'PRIMARY_AUTOMATION',
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        status: true,
+        generationState: true,
+        metadataJson: true,
+        updatedAt: true,
+        createdAt: true,
+      },
+    });
+
+    if (!campaign) {
+      return null;
+    }
+
+    const metadata = this.asObject(campaign.metadataJson);
+    const activation = this.asObject(metadata.activation);
+
+    return {
+      id: campaign.id,
+      code: campaign.code,
+      name: campaign.name,
+      status: campaign.status,
+      generationState: campaign.generationState,
+      metadataJson: metadata,
+      activation: {
+        version: this.readPositiveInt(activation.version),
+        bootstrapStatus: this.readString(activation.bootstrapStatus),
+        requestedAt: this.readString(activation.requestedAt),
+        completedAt: this.readString(activation.completedAt),
+        failedAt: this.readString(activation.failedAt),
+        retryAt: this.readString(activation.retryAt),
+        lastError: this.readString(activation.lastError),
+        dedupeKey: this.readString(activation.dedupeKey),
+        jobId: this.readString(activation.jobId),
+      },
+      updatedAt: campaign.updatedAt,
+      createdAt: campaign.createdAt,
+    };
+  }
+
 
   private buildProfileResponse(client: any) {
     const metadata = this.asObject(client.metadataJson);
@@ -1091,6 +1118,19 @@ export class ClientsService {
     return normalized.length ? normalized : null;
   }
 
+  private readPositiveInt(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
   private readStructuredScope(value: unknown): ScopeJson {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       return this.buildScopeJson({
@@ -1208,20 +1248,6 @@ export class ClientsService {
       industries.push({ code, label });
     }
     return industries;
-  }
-
-
-  private readPositiveInt(value: unknown): number | null {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      return Math.floor(value);
-    }
-    if (typeof value === 'string') {
-      const parsed = Number.parseInt(value, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        return parsed;
-      }
-    }
-    return null;
   }
 
   private async resolveCommercialState(clientId: string) {
