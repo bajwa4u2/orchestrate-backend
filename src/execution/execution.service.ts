@@ -536,7 +536,7 @@ export class ExecutionService implements OnModuleInit {
         data: {
           status: JobStatus.CANCELED,
           finishedAt: new Date(),
-          lasterror: `Canceled by campaign governor: ${reason}`,
+          lastError: `Canceled by campaign governor: ${reason}`,
         },
       }),
     ]);

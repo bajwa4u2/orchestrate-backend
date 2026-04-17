@@ -395,7 +395,7 @@ export class CampaignsService {
         data: {
           status: JobStatus.CANCELED,
           finishedAt: requestedAt,
-          lasterror: 'Canceled by campaign restart with updated targeting.',
+          lastError: 'Canceled by campaign restart with updated targeting.',
         },
       });
 
