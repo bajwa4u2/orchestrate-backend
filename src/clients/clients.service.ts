@@ -768,7 +768,7 @@ export class ClientsService {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    const [sendable, queued, sentToday, replies, meetings, campaignRecord] = await Promise.all([
+    const [sendable, queued, sentToday, replies, meetings, campaignRecord, activeLeadImportJobs] = await Promise.all([
       this.prisma.lead.count({
         where: {
           organizationId,
@@ -815,6 +815,15 @@ export class ClientsService {
         where: { id: campaign.id },
         select: { dailySendCap: true, status: true },
       }),
+      this.prisma.job.count({
+        where: {
+          organizationId,
+          clientId,
+          campaignId: campaign.id,
+          type: JobType.LEAD_IMPORT,
+          status: { in: activeJobStatuses },
+        },
+      }),
     ]);
 
     const dailySendCap = campaignRecord?.dailySendCap ?? 30;
@@ -825,14 +834,20 @@ export class ClientsService {
 
     if (normalizedStatus === CampaignStatus.PAUSED) {
       health = 'PAUSED';
-    } else if (bootstrapStatus === 'activation_requested' || bootstrapStatus === 'activation_in_progress') {
+    } else if (
+      bootstrapStatus == 'activation_requested' ||
+      bootstrapStatus == 'activation_in_progress' ||
+      activeLeadImportJobs > 0
+    ) {
       health = 'REFILLING';
-    } else if (sendable < 5 && queued === 0) {
+    } else if (sendable == 0 && queued == 0) {
+      health = 'REFILLING';
+    } else if (sendable < 5 && queued == 0) {
       health = 'STALLED';
-    } else if (sendable < 10) {
-      health = 'REFILLING';
     } else if (queued >= dailySendCap) {
       health = 'SATURATED';
+    } else if (sendable < 10) {
+      health = 'REFILLING';
     }
 
     return {
