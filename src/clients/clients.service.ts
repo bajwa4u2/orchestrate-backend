@@ -4,7 +4,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, SubscriptionStatus } from '@prisma/client';
+import { CampaignStatus, JobStatus, JobType, LeadStatus, Prisma, SubscriptionStatus } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { AccessContextService } from '../access-context/access-context.service';
@@ -389,6 +389,9 @@ export class ClientsService {
     const commercial = await this.resolveCommercialState(client.id);
     const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, scope);
     const campaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
+    const campaignHealth = campaign
+      ? await this.buildCampaignHealthSnapshot(client.organizationId, client.id, campaign)
+      : null;
 
     return {
       success: true,
@@ -399,6 +402,8 @@ export class ClientsService {
       bootstrapStatus: campaign?.activation.bootstrapStatus ?? null,
       jobId: campaign?.activation.jobId ?? null,
       campaign,
+      health: campaignHealth?.health ?? null,
+      metrics: campaignHealth?.metrics ?? null,
       campaignProfile: {
         serviceType: scope.lane,
         scopeMode: scope.mode,
@@ -660,6 +665,9 @@ export class ClientsService {
     });
 
     const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
+    const campaignHealth = refreshedCampaign
+      ? await this.buildCampaignHealthSnapshot(client.organizationId, client.id, refreshedCampaign)
+      : null;
 
     return {
       success: true,
@@ -682,6 +690,8 @@ export class ClientsService {
             ? 'Your campaign is already running.'
             : 'Your campaign activation has started. We are preparing leads now.',
       campaign: refreshedCampaign,
+      health: campaignHealth?.health ?? null,
+      metrics: campaignHealth?.metrics ?? null,
       campaignProfile: {
         serviceType: effectiveScope.lane,
         scopeMode: effectiveScope.mode,
@@ -744,6 +754,100 @@ export class ClientsService {
       ? `We are finding ${industry} prospects and preparing outreach using your saved targeting.`
       : 'We are finding prospects and preparing outreach using your saved targeting.';
   }
+  private async buildCampaignHealthSnapshot(
+    organizationId: string,
+    clientId: string,
+    campaign: {
+      id: string;
+      status: string;
+      activation?: { bootstrapStatus?: string | null } | null;
+    },
+  ) {
+    const sendableStatuses = [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED];
+    const activeJobStatuses = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED];
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const [sendable, queued, sentToday, replies, meetings, campaignRecord] = await Promise.all([
+      this.prisma.lead.count({
+        where: {
+          organizationId,
+          clientId,
+          campaignId: campaign.id,
+          status: { in: sendableStatuses },
+          contact: { is: { email: { not: null } } },
+        },
+      }),
+      this.prisma.job.count({
+        where: {
+          organizationId,
+          clientId,
+          campaignId: campaign.id,
+          type: JobType.FIRST_SEND,
+          status: { in: activeJobStatuses },
+        },
+      }),
+      this.prisma.job.count({
+        where: {
+          organizationId,
+          clientId,
+          campaignId: campaign.id,
+          type: JobType.FIRST_SEND,
+          status: JobStatus.SUCCEEDED,
+          finishedAt: { gte: startOfToday },
+        },
+      }),
+      this.prisma.reply.count({
+        where: {
+          organizationId,
+          clientId,
+          campaignId: campaign.id,
+        },
+      }),
+      this.prisma.meeting.count({
+        where: {
+          organizationId,
+          clientId,
+          campaignId: campaign.id,
+        },
+      }),
+      this.prisma.campaign.findUnique({
+        where: { id: campaign.id },
+        select: { dailySendCap: true, status: true },
+      }),
+    ]);
+
+    const dailySendCap = campaignRecord?.dailySendCap ?? 30;
+    const normalizedStatus = campaignRecord?.status ?? campaign.status;
+    const bootstrapStatus = this.readString(campaign.activation?.bootstrapStatus)?.toLowerCase() ?? '';
+
+    let health = 'ACTIVE';
+
+    if (normalizedStatus === CampaignStatus.PAUSED) {
+      health = 'PAUSED';
+    } else if (bootstrapStatus === 'activation_requested' || bootstrapStatus === 'activation_in_progress') {
+      health = 'REFILLING';
+    } else if (sendable < 5 && queued === 0) {
+      health = 'STALLED';
+    } else if (sendable < 10) {
+      health = 'REFILLING';
+    } else if (queued >= dailySendCap) {
+      health = 'SATURATED';
+    }
+
+    return {
+      health,
+      metrics: {
+        sendable,
+        queued,
+        sentToday,
+        replies,
+        meetings,
+        dailySendCap,
+      },
+    };
+  }
+
   private async findPrimaryCampaignSnapshot(organizationId: string, clientId: string) {
     const campaign = await this.prisma.campaign.findFirst({
       where: {
