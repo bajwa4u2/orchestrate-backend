@@ -387,6 +387,26 @@ export class ClientsService {
     const setup = this.asObject(metadata.setup);
     const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
     const commercial = await this.resolveCommercialState(client.id);
+    const campaign = await this.prisma.campaign.findFirst({
+      where: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        code: 'PRIMARY_AUTOMATION',
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+    });
+
+    const campaignMetadata = this.asObject(campaign?.metadataJson);
+    const activation = this.asObject(campaignMetadata.activation);
+    const generationState = this.readString(campaign?.generationState) ?? 'INIT';
+    const campaignStatus = this.readString(campaign?.status) ?? 'DRAFT';
+    const bootstrapStatus =
+      this.readString(activation.bootstrapStatus) ??
+      (campaignStatus === 'ACTIVE' || generationState === 'ACTIVE'
+        ? 'activation_completed'
+        : generationState === 'TARGETING_READY'
+          ? 'activation_in_progress'
+          : null);
 
     return {
       success: true,
@@ -406,6 +426,39 @@ export class ClientsService {
         recommendedPlan: scope.recommendedPlan,
         subscriptionAlignment: this.buildSubscriptionAlignment(commercial, scope),
       },
+      campaign: campaign
+        ? {
+            id: campaign.id,
+            code: campaign.code,
+            name: campaign.name,
+            status: campaignStatus,
+            generationState,
+            activation: {
+              version: this.readPositiveInt(activation.version),
+              bootstrapStatus,
+              jobId: this.readString(activation.jobId),
+              dedupeKey: this.readString(activation.dedupeKey),
+              requestedAt: this.readString(activation.requestedAt),
+              completedAt: this.readString(activation.completedAt),
+              failedAt: this.readString(activation.failedAt),
+              retryAt: this.readString(activation.retryAt),
+              lastError: this.readString(activation.lastError),
+            },
+            metadata: {
+              activation: {
+                version: this.readPositiveInt(activation.version),
+                bootstrapStatus,
+                jobId: this.readString(activation.jobId),
+                dedupeKey: this.readString(activation.dedupeKey),
+                requestedAt: this.readString(activation.requestedAt),
+                completedAt: this.readString(activation.completedAt),
+                failedAt: this.readString(activation.failedAt),
+                retryAt: this.readString(activation.retryAt),
+                lastError: this.readString(activation.lastError),
+              },
+            },
+          }
+        : null,
     };
   }
 
@@ -553,6 +606,8 @@ export class ClientsService {
         message: 'Activate a valid subscription before starting this campaign.',
         campaignId: null,
         jobId: null,
+        bootstrapStatus: null,
+        generationState: null,
       };
     }
 
@@ -565,6 +620,8 @@ export class ClientsService {
         message: this.buildUpgradeMessage(scope, subscriptionAlignment),
         campaignId: null,
         jobId: null,
+        bootstrapStatus: null,
+        generationState: null,
       };
     }
 
@@ -650,17 +707,53 @@ export class ClientsService {
       organizationId: client.organizationId,
     });
 
+    const refreshedCampaign = await this.prisma.campaign.findUnique({
+      where: { id: campaign.id },
+    });
+    const refreshedMetadata = this.asObject(refreshedCampaign?.metadataJson);
+    const refreshedActivation = this.asObject(refreshedMetadata.activation);
+    const bootstrapStatus =
+      this.readString(refreshedActivation.bootstrapStatus) ??
+      this.readString((activation as Record<string, unknown>).bootstrapStatus);
+    const generationState =
+      this.readString(refreshedCampaign?.generationState) ??
+      this.readString((activation as Record<string, unknown>).generationState);
+    const activationStatus =
+      this.readString((activation as Record<string, unknown>).status) ??
+      (bootstrapStatus === 'activation_completed' ? 'active' : 'activating');
+    const isAlreadyActive = bootstrapStatus === 'activation_completed' || activationStatus === 'active';
+
     return {
       success: true,
-      status: 'active',
+      status: activationStatus,
       clientId: client.id,
       organizationId: client.organizationId,
       campaignId: campaign.id,
-      jobId: activation.jobId ?? null,
-      alreadyActive: Boolean((activation as any).alreadyActive),
-      message: Boolean((activation as any).alreadyActive)
+      jobId:
+        this.readString(refreshedActivation.jobId) ??
+        this.readString((activation as Record<string, unknown>).jobId) ??
+        null,
+      bootstrapStatus,
+      generationState,
+      alreadyActive: isAlreadyActive,
+      activation: {
+        bootstrapStatus,
+        generationState,
+        jobId:
+          this.readString(refreshedActivation.jobId) ??
+          this.readString((activation as Record<string, unknown>).jobId) ??
+          null,
+        requestedAt: this.readString(refreshedActivation.requestedAt),
+        retryAt: this.readString(refreshedActivation.retryAt),
+        completedAt: this.readString(refreshedActivation.completedAt),
+        failedAt: this.readString(refreshedActivation.failedAt),
+        lastError: this.readString(refreshedActivation.lastError),
+      },
+      message: isAlreadyActive
         ? 'Your campaign is already running.'
-        : 'Your campaign has started. We are finding businesses and preparing outreach now.',
+        : activationStatus === 'activating'
+          ? 'Your campaign has started. We are finding businesses and preparing outreach now.'
+          : 'Campaign state updated.',
     };
   }
 
