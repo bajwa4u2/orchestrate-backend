@@ -45,6 +45,38 @@ export class LeadImportWorkerService implements JobWorker {
       throw new NotFoundException(`Campaign ${campaignId} not found`);
     }
 
+    const campaignMetadata = this.asObject(campaign.metadataJson);
+    const activation = this.asObject(campaignMetadata.activation);
+    const activationBootstrapStatus = this.readString(activation.bootstrapStatus);
+    const terminalBootstrapStates = new Set([
+      'launch_queued',
+      'leads_ready_non_sendable',
+      'blocked_no_sendable_leads',
+      'activation_completed',
+    ]);
+
+    if (!terminalBootstrapStates.has(activationBootstrapStatus ?? '')) {
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: 'READY',
+          generationState: 'TARGETING_READY',
+          metadataJson: toPrismaJson({
+            ...campaignMetadata,
+            activation: {
+              ...activation,
+              bootstrapStatus: 'activation_in_progress',
+              jobId: job.id,
+              lastJobId: job.id,
+              lastBootstrapAt: new Date().toISOString(),
+              retryAt: null,
+              failedAt: null,
+            },
+          }),
+        },
+      });
+    }
+
     const existingVisibleLeads = await this.prisma.lead.findMany({
       where: {
         campaignId: campaign.id,
@@ -56,7 +88,19 @@ export class LeadImportWorkerService implements JobWorker {
     });
 
     let createdLeadIds: string[] = [];
-    if (!existingVisibleLeads.length) {
+    let bootstrapSkippedReason: string | null = null;
+
+    if (existingVisibleLeads.length) {
+      bootstrapSkippedReason = 'visible_leads_already_exist';
+      this.logger.log(
+        `Lead import bootstrap skipped for campaign ${campaign.id} because ${existingVisibleLeads.length} visible leads already exist.`,
+      );
+    } else if (terminalBootstrapStates.has(activationBootstrapStatus ?? '')) {
+      bootstrapSkippedReason = activationBootstrapStatus ?? 'terminal_bootstrap_state';
+      this.logger.log(
+        `Lead import bootstrap skipped for campaign ${campaign.id} because activation is already in terminal state: ${bootstrapSkippedReason}.`,
+      );
+    } else {
       createdLeadIds = await this.bootstrapLeadsFromClientAssets({
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
@@ -129,6 +173,11 @@ export class LeadImportWorkerService implements JobWorker {
 
     const visibleLeadCount = visibleLeads.length;
     const sendableLeadCount = candidateLeadIds.length;
+    const completedBootstrapStatus = sendableLeadCount
+      ? 'launch_queued'
+      : visibleLeadCount
+        ? 'leads_ready_non_sendable'
+        : 'blocked_no_sendable_leads';
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
@@ -140,14 +189,13 @@ export class LeadImportWorkerService implements JobWorker {
             : 'LEADS_READY'
           : 'TARGETING_READY',
         metadataJson: toPrismaJson({
-          ...this.asObject(campaign.metadataJson),
+          ...campaignMetadata,
           activation: {
+            ...activation,
             lastBootstrapAt: new Date().toISOString(),
-            bootstrapStatus: sendableLeadCount
-              ? 'launch_queued'
-              : visibleLeadCount
-                ? 'leads_ready_non_sendable'
-                : 'blocked_no_sendable_leads',
+            bootstrapStatus: completedBootstrapStatus,
+            jobId: job.id,
+            lastJobId: job.id,
             createdLeadCount: createdLeadIds.length,
             visibleLeadCount,
             sendableLeadCount,
@@ -157,6 +205,7 @@ export class LeadImportWorkerService implements JobWorker {
               : visibleLeadCount
                 ? 'Leads were discovered, but no contact email was available yet.'
                 : 'No visible leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
+            bootstrapSkippedReason,
           },
         }),
       },
