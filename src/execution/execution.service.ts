@@ -116,6 +116,7 @@ export class ExecutionService implements OnModuleInit {
         dailySendCap: true,
         startAt: true,
         endAt: true,
+        createdAt: true,
         metadataJson: true,
       },
       orderBy: [{ updatedAt: 'asc' }],
@@ -145,6 +146,7 @@ export class ExecutionService implements OnModuleInit {
     dailySendCap: number | null;
     startAt: Date | null;
     endAt: Date | null;
+    createdAt: Date;
     metadataJson: Prisma.JsonValue | null;
   }) {
     const now = new Date();
@@ -174,10 +176,18 @@ export class ExecutionService implements OnModuleInit {
     }
 
     const dailySendCap = this.readPositiveInt(campaign.dailySendCap) ?? 25;
+    const governor = this.asObject(metadata.governor);
+    const governorEnabled = this.readBoolean(governor.enabled, true);
     const targetSendableFloor = Math.max(5, Math.min(this.readPositiveInt(continuity.targetSendableFloor) ?? Math.ceil(dailySendCap / 2), 50));
     const maxRefillBatchSize = Math.max(10, Math.min(this.readPositiveInt(continuity.maxRefillBatchSize) ?? dailySendCap, 25));
+    const maxDurationDays = Math.max(7, Math.min(this.readPositiveInt(governor.maxDurationDays) ?? 30, 365));
+    const maxLifetimeLeads = Math.max(100, Math.min(this.readPositiveInt(governor.maxLifetimeLeads) ?? dailySendCap * 20, 5000));
+    const maxLifetimeSends = Math.max(50, Math.min(this.readPositiveInt(governor.maxLifetimeSends) ?? dailySendCap * 15, 5000));
+    const maxQueuedFirstSends = Math.max(10, Math.min(this.readPositiveInt(governor.maxQueuedFirstSends) ?? dailySendCap * 2, 200));
+    const maxSendableInventory = Math.max(targetSendableFloor, Math.min(this.readPositiveInt(governor.maxSendableInventory) ?? dailySendCap * 3, 300));
+    const restartCooldownHours = Math.max(1, Math.min(this.readPositiveInt(governor.restartCooldownHours) ?? 6, 168));
 
-    const [sendableAvailableCount, queuedFirstSendCount, activeLeadImportCount] = await Promise.all([
+    const [sendableAvailableCount, queuedFirstSendCount, activeLeadImportCount, totalLeadCount, totalSentCount] = await Promise.all([
       this.prisma.lead.count({
         where: {
           campaignId: campaign.id,
@@ -203,7 +213,22 @@ export class ExecutionService implements OnModuleInit {
           status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] },
         },
       }),
+      this.prisma.lead.count({
+        where: {
+          campaignId: campaign.id,
+        },
+      }),
+      this.prisma.outreachMessage.count({
+        where: {
+          campaignId: campaign.id,
+          sentAt: { not: null },
+        },
+      }),
     ]);
+
+    const activeSince = campaign.startAt ?? campaign.createdAt;
+    const runningDays = Math.max(1, Math.ceil((now.getTime() - activeSince.getTime()) / 86_400_000));
+
 
     const nextContinuityMetadata = {
       ...continuity,
@@ -215,6 +240,97 @@ export class ExecutionService implements OnModuleInit {
       activeLeadImportCount,
     };
 
+    const nextGovernorMetadata = {
+      ...governor,
+      enabled: governorEnabled,
+      lastCheckedAt: now.toISOString(),
+      maxDurationDays,
+      maxLifetimeLeads,
+      maxLifetimeSends,
+      maxQueuedFirstSends,
+      maxSendableInventory,
+      restartCooldownHours,
+      totals: {
+        totalLeadCount,
+        totalSentCount,
+        runningDays,
+      },
+    };
+
+    if (governorEnabled) {
+      if (runningDays >= maxDurationDays) {
+        return this.pauseCampaignForGovernor(campaign, metadata, nextContinuityMetadata, nextGovernorMetadata, 'duration_limit_reached');
+      }
+
+      if (totalLeadCount >= maxLifetimeLeads) {
+        return this.pauseCampaignForGovernor(campaign, metadata, nextContinuityMetadata, nextGovernorMetadata, 'lifetime_lead_cap_reached');
+      }
+
+      if (totalSentCount >= maxLifetimeSends) {
+        return this.pauseCampaignForGovernor(campaign, metadata, nextContinuityMetadata, nextGovernorMetadata, 'lifetime_send_cap_reached');
+      }
+
+      if (queuedFirstSendCount >= maxQueuedFirstSends) {
+        await this.prisma.campaign.update({
+          where: { id: campaign.id },
+          data: {
+            metadataJson: toPrismaJson({
+              ...metadata,
+              continuity: {
+                ...nextContinuityMetadata,
+                status: 'governor_queue_throttled',
+              },
+              governor: {
+                ...nextGovernorMetadata,
+                status: 'queue_throttled',
+                reason: 'queue_pressure',
+              },
+            }),
+          },
+        });
+
+        return {
+          campaignId: campaign.id,
+          action: 'skip',
+          reason: 'governor_queue_throttled',
+          sendableAvailableCount,
+          queuedFirstSendCount,
+          totalLeadCount,
+          totalSentCount,
+        };
+      }
+
+      if (sendableAvailableCount >= maxSendableInventory) {
+        await this.prisma.campaign.update({
+          where: { id: campaign.id },
+          data: {
+            metadataJson: toPrismaJson({
+              ...metadata,
+              continuity: {
+                ...nextContinuityMetadata,
+                status: 'governor_inventory_throttled',
+              },
+              governor: {
+                ...nextGovernorMetadata,
+                status: 'inventory_throttled',
+                reason: 'inventory_ceiling_reached',
+              },
+            }),
+          },
+        });
+
+        return {
+          campaignId: campaign.id,
+          action: 'skip',
+          reason: 'governor_inventory_throttled',
+          sendableAvailableCount,
+          queuedFirstSendCount,
+          totalLeadCount,
+          totalSentCount,
+        };
+      }
+    }
+
     if (activeLeadImportCount > 0) {
       await this.prisma.campaign.update({
         where: { id: campaign.id },
@@ -224,6 +340,10 @@ export class ExecutionService implements OnModuleInit {
             continuity: {
               ...nextContinuityMetadata,
               status: 'import_in_flight',
+            },
+            governor: {
+              ...nextGovernorMetadata,
+              status: governorEnabled ? 'healthy' : 'disabled',
             },
           }),
         },
@@ -248,6 +368,10 @@ export class ExecutionService implements OnModuleInit {
               ...nextContinuityMetadata,
               status: 'outreach_queue_full',
             },
+            governor: {
+              ...nextGovernorMetadata,
+              status: governorEnabled ? 'healthy' : 'disabled',
+            },
           }),
         },
       });
@@ -270,6 +394,10 @@ export class ExecutionService implements OnModuleInit {
             continuity: {
               ...nextContinuityMetadata,
               status: 'healthy',
+            },
+            governor: {
+              ...nextGovernorMetadata,
+              status: governorEnabled ? 'healthy' : 'disabled',
             },
           }),
         },
@@ -340,6 +468,10 @@ export class ExecutionService implements OnModuleInit {
             lastRefillJobId: refillJob.id,
             lastWorkflowRunId: workflow.id,
           },
+          governor: {
+            ...nextGovernorMetadata,
+            status: governorEnabled ? 'healthy' : 'disabled',
+          },
         }),
       },
     });
@@ -354,6 +486,81 @@ export class ExecutionService implements OnModuleInit {
       targetSendableFloor,
       maxRefillBatchSize,
     };
+  }
+
+
+  private async pauseCampaignForGovernor(
+    campaign: {
+      id: string;
+      organizationId: string;
+      clientId: string;
+      name: string;
+    },
+    metadata: Record<string, any>,
+    continuityMetadata: Record<string, any>,
+    governorMetadata: Record<string, any>,
+    reason: 'duration_limit_reached' | 'lifetime_lead_cap_reached' | 'lifetime_send_cap_reached',
+  ) {
+    const pausedAt = new Date().toISOString();
+    const note = this.buildGovernorPauseNote(reason);
+
+    await this.prisma.$transaction([
+      this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: 'PAUSED',
+          metadataJson: toPrismaJson({
+            ...metadata,
+            continuity: {
+              ...continuityMetadata,
+              status: 'governor_paused',
+              pausedAt,
+            },
+            governor: {
+              ...governorMetadata,
+              status: 'paused_by_governor',
+              reason,
+              pausedAt,
+              pausedBy: 'system',
+              note,
+            },
+          }),
+        },
+      }),
+      this.prisma.job.updateMany({
+        where: {
+          campaignId: campaign.id,
+          type: { in: [JobType.LEAD_IMPORT, JobType.FIRST_SEND, JobType.FOLLOWUP_SEND, JobType.MESSAGE_GENERATION] },
+          status: { in: [JobStatus.QUEUED, JobStatus.RETRY_SCHEDULED] },
+        },
+        data: {
+          status: JobStatus.CANCELED,
+          finishedAt: new Date(),
+          errorText: `Canceled by campaign governor: ${reason}`,
+        },
+      }),
+    ]);
+
+    return {
+      campaignId: campaign.id,
+      action: 'pause',
+      reason,
+      status: 'paused_by_governor',
+      note,
+    };
+  }
+
+  private buildGovernorPauseNote(reason: 'duration_limit_reached' | 'lifetime_lead_cap_reached' | 'lifetime_send_cap_reached') {
+    switch (reason) {
+      case 'duration_limit_reached':
+        return 'Campaign was paused automatically because it reached its maximum active duration.';
+      case 'lifetime_lead_cap_reached':
+        return 'Campaign was paused automatically because it reached its lifetime lead ceiling.';
+      case 'lifetime_send_cap_reached':
+        return 'Campaign was paused automatically because it reached its lifetime send ceiling.';
+      default:
+        return 'Campaign was paused automatically by the governor.';
+    }
   }
 
   private isCampaignWithinActiveWindow(startAt: Date | null, endAt: Date | null, now: Date) {
@@ -1853,6 +2060,22 @@ Orchestrate`,
 
   private readString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length ? value.trim() : null;
+  }
+
+  private readBoolean(value: unknown, fallback = false): boolean {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on'].includes(normalized)) {
+        return true;
+      }
+      if (['false', '0', 'no', 'off'].includes(normalized)) {
+        return false;
+      }
+    }
+    return fallback;
   }
 
   private readPositiveInt(value: unknown): number | null {

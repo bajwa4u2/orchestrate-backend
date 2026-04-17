@@ -23,5 +23,10 @@ export class ClientCampaignController {
   startCampaign(@Headers() headers: Record<string, unknown>) {
     return this.clientsService.startCampaign(headers);
   }
+
+  @Post('restart')
+  restartCampaign(@Headers() headers: Record<string, unknown>) {
+    return this.clientsService.restartCampaign(headers);
+  }
 }
 

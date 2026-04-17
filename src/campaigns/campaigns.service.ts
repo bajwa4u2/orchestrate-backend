@@ -2,6 +2,7 @@ import {
   ActivityVisibility,
   JobStatus,
   JobType,
+  LeadStatus,
   Prisma,
   RecordSource,
   WorkflowLane,
@@ -328,6 +329,139 @@ export class CampaignsService {
       jobId: job.id,
       deduped: false,
       message: 'Campaign activation has started. We are preparing the first lead bootstrap now.',
+    };
+  }
+
+
+  async restartCampaign(input: { campaignId: string; organizationId: string }) {
+    const campaign = await this.prisma.campaign.findFirst({
+      where: {
+        id: input.campaignId,
+        organizationId: input.organizationId,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        clientId: true,
+        workflowRunId: true,
+        status: true,
+        metadataJson: true,
+      },
+    });
+
+    if (!campaign) {
+      throw new Error('Campaign not found');
+    }
+
+    const metadata = this.asObject(campaign.metadataJson);
+    const activation = this.asObject(metadata.activation);
+    const restart = this.asObject(metadata.restart);
+    const currentVersion = this.readPositiveInt(activation.version) ?? 1;
+    const nextVersion = currentVersion + 1;
+    const requestedAt = new Date();
+    const dedupeKey = `campaign_activation:${campaign.id}:${nextVersion}`;
+    const cancelableJobStatuses = [JobStatus.QUEUED, JobStatus.RETRY_SCHEDULED];
+    const nowIso = requestedAt.toISOString();
+
+    const nextMetadata = {
+      ...metadata,
+      activation: {
+        ...activation,
+        version: nextVersion,
+        requestedAt: nowIso,
+        bootstrapStatus: 'activation_requested',
+        lastError: null,
+        retryAt: null,
+        failedAt: null,
+        completedAt: null,
+        dedupeKey,
+      },
+      restart: {
+        ...restart,
+        requestedAt: nowIso,
+        previousVersion: currentVersion,
+        version: nextVersion,
+        source: 'client_campaign_restart',
+      },
+    };
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.job.updateMany({
+        where: {
+          campaignId: campaign.id,
+          type: { in: [JobType.LEAD_IMPORT, JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] },
+          status: { in: cancelableJobStatuses },
+        },
+        data: {
+          status: JobStatus.CANCELED,
+          finishedAt: requestedAt,
+          errorMessage: 'Canceled by campaign restart with updated targeting.',
+        },
+      });
+
+      await tx.lead.updateMany({
+        where: {
+          campaignId: campaign.id,
+          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+          firstContactAt: null,
+          lastContactAt: null,
+        },
+        data: {
+          status: LeadStatus.SUPPRESSED,
+          suppressionReason: 'Replaced by campaign restart using updated targeting.',
+        },
+      });
+
+      await tx.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: 'READY',
+          generationState: 'TARGETING_READY',
+          metadataJson: toPrismaJson(nextMetadata),
+        },
+      });
+
+      const job = await tx.job.create({
+        data: {
+          organizationId: campaign.organizationId,
+          clientId: campaign.clientId,
+          campaignId: campaign.id,
+          type: JobType.LEAD_IMPORT,
+          status: JobStatus.QUEUED,
+          queueName: 'activation',
+          dedupeKey,
+          scheduledFor: requestedAt,
+          payloadJson: {
+            campaignId: campaign.id,
+            workflowRunId: campaign.workflowRunId ?? null,
+            activationVersion: nextVersion,
+            requestedAt: nowIso,
+            restartMode: 'targeting_restart',
+          },
+        },
+      });
+
+      await tx.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...nextMetadata,
+            activation: {
+              ...this.asObject(nextMetadata.activation),
+              jobId: job.id,
+            },
+          }),
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      status: 'activating',
+      generationState: 'TARGETING_READY',
+      bootstrapStatus: 'activation_requested',
+      deduped: false,
+      message: 'Campaign restart has started. We are applying your updated targeting now.',
     };
   }
 

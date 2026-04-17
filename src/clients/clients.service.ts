@@ -404,6 +404,7 @@ export class ClientsService {
       campaign,
       health: campaignHealth?.health ?? null,
       metrics: campaignHealth?.metrics ?? null,
+      governor: campaignHealth?.governor ?? null,
       campaignProfile: {
         serviceType: scope.lane,
         scopeMode: scope.mode,
@@ -657,6 +658,34 @@ export class ClientsService {
       } as any);
 
       campaign = { id: created.id, status: created.status };
+    } else {
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          objective: this.buildCampaignObjective(effectiveScope),
+          offerSummary: this.buildCampaignOfferSummary(effectiveScope),
+          bookingUrlOverride: client.bookingUrl ?? null,
+          timezone: client.primaryTimezone ?? null,
+          metadataJson: toPrismaJson({
+            ...this.asObject((await this.prisma.campaign.findUnique({
+              where: { id: campaign.id },
+              select: { metadataJson: true },
+            }))?.metadataJson),
+            source: 'client_campaign_start',
+            setupSource: 'client_campaign_profile',
+            lane: effectiveScope.lane,
+            mode: effectiveScope.mode,
+            countries: effectiveScope.countries,
+            regions: effectiveScope.regions,
+            metros: effectiveScope.metros,
+            industries: effectiveScope.industries,
+            includeGeo: effectiveScope.includeGeo,
+            excludeGeo: effectiveScope.excludeGeo,
+            priorityMarkets: effectiveScope.priorityMarkets,
+            notes: effectiveScope.notes,
+          }),
+        },
+      });
     }
 
     const activation = await this.campaignsService.activateCampaign({
@@ -689,6 +718,208 @@ export class ClientsService {
           : Boolean((activation as any).alreadyActive)
             ? 'Your campaign is already running.'
             : 'Your campaign activation has started. We are preparing leads now.',
+      campaign: refreshedCampaign,
+      health: campaignHealth?.health ?? null,
+      metrics: campaignHealth?.metrics ?? null,
+      campaignProfile: {
+        serviceType: effectiveScope.lane,
+        scopeMode: effectiveScope.mode,
+        countries: effectiveScope.countries,
+        regions: effectiveScope.regions,
+        metros: effectiveScope.metros,
+        industries: effectiveScope.industries,
+        includeGeo: effectiveScope.includeGeo,
+        excludeGeo: effectiveScope.excludeGeo,
+        priorityMarkets: effectiveScope.priorityMarkets,
+        notes: effectiveScope.notes,
+        recommendedPlan: effectiveScope.recommendedPlan,
+        subscriptionAlignment,
+        generationState:
+          refreshedCampaign?.generationState ?? (activation.generationState ?? null),
+        metadataJson: refreshedCampaign?.metadataJson ?? null,
+        activation: refreshedCampaign?.activation ?? null,
+      },
+    };
+  }
+
+
+  async restartCampaign(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
+    const metadata = this.asObject(client.metadataJson);
+    const setup = this.asObject(metadata.setup);
+    const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
+    const commercial = await this.resolveCommercialState(client.id);
+    const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, scope);
+
+    if (!commercial.service || !commercial.tier) {
+      return {
+        success: false,
+        status: 'upgrade_required',
+        clientId: client.id,
+        organizationId: client.organizationId,
+        message: 'Activate a valid subscription before restarting this campaign.',
+        campaignId: null,
+        jobId: null,
+      };
+    }
+
+    if (!subscriptionAlignment.tierCovered) {
+      return {
+        success: false,
+        status: 'upgrade_required',
+        clientId: client.id,
+        organizationId: client.organizationId,
+        message: this.buildUpgradeMessage(scope, subscriptionAlignment),
+        campaignId: null,
+        jobId: null,
+      };
+    }
+
+    const effectiveLane: ServiceType = commercial.service ?? scope.lane;
+    const effectiveScope = this.buildScopeJson({
+      lane: effectiveLane,
+      mode: scope.mode,
+      countries: scope.countries,
+      regions: scope.regions,
+      metros: scope.metros,
+      industries: scope.industries,
+      includeGeo: scope.includeGeo,
+      excludeGeo: scope.excludeGeo,
+      priorityMarkets: scope.priorityMarkets,
+      notes: scope.notes,
+    });
+
+    if (effectiveLane != scope.lane) {
+      await this.prisma.client.update({
+        where: { id: client.id },
+        data: {
+          selectedPlan: effectiveLane,
+          scopeJson: effectiveScope as unknown as Prisma.InputJsonValue,
+          metadataJson: toPrismaJson({
+            ...metadata,
+            setup: {
+              ...setup,
+              serviceType: effectiveLane,
+              selectedPlan: effectiveLane,
+              selectedTier: effectiveScope.mode,
+              recommendedPlan: effectiveScope.recommendedPlan,
+              scope: effectiveScope,
+            },
+          }),
+        },
+      });
+    }
+
+    let campaign = await this.prisma.campaign.findFirst({
+      where: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        code: 'PRIMARY_AUTOMATION',
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: { id: true, status: true, metadataJson: true },
+    });
+
+    if (!campaign) {
+      return this.startCampaign(headers);
+    }
+
+    const currentCampaignMetadata = this.asObject(campaign.metadataJson);
+    const governor = this.asObject(currentCampaignMetadata.governor);
+    const governorStatus = this.readString(governor.status)?.toLowerCase() ?? null;
+    const governorReason = this.readString(governor.reason)?.toLowerCase() ?? null;
+    const restartCooldownHours = Math.max(1, Math.min(this.readPositiveInt(governor.restartCooldownHours) ?? 6, 168));
+    const lastManualRestartAt = this.readString(governor.lastManualRestartAt);
+
+    if (
+      governorStatus === 'paused_by_governor' &&
+      ['duration_limit_reached', 'lifetime_lead_cap_reached', 'lifetime_send_cap_reached'].includes(governorReason ?? '')
+    ) {
+      return {
+        success: false,
+        status: 'governor_locked',
+        clientId: client.id,
+        organizationId: client.organizationId,
+        campaignId: campaign.id,
+        jobId: null,
+        message: 'This campaign was paused by safety limits. Review the campaign limits before restarting.',
+      };
+    }
+
+    if (lastManualRestartAt) {
+      const lastRestartTime = new Date(lastManualRestartAt);
+      const cooldownEndsAt = new Date(lastRestartTime.getTime() + restartCooldownHours * 60 * 60 * 1000);
+      if (cooldownEndsAt.getTime() > Date.now()) {
+        return {
+          success: false,
+          status: 'restart_cooldown',
+          clientId: client.id,
+          organizationId: client.organizationId,
+          campaignId: campaign.id,
+          jobId: null,
+          message: `Please wait before restarting again. Restart cooldown is ${restartCooldownHours} hour(s).`,
+        };
+      }
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        objective: this.buildCampaignObjective(effectiveScope),
+        offerSummary: this.buildCampaignOfferSummary(effectiveScope),
+        bookingUrlOverride: client.bookingUrl ?? null,
+        timezone: client.primaryTimezone ?? null,
+        metadataJson: toPrismaJson({
+          ...this.asObject(campaign.metadataJson),
+          source: 'client_campaign_restart',
+          setupSource: 'client_campaign_profile',
+          lane: effectiveScope.lane,
+          mode: effectiveScope.mode,
+          countries: effectiveScope.countries,
+          regions: effectiveScope.regions,
+          metros: effectiveScope.metros,
+          industries: effectiveScope.industries,
+          includeGeo: effectiveScope.includeGeo,
+          excludeGeo: effectiveScope.excludeGeo,
+          priorityMarkets: effectiveScope.priorityMarkets,
+          notes: effectiveScope.notes,
+          governor: {
+            ...this.asObject(this.asObject(campaign.metadataJson).governor),
+            status: 'healthy',
+            reason: null,
+            note: null,
+            lastManualRestartAt: new Date().toISOString(),
+            lastManualRestartBy: 'client',
+          },
+        }),
+      },
+    });
+
+    const activation = await this.campaignsService.restartCampaign({
+      campaignId: campaign.id,
+      organizationId: client.organizationId,
+    });
+
+    const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
+    const campaignHealth = refreshedCampaign
+      ? await this.buildCampaignHealthSnapshot(client.organizationId, client.id, refreshedCampaign)
+      : null;
+
+    return {
+      success: true,
+      status: typeof activation.status === 'string' ? activation.status : 'activating',
+      clientId: client.id,
+      organizationId: client.organizationId,
+      campaignId: campaign.id,
+      jobId: activation.jobId ?? refreshedCampaign?.activation.jobId ?? null,
+      generationState: refreshedCampaign?.generationState ?? (activation.generationState ?? null),
+      bootstrapStatus:
+        refreshedCampaign?.activation.bootstrapStatus ??
+        (typeof activation.bootstrapStatus === 'string' ? activation.bootstrapStatus : null),
+      message:
+        typeof activation.message === 'string' && activation.message.trim().length
+          ? activation.message
+          : 'Campaign restart has started. We are applying your updated targeting now.',
       campaign: refreshedCampaign,
       health: campaignHealth?.health ?? null,
       metrics: campaignHealth?.metrics ?? null,
@@ -813,7 +1044,7 @@ export class ClientsService {
       }),
       this.prisma.campaign.findUnique({
         where: { id: campaign.id },
-        select: { dailySendCap: true, status: true },
+        select: { dailySendCap: true, status: true, metadataJson: true },
       }),
       this.prisma.job.count({
         where: {
@@ -829,6 +1060,7 @@ export class ClientsService {
     const dailySendCap = campaignRecord?.dailySendCap ?? 30;
     const normalizedStatus = campaignRecord?.status ?? campaign.status;
     const bootstrapStatus = this.readString(campaign.activation?.bootstrapStatus)?.toLowerCase() ?? '';
+    const governor = this.asObject(this.asObject(campaignRecord?.metadataJson).governor);
 
     let health = 'ACTIVE';
 
@@ -859,6 +1091,19 @@ export class ClientsService {
         replies,
         meetings,
         dailySendCap,
+      },
+      governor: {
+        enabled: typeof governor.enabled === 'boolean' ? governor.enabled : true,
+        status: this.readString(governor.status),
+        reason: this.readString(governor.reason),
+        note: this.readString(governor.note),
+        pausedAt: this.readString(governor.pausedAt),
+        lastCheckedAt: this.readString(governor.lastCheckedAt),
+        restartCooldownHours: this.readPositiveInt(governor.restartCooldownHours),
+        maxDurationDays: this.readPositiveInt(governor.maxDurationDays),
+        maxLifetimeLeads: this.readPositiveInt(governor.maxLifetimeLeads),
+        maxLifetimeSends: this.readPositiveInt(governor.maxLifetimeSends),
+        totals: this.asObject(governor.totals),
       },
     };
   }
