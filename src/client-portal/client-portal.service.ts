@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
 import { BillingService } from '../billing/billing.service';
+import { PrismaService } from '../database/prisma.service';
 
 @Injectable()
 export class ClientPortalService {
@@ -14,20 +14,67 @@ export class ClientPortalService {
       where: { id: clientId, organizationId },
       include: { subscriptions: true, campaigns: true },
     });
-    if (!client) throw new NotFoundException('Client not found in active organization');
 
-    const [billing, replies, meetings, notifications, emailDispatches] = await Promise.all([
+    if (!client) {
+      throw new NotFoundException('Client not found in active organization');
+    }
+
+    const [
+      billing,
+      replies,
+      meetings,
+      notifications,
+      emailDispatches,
+      totalLeads,
+      sendableLeads,
+    ] = await Promise.all([
       this.billingService.overview(organizationId, clientId),
-      this.prisma.reply.count({ where: { organizationId, clientId } }),
-      this.prisma.meeting.count({ where: { organizationId, clientId } }),
-      this.prisma.alert.count({ where: { organizationId, clientId, status: 'OPEN' } }),
-      this.prisma.documentDispatch.count({ where: { organizationId, clientId, deliveryChannel: 'EMAIL' } }),
+      this.prisma.reply.count({
+        where: { organizationId, clientId },
+      }),
+      this.prisma.meeting.count({
+        where: { organizationId, clientId },
+      }),
+      this.prisma.alert.count({
+        where: { organizationId, clientId, status: 'OPEN' },
+      }),
+      this.prisma.documentDispatch.count({
+        where: {
+          organizationId,
+          clientId,
+          deliveryChannel: 'EMAIL',
+        },
+      }),
+      this.prisma.lead.count({
+        where: {
+          organizationId,
+          clientId,
+        },
+      }),
+      this.prisma.lead.count({
+        where: {
+          organizationId,
+          clientId,
+          status: {
+            not: 'SUPPRESSED',
+          },
+          contact: {
+            is: {
+              email: {
+                not: null,
+              },
+            },
+          },
+        },
+      }),
     ]);
 
     return {
       client,
       billing,
       activity: {
+        leadCount: totalLeads,
+        sendableLeadCount: sendableLeads,
         replies,
         meetings,
       },
@@ -50,7 +97,10 @@ export class ClientPortalService {
   statements(organizationId: string, clientId: string) {
     return this.prisma.statement.findMany({
       where: { organizationId, clientId },
-      include: { invoiceLinks: { include: { invoice: true } }, paymentLinks: { include: { payment: true } } },
+      include: {
+        invoiceLinks: { include: { invoice: true } },
+        paymentLinks: { include: { payment: true } },
+      },
       orderBy: [{ periodEnd: 'desc' }],
     });
   }
@@ -80,8 +130,19 @@ export class ClientPortalService {
 
   emailDispatches(organizationId: string, clientId: string) {
     return this.prisma.documentDispatch.findMany({
-      where: { organizationId, clientId, deliveryChannel: 'EMAIL' },
-      include: { template: true, invoice: true, statement: true, agreement: true, receipt: true, reminder: true },
+      where: {
+        organizationId,
+        clientId,
+        deliveryChannel: 'EMAIL',
+      },
+      include: {
+        template: true,
+        invoice: true,
+        statement: true,
+        agreement: true,
+        receipt: true,
+        reminder: true,
+      },
       orderBy: [{ createdAt: 'desc' }],
     });
   }
