@@ -193,22 +193,37 @@ export class ApolloProvider implements LeadSourceProviderContract {
     const industries = this.uniqueNonEmpty(input.targeting.industries).slice(0, 3);
     const employeeRanges = this.uniqueNonEmpty(input.targeting.employeeRanges).slice(0, 3);
     const seniorities = this.uniqueNonEmpty(input.targeting.seniorities).slice(0, 3);
-    const keywords = options.includeKeywords ? this.buildKeywordQuery(input) : '';
+    const keywords = this.buildSearchKeywordQuery(input, {
+      includeIndustries: options.includeIndustries,
+      includeKeywords: options.includeKeywords,
+    });
+
+    const payload: Record<string, unknown> = {
+      include_similar_titles: true,
+      page: 1,
+      per_page: perPage,
+    };
+
+    if (titles.length) {
+      payload.person_titles = titles;
+    }
+    if (geoTargets.length) {
+      payload.organization_locations = geoTargets;
+    }
+    if (options.includeEmployeeRanges && employeeRanges.length) {
+      payload.organization_num_employees_ranges = employeeRanges;
+    }
+    if (options.includeSeniorities && seniorities.length) {
+      payload.person_seniorities = seniorities;
+    }
+    if (keywords) {
+      payload.q_keywords = keywords;
+    }
 
     const response = await fetch(`${this.baseUrl}/mixed_people/api_search`, {
       method: 'POST',
       headers: this.headers(),
-      body: JSON.stringify({
-        person_titles: titles,
-        organization_locations: geoTargets,
-        organization_industries: options.includeIndustries ? industries : [],
-        organization_num_employees_ranges: options.includeEmployeeRanges ? employeeRanges : [],
-        person_seniorities: options.includeSeniorities ? seniorities : [],
-        q_keywords: keywords || undefined,
-        include_similar_titles: true,
-        page: 1,
-        per_page: perPage,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -217,8 +232,8 @@ export class ApolloProvider implements LeadSourceProviderContract {
       return [];
     }
 
-    const payload = (await response.json()) as ApolloApiSearchResponse;
-    const people = Array.isArray(payload.people) ? payload.people : [];
+    const responseBody = (await response.json()) as ApolloApiSearchResponse;
+    const people = Array.isArray(responseBody.people) ? responseBody.people : [];
 
     this.logger.log(
       `Apollo people search returned ${people.length} results (titles=${titles.length}, geos=${geoTargets.length}, industries=${options.includeIndustries ? industries.length : 0}, seniorities=${options.includeSeniorities ? seniorities.length : 0}, keywords=${keywords ? 'yes' : 'no'}).`,
@@ -435,12 +450,20 @@ export class ApolloProvider implements LeadSourceProviderContract {
     };
   }
 
-  private buildKeywordQuery(input: LeadSourceSearchInput) {
+  private buildSearchKeywordQuery(
+    input: LeadSourceSearchInput,
+    options: {
+      includeIndustries: boolean;
+      includeKeywords: boolean;
+    },
+  ) {
     const terms = this.uniqueNonEmpty([
-      input.targeting.offerSummary,
-      input.targeting.objective,
-      ...input.targeting.exclusionKeywords.map((item) => `-${item}`),
-    ]).slice(0, 6);
+      options.includeKeywords ? input.targeting.offerSummary : null,
+      options.includeKeywords ? input.targeting.objective : null,
+      ...(options.includeIndustries ? input.targeting.industries : []).slice(0, 3),
+      ...(options.includeKeywords ? input.targeting.exclusionKeywords.map((item) => `-${item}`) : []),
+    ]).slice(0, 8);
+
     return terms.join(' ');
   }
 
