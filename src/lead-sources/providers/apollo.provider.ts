@@ -13,6 +13,7 @@ interface ApolloApiSearchPerson {
   last_name?: string;
   name?: string;
   title?: string;
+  email?: string | null;
   email_status?: string;
   linkedin_url?: string;
   city?: string;
@@ -280,9 +281,19 @@ export class ApolloProvider implements LeadSourceProviderContract {
         name: this.readString(current?.name) ?? this.readString(source?.name) ?? undefined,
         title: this.readString(current?.title) ?? this.readString(source?.title) ?? undefined,
         linkedin_url: this.readString(current?.linkedin_url) ?? this.readString(source?.linkedin_url) ?? undefined,
-        organization_id: this.readString(source?.organization_id) ?? this.readString(current?.organization?.id) ?? this.readString(source?.organization?.id) ?? undefined,
-        organization_name: this.readString(current?.organization?.name) ?? this.readString(source?.organization?.name) ?? undefined,
-        domain: this.readString(current?.organization?.primary_domain) ?? this.readString(source?.organization?.primary_domain) ?? undefined,
+        organization_id:
+          this.readString(source?.organization_id) ??
+          this.readString(current?.organization?.id) ??
+          this.readString(source?.organization?.id) ??
+          undefined,
+        organization_name:
+          this.readString(current?.organization?.name) ??
+          this.readString(source?.organization?.name) ??
+          undefined,
+        domain:
+          this.readString(current?.organization?.primary_domain) ??
+          this.readString(source?.organization?.primary_domain) ??
+          undefined,
       }),
     });
 
@@ -340,6 +351,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
       last_name: item.last_name,
       name: item.name,
       title: item.title,
+      email: item.email ?? null,
       email_status: item.email_status ?? null,
       linkedin_url: item.linkedin_url ?? null,
       city: item.city ?? null,
@@ -369,7 +381,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
       this.readString(source?.organization?.name);
     if (!companyName) return null;
 
-    const email = this.extractEmail(person) ?? this.extractEmail(source as any) ?? undefined;
+    const email = this.extractEmail(person) ?? this.extractEmail(source) ?? undefined;
     const firstName = this.readString(person.first_name) ?? this.readString(source?.first_name) ?? undefined;
     const lastName = this.readString(person.last_name) ?? this.readString(source?.last_name) ?? undefined;
     const title = this.readString(person.title) ?? this.readString(source?.title) ?? undefined;
@@ -456,8 +468,15 @@ export class ApolloProvider implements LeadSourceProviderContract {
     return normalized.slice(0, 2).toUpperCase();
   }
 
-  private extractEmail(value: { email?: string | null } | undefined | null) {
-    return this.readString(value?.email)?.toLowerCase() ?? null;
+  private extractEmail(
+    input?: ApolloSingleMatchPerson | ApolloBulkMatchResponseItem['person'] | ApolloApiSearchPerson | null,
+  ): string | undefined {
+    const raw = input?.email;
+
+    if (typeof raw !== 'string') return undefined;
+
+    const email = raw.trim().toLowerCase();
+    return email.length ? email : undefined;
   }
 
   private headers() {
