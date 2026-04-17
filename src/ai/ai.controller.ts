@@ -10,7 +10,7 @@ import {
   GenerateStatementSummaryDto,
 } from './contracts/ai.controller.contract';
 
-@Controller('v1/ai')
+@Controller('ai')
 export class AiController {
   constructor(
     private readonly aiService: AiService,

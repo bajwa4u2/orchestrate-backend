@@ -377,9 +377,14 @@ export class LeadImportWorkerService implements JobWorker {
       targeting,
     });
 
-    if (!searchResult.prospects.length) {
+    const totalProspects = searchResult.prospects.length;
+    if (!totalProspects) {
+      this.logger.log(`Apollo returned no candidates for campaign ${input.campaignId}.`);
       return [];
     }
+
+    const sendableProspects = searchResult.prospects.filter((prospect) => Boolean(this.readString(prospect.email)));
+    const skippedMissingEmailCount = totalProspects - sendableProspects.length;
 
     const leadSource = await this.prisma.leadSource.create({
       data: {
@@ -395,14 +400,24 @@ export class LeadImportWorkerService implements JobWorker {
         configJson: toPrismaJson({
           provider: searchResult.provider,
           querySummary: searchResult.querySummary,
+          totalProspects,
+          sendableProspects: sendableProspects.length,
+          skippedMissingEmailCount,
         }),
       },
       select: { id: true },
     });
 
+    if (!sendableProspects.length) {
+      this.logger.warn(
+        `Apollo found ${totalProspects} candidates for campaign ${input.campaignId}, but none had usable email addresses after enrichment.`,
+      );
+      return [];
+    }
+
     const createdLeadIds: string[] = [];
 
-    for (const prospect of searchResult.prospects) {
+    for (const prospect of sendableProspects) {
       const leadId = await this.upsertApolloProspect({
         organizationId: input.organizationId,
         clientId: input.clientId,
@@ -416,6 +431,10 @@ export class LeadImportWorkerService implements JobWorker {
         createdLeadIds.push(leadId);
       }
     }
+
+    this.logger.log(
+      `Apollo import for campaign ${input.campaignId}: ${totalProspects} candidates, ${sendableProspects.length} sendable, ${createdLeadIds.length} leads created, ${skippedMissingEmailCount} skipped without email.`,
+    );
 
     return createdLeadIds;
   }
@@ -599,12 +618,8 @@ export class LeadImportWorkerService implements JobWorker {
       ...this.readStringArray(strategy.geoTargets),
       ...this.readScopeLabels(clientScope.countries),
       ...this.readScopeLabels(clientScope.regions),
-      ...this.readScopeLabels(clientScope.metros),
       ...this.readStringArray(serviceProfile.countries),
       ...this.readStringArray(serviceProfile.regions),
-      ...this.readStringArray(setup.countries),
-      ...this.readStringArray(setup.regions),
-      ...this.readStringArray(setup.metros),
     ]);
 
     const titleKeywords = this.uniqueNonEmpty([
@@ -724,19 +739,7 @@ export class LeadImportWorkerService implements JobWorker {
   private readStringArray(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return value
-      .map((item) => {
-        if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
-          return this.readString(String(item));
-        }
-        const record = this.asObject(item);
-        return (
-          this.readString(record.label) ??
-          this.readString(record.code) ??
-          this.readString(record.regionLabel) ??
-          this.readString(record.regionCode) ??
-          this.readString(record.name)
-        );
-      })
+      .map((item) => this.readString(item))
       .filter((item): item is string => Boolean(item));
   }
 

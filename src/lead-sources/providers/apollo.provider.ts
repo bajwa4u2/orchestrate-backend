@@ -31,6 +31,40 @@ interface ApolloApiSearchPerson {
 
 interface ApolloApiSearchResponse {
   people?: ApolloApiSearchPerson[];
+  pagination?: {
+    page?: number;
+    per_page?: number;
+    total_entries?: number;
+    total_pages?: number;
+  };
+}
+
+interface ApolloSingleMatchPerson {
+  id?: string;
+  first_name?: string;
+  last_name?: string;
+  name?: string;
+  title?: string;
+  email?: string | null;
+  email_status?: string | null;
+  linkedin_url?: string | null;
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+  organization?: {
+    id?: string;
+    name?: string;
+    primary_domain?: string;
+    website_url?: string;
+    estimated_num_employees?: number;
+    industry?: string;
+  };
+}
+
+interface ApolloSingleMatchResponse {
+  person?: ApolloSingleMatchPerson;
+  match?: ApolloSingleMatchPerson;
+  contact?: ApolloSingleMatchPerson;
 }
 
 interface ApolloBulkMatchResponseItem {
@@ -69,7 +103,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
   private readonly logger = new Logger(ApolloProvider.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://api.apollo.io/api/v1';
-  private peopleSearch404Logged = false;
+  private readonly searchProviderRef = 'apollo:mixed_people/api_search';
 
   constructor(private readonly configService: ConfigService) {
     const apiKey = this.configService.get<string>('APOLLO_API_KEY');
@@ -102,7 +136,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
     if (!searchPeople.length) {
       return {
         provider: this.provider,
-        providerRef: 'apollo:mixed_people/api_search',
+        providerRef: this.searchProviderRef,
         querySummary: {
           titleKeywords: input.targeting.titleKeywords,
           geoTargets: input.targeting.geoTargets,
@@ -118,7 +152,8 @@ export class ApolloProvider implements LeadSourceProviderContract {
 
     const sourcePeople = searchPeople.slice(0, maxResults);
     const enriched = await this.bulkEnrichPeople(sourcePeople);
-    const prospects = enriched
+    const enrichedWithEmailPass = await this.fillMissingEmails(enriched, sourcePeople);
+    const prospects = enrichedWithEmailPass
       .map((item, index) => this.toLeadCandidate(item, sourcePeople[index], index, input))
       .filter((item): item is ExternalLeadCandidate => Boolean(item));
 
@@ -128,7 +163,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
 
     return {
       provider: this.provider,
-      providerRef: 'apollo:mixed_people/api_search',
+      providerRef: this.searchProviderRef,
       querySummary: {
         titleKeywords: input.targeting.titleKeywords,
         geoTargets: input.targeting.geoTargets,
@@ -152,55 +187,32 @@ export class ApolloProvider implements LeadSourceProviderContract {
       includeKeywords: boolean;
     },
   ): Promise<ApolloApiSearchPerson[]> {
-    const url = new URL(`${this.baseUrl}/mixed_people/api_search`);
     const titles = this.uniqueNonEmpty(input.targeting.titleKeywords).slice(0, 8);
     const geoTargets = this.uniqueNonEmpty(input.targeting.geoTargets).slice(0, 8);
     const industries = this.uniqueNonEmpty(input.targeting.industries).slice(0, 3);
     const employeeRanges = this.uniqueNonEmpty(input.targeting.employeeRanges).slice(0, 3);
     const seniorities = this.uniqueNonEmpty(input.targeting.seniorities).slice(0, 3);
-
-    for (const title of titles) url.searchParams.append('person_titles[]', title);
-    for (const location of geoTargets) url.searchParams.append('organization_locations[]', location);
-    if (options.includeIndustries) {
-      for (const industry of industries) url.searchParams.append('organization_industries[]', industry);
-    }
-    if (options.includeEmployeeRanges) {
-      for (const range of employeeRanges) url.searchParams.append('organization_num_employees_ranges[]', range);
-    }
-    if (options.includeSeniorities) {
-      for (const seniority of seniorities) url.searchParams.append('person_seniorities[]', seniority);
-    }
-
-    url.searchParams.set('include_similar_titles', 'true');
-    url.searchParams.set('page', '1');
-    url.searchParams.set('per_page', String(perPage));
-
     const keywords = options.includeKeywords ? this.buildKeywordQuery(input) : '';
-    if (keywords) {
-      url.searchParams.set('q_keywords', keywords);
-    }
 
-    const response = await fetch(url, {
+    const response = await fetch(`${this.baseUrl}/mixed_people/api_search`, {
       method: 'POST',
-      headers: {
-        ...this.headers(),
-        'content-type': 'application/json',
-        'cache-control': 'no-cache',
-      },
+      headers: this.headers(),
+      body: JSON.stringify({
+        person_titles: titles,
+        organization_locations: geoTargets,
+        organization_industries: options.includeIndustries ? industries : [],
+        organization_num_employees_ranges: options.includeEmployeeRanges ? employeeRanges : [],
+        person_seniorities: options.includeSeniorities ? seniorities : [],
+        q_keywords: keywords || undefined,
+        include_similar_titles: true,
+        page: 1,
+        per_page: perPage,
+      }),
     });
 
     if (!response.ok) {
       const message = await this.safeReadText(response);
-      if (response.status === 404) {
-        if (!this.peopleSearch404Logged) {
-          this.peopleSearch404Logged = true;
-          this.logger.warn(
-            `Apollo people search returned 404 once. Orchestrate will continue without Apollo while this endpoint is unavailable: ${message}`,
-          );
-        }
-      } else {
-        this.logger.warn(`Apollo people search failed (${response.status}): ${message}`);
-      }
+      this.logger.warn(`Apollo people search failed (${response.status}): ${message}`);
       return [];
     }
 
@@ -212,6 +224,74 @@ export class ApolloProvider implements LeadSourceProviderContract {
     );
 
     return people;
+  }
+
+  private async fillMissingEmails(
+    items: ApolloBulkMatchResponseItem[],
+    sources: ApolloApiSearchPerson[],
+  ): Promise<ApolloBulkMatchResponseItem[]> {
+    if (!items.length) return items;
+
+    const hydrated = [...items];
+    let enrichmentAttempts = 0;
+    let enrichmentWins = 0;
+
+    for (let index = 0; index < hydrated.length; index += 1) {
+      const current = hydrated[index];
+      const source = sources[index];
+      if (this.extractEmail(current?.person)) {
+        continue;
+      }
+
+      const enrichedPerson = await this.singleEnrichPerson(source, current?.person);
+      if (!enrichedPerson) {
+        continue;
+      }
+
+      enrichmentAttempts += 1;
+      if (this.extractEmail(enrichedPerson)) {
+        enrichmentWins += 1;
+      }
+      hydrated[index] = { person: enrichedPerson };
+    }
+
+    if (enrichmentAttempts) {
+      this.logger.log(
+        `Apollo single enrichment retried ${enrichmentAttempts} missing-email candidates and recovered ${enrichmentWins} emails.`,
+      );
+    }
+
+    return hydrated;
+  }
+
+  private async singleEnrichPerson(
+    source: ApolloApiSearchPerson | undefined,
+    current: ApolloSingleMatchPerson | undefined,
+  ): Promise<ApolloSingleMatchPerson | null> {
+    if (!source && !current) return null;
+
+    const response = await fetch(`${this.baseUrl}/people/match`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        id: this.readString(current?.id) ?? this.readString(source?.id) ?? undefined,
+        first_name: this.readString(current?.first_name) ?? this.readString(source?.first_name) ?? undefined,
+        last_name: this.readString(current?.last_name) ?? this.readString(source?.last_name) ?? undefined,
+        name: this.readString(current?.name) ?? this.readString(source?.name) ?? undefined,
+        title: this.readString(current?.title) ?? this.readString(source?.title) ?? undefined,
+        linkedin_url: this.readString(current?.linkedin_url) ?? this.readString(source?.linkedin_url) ?? undefined,
+        organization_id: this.readString(source?.organization_id) ?? this.readString(current?.organization?.id) ?? this.readString(source?.organization?.id) ?? undefined,
+        organization_name: this.readString(current?.organization?.name) ?? this.readString(source?.organization?.name) ?? undefined,
+        domain: this.readString(current?.organization?.primary_domain) ?? this.readString(source?.organization?.primary_domain) ?? undefined,
+      }),
+    });
+
+    if (!response.ok) {
+      return current ?? this.toBulkFallbackPerson(source ?? {});
+    }
+
+    const payload = (await response.json()) as ApolloSingleMatchResponse;
+    return payload.person ?? payload.match ?? payload.contact ?? current ?? this.toBulkFallbackPerson(source ?? {});
   }
 
   private async bulkEnrichPeople(items: ApolloApiSearchPerson[]): Promise<ApolloBulkMatchResponseItem[]> {
@@ -289,7 +369,7 @@ export class ApolloProvider implements LeadSourceProviderContract {
       this.readString(source?.organization?.name);
     if (!companyName) return null;
 
-    const email = this.readString((person as any).email)?.toLowerCase() ?? undefined;
+    const email = this.extractEmail(person) ?? this.extractEmail(source as any) ?? undefined;
     const firstName = this.readString(person.first_name) ?? this.readString(source?.first_name) ?? undefined;
     const lastName = this.readString(person.last_name) ?? this.readString(source?.last_name) ?? undefined;
     const title = this.readString(person.title) ?? this.readString(source?.title) ?? undefined;
@@ -374,6 +454,10 @@ export class ApolloProvider implements LeadSourceProviderContract {
     const normalized = value.trim();
     if (normalized.length === 2) return normalized.toUpperCase();
     return normalized.slice(0, 2).toUpperCase();
+  }
+
+  private extractEmail(value: { email?: string | null } | undefined | null) {
+    return this.readString(value?.email)?.toLowerCase() ?? null;
   }
 
   private headers() {
