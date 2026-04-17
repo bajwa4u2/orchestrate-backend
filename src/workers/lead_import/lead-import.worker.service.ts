@@ -47,10 +47,14 @@ export class LeadImportWorkerService implements JobWorker {
 
     const campaignMetadata = this.asObject(campaign.metadataJson);
     const activation = this.asObject(campaignMetadata.activation);
+    const continuity = this.asObject(campaignMetadata.continuity);
     const activationBootstrapStatus = this.readString(activation.bootstrapStatus);
     const activationJobId = this.readString(activation.jobId) ?? this.readString(activation.currentJobId);
+    const refillMode = this.readString(context.payload.refillMode) === 'continuity_refill';
+    const targetSendableFloor = this.readPositiveInt(context.payload.targetSendableFloor) ?? 10;
+    const maxLeadCount = Math.max(1, Math.min(this.readPositiveInt(context.payload.maxLeadCount) ?? 25, 25));
 
-    if (activationJobId && activationJobId !== job.id) {
+    if (!refillMode && activationJobId && activationJobId !== job.id) {
       this.logger.log(
         `Skipping lead import for campaign ${campaign.id}; activation is owned by job ${activationJobId}.`,
       );
@@ -67,6 +71,7 @@ export class LeadImportWorkerService implements JobWorker {
     }
 
     if (
+      !refillMode &&
       activationBootstrapStatus &&
       ['activation_completed', 'launch_queued', 'leads_ready_non_sendable', 'blocked_no_sendable_leads'].includes(
         activationBootstrapStatus,
@@ -92,17 +97,34 @@ export class LeadImportWorkerService implements JobWorker {
       data: {
         metadataJson: toPrismaJson({
           ...campaignMetadata,
-          activation: {
-            ...activation,
-            jobId: job.id,
-            currentJobId: job.id,
-            bootstrapStatus: 'activation_in_progress',
-            startedAt: new Date().toISOString(),
-            lastError: null,
-            retryAt: null,
-            failedAt: null,
-            bootstrapSkippedReason: null,
-          },
+          ...(refillMode
+            ? {
+                continuity: {
+                  ...continuity,
+                  status: 'refill_in_progress',
+                  jobId: job.id,
+                  currentJobId: job.id,
+                  targetSendableFloor,
+                  maxLeadCount,
+                  startedAt: new Date().toISOString(),
+                  lastError: null,
+                  retryAt: null,
+                  failedAt: null,
+                },
+              }
+            : {
+                activation: {
+                  ...activation,
+                  jobId: job.id,
+                  currentJobId: job.id,
+                  bootstrapStatus: 'activation_in_progress',
+                  startedAt: new Date().toISOString(),
+                  lastError: null,
+                  retryAt: null,
+                  failedAt: null,
+                  bootstrapSkippedReason: null,
+                },
+              }),
         }),
       },
     });
@@ -113,12 +135,24 @@ export class LeadImportWorkerService implements JobWorker {
         status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
       },
       select: { id: true },
-      take: 25,
+      take: maxLeadCount,
       orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
     });
 
+    const existingSendableLeadCount = await this.prisma.lead.count({
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+        contact: { email: { not: null } },
+      },
+    });
+
     let createdLeadIds: string[] = [];
-    if (!existingVisibleLeads.length) {
+    const shouldBootstrap = refillMode
+      ? existingSendableLeadCount < targetSendableFloor
+      : !existingVisibleLeads.length;
+
+    if (shouldBootstrap) {
       createdLeadIds = await this.bootstrapLeadsFromClientAssets({
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
@@ -128,31 +162,37 @@ export class LeadImportWorkerService implements JobWorker {
         clientMetadataJson: campaign.client.metadataJson,
         clientScopeJson: campaign.client.scopeJson,
         clientIndustry: campaign.client.industry,
+        maxLeadCount,
       });
     }
 
-    const visibleLeads = await this.prisma.lead.findMany({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-      },
-      select: { id: true },
-      take: 25,
-      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-    });
+    const [visibleLeadCount, sendableLeadCount, sendableLeadCandidates] = await Promise.all([
+      this.prisma.lead.count({
+        where: {
+          campaignId: campaign.id,
+          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+        },
+      }),
+      this.prisma.lead.count({
+        where: {
+          campaignId: campaign.id,
+          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+          contact: { email: { not: null } },
+        },
+      }),
+      this.prisma.lead.findMany({
+        where: {
+          campaignId: campaign.id,
+          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+          contact: { email: { not: null } },
+        },
+        select: { id: true },
+        take: maxLeadCount,
+        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+      }),
+    ]);
 
-    const sendableLeads = await this.prisma.lead.findMany({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-        contact: { email: { not: null } },
-      },
-      select: { id: true },
-      take: 25,
-      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-    });
-
-    const candidateLeadIds = sendableLeads.map((item) => item.id).slice(0, 25);
+    const candidateLeadIds = sendableLeadCandidates.map((item) => item.id).slice(0, maxLeadCount);
 
     const queuedMessageGenerationJobIds: string[] = [];
     for (const leadId of candidateLeadIds) {
@@ -189,8 +229,14 @@ export class LeadImportWorkerService implements JobWorker {
       queuedMessageGenerationJobIds.push(firstSendJob.id);
     }
 
-    const visibleLeadCount = visibleLeads.length;
-    const sendableLeadCount = candidateLeadIds.length;
+    const queuedFirstSendCount = queuedMessageGenerationJobIds.length;
+
+    const completedAt = sendableLeadCount ? new Date().toISOString() : null;
+    const blockedReason = sendableLeadCount
+      ? null
+      : visibleLeadCount
+        ? 'Leads were discovered, but no contact email was available yet.'
+        : 'No visible leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.';
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
@@ -203,27 +249,47 @@ export class LeadImportWorkerService implements JobWorker {
           : 'TARGETING_READY',
         metadataJson: toPrismaJson({
           ...campaignMetadata,
-          activation: {
-            ...activation,
-            jobId: job.id,
-            currentJobId: job.id,
-            lastBootstrapAt: new Date().toISOString(),
-            bootstrapStatus: sendableLeadCount
-              ? 'launch_queued'
-              : visibleLeadCount
-                ? 'leads_ready_non_sendable'
-                : 'blocked_no_sendable_leads',
-            createdLeadCount: createdLeadIds.length,
-            visibleLeadCount,
-            sendableLeadCount,
-            queuedFirstSendCount: queuedMessageGenerationJobIds.length,
-            completedAt: sendableLeadCount ? new Date().toISOString() : null,
-            blockedReason: sendableLeadCount
-              ? null
-              : visibleLeadCount
-                ? 'Leads were discovered, but no contact email was available yet.'
-                : 'No visible leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.',
-          },
+          ...(refillMode
+            ? {
+                continuity: {
+                  ...continuity,
+                  jobId: job.id,
+                  currentJobId: job.id,
+                  lastRefillAt: new Date().toISOString(),
+                  status: sendableLeadCount
+                    ? 'refill_queued'
+                    : visibleLeadCount
+                      ? 'refill_non_sendable'
+                      : 'refill_blocked',
+                  createdLeadCount: createdLeadIds.length,
+                  visibleLeadCount,
+                  sendableLeadCount,
+                  queuedFirstSendCount,
+                  completedAt,
+                  blockedReason,
+                  targetSendableFloor,
+                  maxLeadCount,
+                },
+              }
+            : {
+                activation: {
+                  ...activation,
+                  jobId: job.id,
+                  currentJobId: job.id,
+                  lastBootstrapAt: new Date().toISOString(),
+                  bootstrapStatus: sendableLeadCount
+                    ? 'launch_queued'
+                    : visibleLeadCount
+                      ? 'leads_ready_non_sendable'
+                      : 'blocked_no_sendable_leads',
+                  createdLeadCount: createdLeadIds.length,
+                  visibleLeadCount,
+                  sendableLeadCount,
+                  queuedFirstSendCount,
+                  completedAt,
+                  blockedReason,
+                },
+              }),
         }),
       },
     });
@@ -234,7 +300,7 @@ export class LeadImportWorkerService implements JobWorker {
       createdLeadCount: createdLeadIds.length,
       visibleLeadCount,
       sendableLeadCount,
-      queuedFirstSendCount: queuedMessageGenerationJobIds.length,
+      queuedFirstSendCount,
       queuedJobIds: queuedMessageGenerationJobIds,
       waitingForLeadSource: visibleLeadCount === 0,
     };
@@ -249,6 +315,7 @@ export class LeadImportWorkerService implements JobWorker {
     clientMetadataJson?: Prisma.JsonValue | null;
     clientScopeJson?: Prisma.JsonValue | null;
     clientIndustry?: string | null;
+    maxLeadCount?: number;
   }) {
     const contacts = await this.prisma.contact.findMany({
       where: {
@@ -264,7 +331,7 @@ export class LeadImportWorkerService implements JobWorker {
         },
       },
       orderBy: [{ createdAt: 'asc' }],
-      take: 25,
+      take: input.maxLeadCount ?? 25,
     });
 
     const createdLeadIds: string[] = [];
@@ -304,7 +371,7 @@ export class LeadImportWorkerService implements JobWorker {
       setup.seedProspects ?? metadata.seedProspects ?? scope.seedProspects,
     );
 
-    for (const prospect of seedProspects.slice(0, 25)) {
+    for (const prospect of seedProspects.slice(0, input.maxLeadCount ?? 25)) {
       const existing = await this.prisma.contact.findFirst({
         where: {
           organizationId: input.organizationId,
@@ -427,6 +494,7 @@ export class LeadImportWorkerService implements JobWorker {
     clientMetadataJson?: Prisma.JsonValue | null;
     clientScopeJson?: Prisma.JsonValue | null;
     clientIndustry?: string | null;
+    maxLeadCount?: number;
   }) {
     const targeting = this.buildApolloTargeting({
       campaignMetadataJson: input.campaignMetadataJson ?? null,
@@ -800,6 +868,19 @@ export class LeadImportWorkerService implements JobWorker {
 
   private readString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length ? value.trim() : null;
+  }
+
+  private readPositiveInt(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+    return null;
   }
 
   private readStringArray(value: unknown): string[] {

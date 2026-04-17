@@ -31,6 +31,8 @@ import { WorkersService } from '../workers/workers.service';
 export class ExecutionService implements OnModuleInit {
   private dispatchTimer: NodeJS.Timeout | null = null;
   private dispatchInFlight = false;
+  private continuityTimer: NodeJS.Timeout | null = null;
+  private continuityInFlight = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -42,31 +44,326 @@ export class ExecutionService implements OnModuleInit {
 
   onModuleInit() {
     const dispatchEnabled = (process.env.EXECUTION_DISPATCH_ENABLED?.trim() || '').toLowerCase() === 'true';
-    if (!dispatchEnabled) {
-      console.log('[execution] automatic dispatch loop disabled');
-      return;
-    }
+    if (dispatchEnabled) {
+      const intervalMs = Number(process.env.EXECUTION_DISPATCH_INTERVAL_MS || 10000);
+      this.dispatchTimer = setInterval(() => {
+        if (this.dispatchInFlight) {
+          return;
+        }
 
-    const intervalMs = Number(process.env.EXECUTION_DISPATCH_INTERVAL_MS || 10000);
-    this.dispatchTimer = setInterval(() => {
-      if (this.dispatchInFlight) {
-        return;
+        this.dispatchInFlight = true;
+        this.dispatchDueJobs({ limit: 10 })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[execution] dispatch loop error', message);
+          })
+          .finally(() => {
+            this.dispatchInFlight = false;
+          });
+      }, Number.isFinite(intervalMs) && intervalMs > 999 ? intervalMs : 10000);
+
+      if (typeof (this.dispatchTimer as any)?.unref === 'function') {
+        (this.dispatchTimer as any).unref();
       }
-
-      this.dispatchInFlight = true;
-      this.dispatchDueJobs({ limit: 10 })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error('[execution] dispatch loop error', message);
-        })
-        .finally(() => {
-          this.dispatchInFlight = false;
-        });
-    }, Number.isFinite(intervalMs) && intervalMs > 999 ? intervalMs : 10000);
-
-    if (typeof (this.dispatchTimer as any)?.unref === 'function') {
-      (this.dispatchTimer as any).unref();
+    } else {
+      console.log('[execution] automatic dispatch loop disabled');
     }
+
+    const continuityEnabled = (process.env.CAMPAIGN_CONTINUITY_ENABLED?.trim() || 'true').toLowerCase() !== 'false';
+    if (continuityEnabled) {
+      const continuityIntervalMs = Number(process.env.CAMPAIGN_CONTINUITY_INTERVAL_MS || 300000);
+      this.continuityTimer = setInterval(() => {
+        if (this.continuityInFlight) {
+          return;
+        }
+
+        this.continuityInFlight = true;
+        this.maintainCampaignContinuity()
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[execution] campaign continuity loop error', message);
+          })
+          .finally(() => {
+            this.continuityInFlight = false;
+          });
+      }, Number.isFinite(continuityIntervalMs) && continuityIntervalMs > 59_999 ? continuityIntervalMs : 300000);
+
+      if (typeof (this.continuityTimer as any)?.unref === 'function') {
+        (this.continuityTimer as any).unref();
+      }
+    } else {
+      console.log('[execution] campaign continuity loop disabled');
+    }
+  }
+
+  async maintainCampaignContinuity(input: { limit?: number; organizationId?: string } = {}) {
+    const limit = Math.max(1, Math.min(input.limit ?? Number(process.env.CAMPAIGN_CONTINUITY_SCAN_LIMIT || 20), 100));
+
+    const campaigns = await this.prisma.campaign.findMany({
+      where: {
+        ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+        status: 'ACTIVE',
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        clientId: true,
+        workflowRunId: true,
+        name: true,
+        status: true,
+        generationState: true,
+        dailySendCap: true,
+        startAt: true,
+        endAt: true,
+        metadataJson: true,
+      },
+      orderBy: [{ updatedAt: 'asc' }],
+      take: limit,
+    });
+
+    const results: Array<Record<string, unknown>> = [];
+    for (const campaign of campaigns) {
+      results.push(await this.evaluateCampaignContinuity(campaign));
+    }
+
+    return {
+      ok: true,
+      scanned: campaigns.length,
+      results,
+    };
+  }
+
+  private async evaluateCampaignContinuity(campaign: {
+    id: string;
+    organizationId: string;
+    clientId: string;
+    workflowRunId: string | null;
+    name: string;
+    status: string;
+    generationState: string | null;
+    dailySendCap: number | null;
+    startAt: Date | null;
+    endAt: Date | null;
+    metadataJson: Prisma.JsonValue | null;
+  }) {
+    const now = new Date();
+    const metadata = this.asObject(campaign.metadataJson);
+    const continuity = this.asObject(metadata.continuity);
+
+    if (!this.isCampaignWithinActiveWindow(campaign.startAt, campaign.endAt, now)) {
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...metadata,
+            continuity: {
+              ...continuity,
+              lastCheckedAt: now.toISOString(),
+              status: 'outside_active_window',
+            },
+          }),
+        },
+      });
+
+      return {
+        campaignId: campaign.id,
+        action: 'skip',
+        reason: 'outside_active_window',
+      };
+    }
+
+    const dailySendCap = this.readPositiveInt(campaign.dailySendCap) ?? 25;
+    const targetSendableFloor = Math.max(5, Math.min(this.readPositiveInt(continuity.targetSendableFloor) ?? Math.ceil(dailySendCap / 2), 50));
+    const maxRefillBatchSize = Math.max(10, Math.min(this.readPositiveInt(continuity.maxRefillBatchSize) ?? dailySendCap, 25));
+
+    const [sendableAvailableCount, queuedFirstSendCount, activeLeadImportCount] = await Promise.all([
+      this.prisma.lead.count({
+        where: {
+          campaignId: campaign.id,
+          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+          contact: {
+            is: {
+              email: { not: null },
+            },
+          },
+        },
+      }),
+      this.prisma.job.count({
+        where: {
+          campaignId: campaign.id,
+          type: JobType.FIRST_SEND,
+          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] },
+        },
+      }),
+      this.prisma.job.count({
+        where: {
+          campaignId: campaign.id,
+          type: JobType.LEAD_IMPORT,
+          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] },
+        },
+      }),
+    ]);
+
+    const nextContinuityMetadata = {
+      ...continuity,
+      lastCheckedAt: now.toISOString(),
+      targetSendableFloor,
+      maxRefillBatchSize,
+      sendableAvailableCount,
+      queuedFirstSendCount,
+      activeLeadImportCount,
+    };
+
+    if (activeLeadImportCount > 0) {
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...metadata,
+            continuity: {
+              ...nextContinuityMetadata,
+              status: 'import_in_flight',
+            },
+          }),
+        },
+      });
+
+      return {
+        campaignId: campaign.id,
+        action: 'skip',
+        reason: 'import_in_flight',
+        sendableAvailableCount,
+        queuedFirstSendCount,
+      };
+    }
+
+    if (queuedFirstSendCount >= dailySendCap) {
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...metadata,
+            continuity: {
+              ...nextContinuityMetadata,
+              status: 'outreach_queue_full',
+            },
+          }),
+        },
+      });
+
+      return {
+        campaignId: campaign.id,
+        action: 'skip',
+        reason: 'outreach_queue_full',
+        sendableAvailableCount,
+        queuedFirstSendCount,
+      };
+    }
+
+    if (sendableAvailableCount >= targetSendableFloor) {
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...metadata,
+            continuity: {
+              ...nextContinuityMetadata,
+              status: 'healthy',
+            },
+          }),
+        },
+      });
+
+      return {
+        campaignId: campaign.id,
+        action: 'skip',
+        reason: 'healthy_inventory',
+        sendableAvailableCount,
+        queuedFirstSendCount,
+      };
+    }
+
+    const workflow = await this.workflowsService.createWorkflowRun({
+      clientId: campaign.clientId,
+      campaignId: campaign.id,
+      lane: WorkflowLane.GROWTH,
+      type: WorkflowType.CAMPAIGN_GENERATION,
+      status: WorkflowStatus.PENDING,
+      trigger: WorkflowTrigger.SYSTEM_EVENT,
+      source: RecordSource.SYSTEM_GENERATED,
+      title: `Continuity refill for ${campaign.name}`,
+      inputJson: {
+        campaignId: campaign.id,
+        refillMode: 'continuity_refill',
+        targetSendableFloor,
+        maxLeadCount: maxRefillBatchSize,
+      },
+      contextJson: {
+        parentCampaignWorkflowRunId: campaign.workflowRunId ?? null,
+        continuity: true,
+      },
+    });
+
+    const dedupeKey = `continuity_refill:${campaign.id}:${now.toISOString().slice(0, 13)}`;
+    const refillJob = await this.prisma.job.create({
+      data: {
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        campaignId: campaign.id,
+        type: JobType.LEAD_IMPORT,
+        status: JobStatus.QUEUED,
+        queueName: 'activation',
+        dedupeKey,
+        scheduledFor: now,
+        maxAttempts: 3,
+        payloadJson: {
+          campaignId: campaign.id,
+          workflowRunId: workflow.id,
+          refillMode: 'continuity_refill',
+          targetSendableFloor,
+          maxLeadCount: maxRefillBatchSize,
+          requestedAt: now.toISOString(),
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...metadata,
+          continuity: {
+            ...nextContinuityMetadata,
+            status: 'refill_queued',
+            lastRefillQueuedAt: now.toISOString(),
+            lastRefillJobId: refillJob.id,
+            lastWorkflowRunId: workflow.id,
+          },
+        }),
+      },
+    });
+
+    return {
+      campaignId: campaign.id,
+      action: 'queue_refill',
+      jobId: refillJob.id,
+      workflowRunId: workflow.id,
+      sendableAvailableCount,
+      queuedFirstSendCount,
+      targetSendableFloor,
+      maxRefillBatchSize,
+    };
+  }
+
+  private isCampaignWithinActiveWindow(startAt: Date | null, endAt: Date | null, now: Date) {
+    if (startAt && startAt.getTime() > now.getTime()) {
+      return false;
+    }
+    if (endAt && endAt.getTime() < now.getTime()) {
+      return false;
+    }
+    return true;
   }
 
   async queueLeadSend(leadId: string, dto: QueueLeadSendDto) {
@@ -364,7 +661,7 @@ export class ExecutionService implements OnModuleInit {
 
 
   private async updateCampaignActivationFailure(
-    job: { type: JobType; campaignId: string | null },
+    job: { type: JobType; campaignId: string | null; payloadJson?: Prisma.JsonValue | null },
     message: string,
     shouldRetry: boolean,
     retryAt: Date | null,
@@ -372,6 +669,9 @@ export class ExecutionService implements OnModuleInit {
     if (job.type !== JobType.LEAD_IMPORT || !job.campaignId) {
       return;
     }
+
+    const payload = this.asObject(job.payloadJson);
+    const refillMode = this.readString(payload.refillMode);
 
     const campaign = await this.prisma.campaign.findUnique({
       where: { id: job.campaignId },
@@ -388,6 +688,27 @@ export class ExecutionService implements OnModuleInit {
     }
 
     const currentMetadata = this.asObject(campaign.metadataJson);
+
+    if (refillMode === 'continuity_refill') {
+      const currentContinuity = this.asObject(currentMetadata.continuity);
+      await this.prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          metadataJson: toPrismaJson({
+            ...currentMetadata,
+            continuity: {
+              ...currentContinuity,
+              status: shouldRetry ? 'refill_retry_scheduled' : 'refill_failed',
+              lastError: message,
+              retryAt: retryAt?.toISOString() ?? null,
+              failedAt: new Date().toISOString(),
+            },
+          }),
+        },
+      });
+      return;
+    }
+
     const currentActivation = this.asObject(currentMetadata.activation);
 
     await this.prisma.campaign.update({
@@ -1532,6 +1853,19 @@ Orchestrate`,
 
   private readString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length ? value.trim() : null;
+  }
+
+  private readPositiveInt(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+    return null;
   }
 
   private readSeedProspects(value: unknown): Array<{
