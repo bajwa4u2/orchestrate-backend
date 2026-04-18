@@ -32,7 +32,8 @@ type SessionPayload = {
 };
 
 type OAuthLoginInput = {
-  idToken: string;
+  accessToken?: string;
+  idToken?: string;
   email?: string;
   fullName?: string;
 };
@@ -315,7 +316,9 @@ export class AuthService {
   }
 
   async loginClientWithGoogle(input: OAuthLoginInput) {
-    const profile = await this.verifyGoogleIdentityToken(input);
+    const profile = input.accessToken
+      ? await this.verifyGoogleAccessToken(input)
+      : await this.verifyGoogleIdentityToken(input);
     return this.loginClientWithExternalIdentity(profile);
   }
 
@@ -1293,9 +1296,43 @@ export class AuthService {
     return new Date().toISOString();
   }
 
+  private async verifyGoogleAccessToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const accessToken = this.normalizeOptionalString(input.accessToken);
+    if (!accessToken) {
+      throw new UnauthorizedException('Google access token is missing');
+    }
+
+    const rawProfile = await this.fetchJson('https://www.googleapis.com/oauth2/v3/userinfo', {
+      Authorization: `Bearer ${accessToken}`,
+    });
+
+    const profile = this.asObject(rawProfile);
+    const providerUserId = this.readRequiredString(
+      profile.sub,
+      'Google subject is missing',
+    );
+    const email = this.normalizeOptionalEmail(profile.email ?? input.email);
+    const emailVerified = this.readBooleanLike(profile.email_verified);
+    const fullName = this.normalizeOptionalString(profile.name ?? input.fullName);
+
+    return {
+      provider: AuthProvider.GOOGLE,
+      providerUserId,
+      email,
+      emailVerified,
+      fullName,
+      rawClaims: profile,
+    };
+  }
+
   private async verifyGoogleIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const idToken = this.normalizeOptionalString(input.idToken);
+    if (!idToken) {
+      throw new UnauthorizedException('Google identity token is missing');
+    }
+
     const payload = await this.verifyJwtWithJwks({
-      idToken: input.idToken,
+      idToken,
       jwksUrl: 'https://www.googleapis.com/oauth2/v3/certs',
       expectedAudience: this.requireEnv('GOOGLE_CLIENT_ID'),
       acceptedIssuers: ['https://accounts.google.com', 'accounts.google.com'],
@@ -1317,8 +1354,13 @@ export class AuthService {
   }
 
   private async verifyMicrosoftIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const idToken = this.normalizeOptionalString(input.idToken);
+    if (!idToken) {
+      throw new UnauthorizedException('Microsoft identity token is missing');
+    }
+
     const payload = await this.verifyJwtWithJwks({
-      idToken: input.idToken,
+      idToken,
       jwksUrl: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
       expectedAudience: this.requireEnv('MICROSOFT_CLIENT_ID'),
       acceptedIssuers: [
@@ -1346,8 +1388,13 @@ export class AuthService {
   }
 
   private async verifyAppleIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const idToken = this.normalizeOptionalString(input.idToken);
+    if (!idToken) {
+      throw new UnauthorizedException('Apple identity token is missing');
+    }
+
     const payload = await this.verifyJwtWithJwks({
-      idToken: input.idToken,
+      idToken,
       jwksUrl: 'https://appleid.apple.com/auth/keys',
       expectedAudience: this.requireEnv('APPLE_CLIENT_ID'),
       acceptedIssuers: ['https://appleid.apple.com'],
@@ -1451,8 +1498,11 @@ export class AuthService {
     };
   }
 
-  private async fetchJson(url: string): Promise<unknown> {
-    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' } });
+  private async fetchJson(url: string, headers?: Record<string, string>): Promise<unknown> {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { accept: 'application/json', ...(headers || {}) },
+    });
     if (!response.ok) {
       throw new UnauthorizedException(`Failed to fetch identity keys from ${url}`);
     }

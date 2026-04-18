@@ -2,17 +2,12 @@ import { Body, Controller, Get, Headers, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { LoginDto } from './dto/login.dto';
+import { OAuthLoginDto } from './dto/oauth-login.dto';
 import { OperatorBootstrapDto } from './dto/operator-bootstrap.dto';
 import { RequestEmailVerificationDto } from './dto/request-email-verification.dto';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
-
-type OAuthLoginBody = {
-  idToken: string;
-  email?: string;
-  fullName?: string;
-};
 
 @Controller('auth')
 export class AuthController {
@@ -39,18 +34,18 @@ export class AuthController {
   }
 
   @Post('client/oauth/google')
-  loginClientWithGoogle(@Body() body: OAuthLoginBody) {
-    return this.authService.loginClientWithGoogle(body);
+  loginClientWithGoogle(@Body() dto: OAuthLoginDto) {
+    return this.authService.loginClientWithGoogle(dto);
   }
 
   @Post('client/oauth/microsoft')
-  loginClientWithMicrosoft(@Body() body: OAuthLoginBody) {
-    return this.authService.loginClientWithMicrosoft(body);
+  loginClientWithMicrosoft(@Body() dto: OAuthLoginDto) {
+    return this.authService.loginClientWithMicrosoft(dto);
   }
 
   @Post('client/oauth/apple')
-  loginClientWithApple(@Body() body: OAuthLoginBody) {
-    return this.authService.loginClientWithApple(body);
+  loginClientWithApple(@Body() dto: OAuthLoginDto) {
+    return this.authService.loginClientWithApple(dto);
   }
 
   @Post('operator/bootstrap')
@@ -64,7 +59,7 @@ export class AuthController {
   }
 
   @Post('logout')
-  logout(@Headers() headers: Record<string, unknown>) {
+  logout() {
     return this.authService.logout();
   }
 
