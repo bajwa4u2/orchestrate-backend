@@ -4,8 +4,8 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { MemberRole, OrganizationType } from '@prisma/client';
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
+import { AuthProvider, MemberRole, OrganizationType, Prisma } from '@prisma/client';
+import { createHmac, createPublicKey, randomBytes, scryptSync, timingSafeEqual, verify as verifySignature } from 'crypto';
 import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
@@ -31,6 +31,39 @@ type SessionPayload = {
   exp: number;
 };
 
+type OAuthLoginInput = {
+  idToken: string;
+  email?: string;
+  fullName?: string;
+};
+
+type ExternalIdentityProfile = {
+  provider: AuthProvider;
+  providerUserId: string;
+  email: string | null;
+  emailVerified: boolean;
+  fullName: string | null;
+  rawClaims: Record<string, unknown>;
+};
+
+type JwtHeader = {
+  alg?: string;
+  kid?: string;
+  typ?: string;
+};
+
+type JwtPayload = Record<string, unknown> & {
+  iss?: string;
+  sub?: string;
+  aud?: string | string[];
+  exp?: number;
+  email?: string;
+  email_verified?: boolean | string;
+  name?: string;
+  preferred_username?: string;
+  nonce?: string;
+};
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -50,6 +83,7 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { id: context.userId },
       include: {
+        authIdentities: { orderBy: { createdAt: 'asc' } },
         memberships: {
           where: context.organizationId
             ? { organizationId: context.organizationId, isActive: true }
@@ -65,6 +99,11 @@ export class AuthService {
     const membership = user.memberships[0];
     const metadata = this.asObject(user.metadataJson);
     const auth = this.asObject(metadata.auth);
+    const onboarding = this.getOnboardingState(metadata, {
+      hasWorkspace: Boolean(membership),
+      hasPassword: Boolean(user.passwordHash),
+      fullName: user.fullName,
+    });
 
     const clientState = context.clientId
       ? await this.loadClientState(context.clientId)
@@ -82,6 +121,12 @@ export class AuthService {
         selectedTier: clientState?.selectedTier ?? null,
         subscriptionStatus: clientState?.subscriptionStatus ?? 'none',
       },
+      auth: {
+        methods: this.listAuthMethods(user.authIdentities, user.passwordHash),
+        primaryProvider: this.resolvePrimaryProvider(user.authIdentities, user.passwordHash),
+        canAddPassword: !user.passwordHash,
+      },
+      onboarding,
       session: {
         organizationId: context.organizationId,
         clientId: context.clientId,
@@ -127,10 +172,27 @@ export class AuthService {
           email,
           fullName: dto.fullName.trim(),
           passwordHash,
+          metadataJson: this.mergeUserMetadata(null, {
+            emailVerifiedAt: null,
+            hasPassword: true,
+            primaryProvider: 'PASSWORD',
+            profileComplete: true,
+            businessComplete: true,
+            workspaceCreated: true,
+            passwordComplete: true,
+          }),
+        },
+      });
+
+      await tx.authIdentity.create({
+        data: {
+          userId: user.id,
+          provider: AuthProvider.PASSWORD,
+          providerUserId: user.id,
+          email,
+          emailVerified: false,
           metadataJson: {
-            auth: {
-              emailVerifiedAt: null,
-            },
+            source: 'client_register',
           },
         },
       });
@@ -171,19 +233,23 @@ export class AuthService {
         },
       });
 
-      await tx.user.update({
+      const updatedUser = await tx.user.update({
         where: { id: user.id },
         data: {
-          metadataJson: {
-            auth: { emailVerifiedAt: null },
-            clientAccess: {
-              defaultClientId: client.id,
-            },
-          },
+          metadataJson: this.mergeUserMetadata(user.metadataJson, {
+            emailVerifiedAt: null,
+            hasPassword: true,
+            primaryProvider: 'PASSWORD',
+            defaultClientId: client.id,
+            profileComplete: true,
+            businessComplete: true,
+            workspaceCreated: true,
+            passwordComplete: true,
+          }),
         },
       });
 
-      return { user, organization, client };
+      return { user: updatedUser, organization, client };
     });
 
     const verificationToken = this.signToken({
@@ -218,7 +284,10 @@ export class AuthService {
   async loginClient(dto: LoginDto) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email.trim().toLowerCase() },
-      include: { memberships: { include: { organization: true }, where: { isActive: true } } },
+      include: {
+        authIdentities: true,
+        memberships: { include: { organization: true }, where: { isActive: true } },
+      },
     });
 
     if (!user?.passwordHash || !this.verifyPassword(dto.password, user.passwordHash)) {
@@ -232,36 +301,32 @@ export class AuthService {
     const membership =
       user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
       user.memberships[0];
-    if (!membership) throw new UnauthorizedException('No client workspace is available for this account');
+
+    if (!membership) {
+      return this.issueClientSession(user, null, undefined, undefined, null);
+    }
 
     const clientId = await this.resolveClientId(user.id, membership.organizationId);
-    if (!clientId) throw new UnauthorizedException('No client account is linked to this workspace');
+    const clientState = clientId ? await this.loadClientState(clientId) : null;
 
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
-    const token = this.signToken({
-      typ: 'session',
-      sub: user.id,
-      email: user.email,
-      organizationId: membership.organizationId,
-      clientId,
-      memberRole: membership.role,
-      surface: 'client',
-      fullName: user.fullName,
-      exp: this.expiresInSeconds(30 * 24 * 3600),
-    });
+    return this.issueClientSession(user, membership.organization, clientId, membership.role, clientState);
+  }
 
-    const clientState = await this.loadClientState(clientId);
+  async loginClientWithGoogle(input: OAuthLoginInput) {
+    const profile = await this.verifyGoogleIdentityToken(input);
+    return this.loginClientWithExternalIdentity(profile);
+  }
 
-    return this.buildSessionResponse({
-      token,
-      user,
-      organization: membership.organization,
-      clientId,
-      memberRole: membership.role,
-      surface: 'client',
-      clientState,
-    });
+  async loginClientWithMicrosoft(input: OAuthLoginInput) {
+    const profile = await this.verifyMicrosoftIdentityToken(input);
+    return this.loginClientWithExternalIdentity(profile);
+  }
+
+  async loginClientWithApple(input: OAuthLoginInput) {
+    const profile = await this.verifyAppleIdentityToken(input);
+    return this.loginClientWithExternalIdentity(profile);
   }
 
   async bootstrapOperator(dto: OperatorBootstrapDto) {
@@ -270,7 +335,7 @@ export class AuthService {
 
     const existing = await this.prisma.user.findUnique({
       where: { email },
-      include: { memberships: { include: { organization: true }, where: { isActive: true } } },
+      include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } },
     });
 
     if (
@@ -289,16 +354,35 @@ export class AuthService {
       const user = existing
         ? await tx.user.update({
             where: { id: existing.id },
-            data: { fullName: dto.fullName.trim(), passwordHash, isActive: true },
+            data: {
+              fullName: dto.fullName.trim(),
+              passwordHash,
+              isActive: true,
+              metadataJson: this.mergeUserMetadata(existing.metadataJson, {
+                emailVerifiedAt: this.currentIso(),
+                hasPassword: true,
+                primaryProvider: this.resolvePrimaryProvider(existing.authIdentities, passwordHash),
+                profileComplete: true,
+                passwordComplete: true,
+              }),
+            },
           })
         : await tx.user.create({
             data: {
               email,
               fullName: dto.fullName.trim(),
               passwordHash,
-              metadataJson: { auth: { emailVerifiedAt: new Date().toISOString() } },
+              metadataJson: this.mergeUserMetadata(null, {
+                emailVerifiedAt: this.currentIso(),
+                hasPassword: true,
+                primaryProvider: 'PASSWORD',
+                profileComplete: true,
+                passwordComplete: true,
+              }),
             },
           });
+
+      await this.ensurePasswordIdentity(tx, user.id, user.email, true);
 
       const organization = await tx.organization.create({
         data: {
@@ -314,8 +398,24 @@ export class AuthService {
         data: { organizationId: organization.id, userId: user.id, role: 'OWNER' },
       });
 
-      return { user, organization };
+      const refreshedUser = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          metadataJson: this.mergeUserMetadata(user.metadataJson, {
+            emailVerifiedAt: this.currentIso(),
+            hasPassword: true,
+            primaryProvider: this.resolvePrimaryProvider(existing?.authIdentities ?? [], passwordHash),
+            profileComplete: true,
+            workspaceCreated: true,
+            passwordComplete: true,
+          }),
+        },
+      });
+
+      return { user: refreshedUser, organization };
     });
+
+    await this.prisma.user.update({ where: { id: result.user.id }, data: { lastLoginAt: new Date() } });
 
     const token = this.signToken({
       typ: 'session',
@@ -340,7 +440,7 @@ export class AuthService {
   async loginOperator(dto: LoginDto) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email.trim().toLowerCase() },
-      include: { memberships: { include: { organization: true }, where: { isActive: true } } },
+      include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } },
     });
 
     if (!user?.passwordHash || !this.verifyPassword(dto.password, user.passwordHash)) {
@@ -380,7 +480,7 @@ export class AuthService {
 
   async requestPasswordReset(dto: RequestPasswordResetDto) {
     const user = await this.prisma.user.findUnique({ where: { email: dto.email.trim().toLowerCase() } });
-    if (!user) return { ok: true };
+    if (!user || !user.passwordHash) return { ok: true };
 
     const token = this.signToken({
       typ: 'password_reset',
@@ -402,13 +502,35 @@ export class AuthService {
   async resetPassword(dto: ResetPasswordDto) {
     const payload = this.verifyToken(dto.token, 'password_reset');
     const passwordHash = this.hashPassword(dto.newPassword);
-    await this.prisma.user.update({ where: { id: payload.sub }, data: { passwordHash } });
+    const user = await this.prisma.user.update({
+      where: { id: payload.sub },
+      data: {
+        passwordHash,
+        metadataJson: {
+          ...(this.asObject((await this.prisma.user.findUnique({ where: { id: payload.sub }, select: { metadataJson: true } }))?.metadataJson)),
+        },
+      },
+    });
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.ensurePasswordIdentity(tx, user.id, user.email, this.isEmailVerified(user.metadataJson));
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          metadataJson: this.mergeUserMetadata(user.metadataJson, {
+            hasPassword: true,
+            passwordComplete: true,
+          }),
+        },
+      });
+    });
+
     return { ok: true };
   }
 
   async requestEmailVerification(dto: RequestEmailVerificationDto) {
     const user = await this.prisma.user.findUnique({ where: { email: dto.email.trim().toLowerCase() } });
-    if (!user) return { ok: true };
+    if (!user || this.isPlaceholderEmail(user.email)) return { ok: true };
 
     const memberships = await this.prisma.workspaceMember.findMany({
       where: { userId: user.id, isActive: true },
@@ -448,14 +570,18 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
     if (!user) throw new NotFoundException('Account not found');
 
-    const metadata = this.asObject(user.metadataJson);
-    const auth = this.asObject(metadata.auth);
-    auth.emailVerifiedAt = new Date().toISOString();
-    metadata.auth = auth;
-
     const updatedUser = await this.prisma.user.update({
       where: { id: user.id },
-      data: { metadataJson: metadata },
+      data: {
+        metadataJson: this.mergeUserMetadata(user.metadataJson, {
+          emailVerifiedAt: this.currentIso(),
+        }),
+      },
+    });
+
+    await this.prisma.authIdentity.updateMany({
+      where: { userId: user.id, email: user.email },
+      data: { emailVerified: true },
     });
 
     const membership = payload.organizationId
@@ -474,7 +600,9 @@ export class AuthService {
         });
 
     if (!membership) {
-      return { ok: true };
+      const hydrated = await this.prisma.user.findUnique({ where: { id: user.id }, include: { authIdentities: true } });
+      if (!hydrated) return { ok: true };
+      return this.issueClientSession(hydrated, null, undefined, undefined, null);
     }
 
     const clientId =
@@ -483,27 +611,25 @@ export class AuthService {
         ? await this.resolveClientId(user.id, membership.organizationId)
         : undefined);
 
-    const token = this.signToken({
-      typ: 'session',
-      sub: updatedUser.id,
-      email: updatedUser.email,
-      organizationId: membership.organizationId,
-      clientId,
-      memberRole: membership.role,
-      surface:
-        payload.surface ||
-        (this.isOperatorOrganization(membership.organization.type, membership.organization.isInternal)
-          ? 'operator'
-          : 'client'),
-      fullName: updatedUser.fullName,
-      exp: this.expiresInSeconds(30 * 24 * 3600),
-    });
-
     const clientState = clientId ? await this.loadClientState(clientId) : null;
 
     return this.buildSessionResponse({
-      token,
-      user: updatedUser,
+      token: this.signToken({
+        typ: 'session',
+        sub: updatedUser.id,
+        email: updatedUser.email,
+        organizationId: membership.organizationId,
+        clientId,
+        memberRole: membership.role,
+        surface:
+          payload.surface ||
+          (this.isOperatorOrganization(membership.organization.type, membership.organization.isInternal)
+            ? 'operator'
+            : 'client'),
+        fullName: updatedUser.fullName,
+        exp: this.expiresInSeconds(30 * 24 * 3600),
+      }),
+      user: hydratedOrThrow(await this.prisma.user.findUnique({ where: { id: updatedUser.id }, include: { authIdentities: true } })),
       organization: membership.organization,
       clientId,
       memberRole: membership.role,
@@ -582,10 +708,197 @@ export class AuthService {
     });
   }
 
+  private async loginClientWithExternalIdentity(profile: ExternalIdentityProfile) {
+    const user = await this.prisma.$transaction(async (tx) => {
+      const existingIdentity = await tx.authIdentity.findUnique({
+        where: {
+          provider_providerUserId: {
+            provider: profile.provider,
+            providerUserId: profile.providerUserId,
+          },
+        },
+        include: { user: true },
+      });
+
+      if (existingIdentity) {
+        const updatedUser = await tx.user.update({
+          where: { id: existingIdentity.userId },
+          data: {
+            fullName:
+              profile.fullName && this.shouldReplaceName(existingIdentity.user.fullName)
+                ? profile.fullName
+                : undefined,
+            email:
+              this.shouldReplaceLoginEmail(existingIdentity.user.email, profile.email) && profile.email
+                ? profile.email
+                : undefined,
+            metadataJson: this.mergeUserMetadata(existingIdentity.user.metadataJson, {
+              emailVerifiedAt: profile.emailVerified && profile.email && !this.isPlaceholderEmail(profile.email)
+                ? this.currentIso()
+                : undefined,
+              primaryProvider: profile.provider,
+              profileComplete: Boolean((profile.fullName || existingIdentity.user.fullName || '').trim()),
+            }),
+          },
+        });
+
+        await tx.authIdentity.update({
+          where: { id: existingIdentity.id },
+          data: {
+            email: profile.email,
+            emailVerified: profile.emailVerified,
+            metadataJson: profile.rawClaims as Prisma.InputJsonValue,
+          },
+        });
+
+        return tx.user.findUniqueOrThrow({ where: { id: updatedUser.id }, include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } } });
+      }
+
+      const trustedEmail = profile.email && !this.isPlaceholderEmail(profile.email) && profile.emailVerified
+        ? profile.email
+        : null;
+
+      const matchedUser = trustedEmail
+        ? await tx.user.findUnique({ where: { email: trustedEmail }, include: { authIdentities: true } })
+        : null;
+
+      if (matchedUser) {
+        await tx.authIdentity.create({
+          data: {
+            userId: matchedUser.id,
+            provider: profile.provider,
+            providerUserId: profile.providerUserId,
+            email: profile.email,
+            emailVerified: profile.emailVerified,
+            metadataJson: profile.rawClaims as Prisma.InputJsonValue,
+          },
+        });
+
+        const updated = await tx.user.update({
+          where: { id: matchedUser.id },
+          data: {
+            fullName:
+              profile.fullName && this.shouldReplaceName(matchedUser.fullName)
+                ? profile.fullName
+                : undefined,
+            metadataJson: this.mergeUserMetadata(matchedUser.metadataJson, {
+              emailVerifiedAt: profile.emailVerified ? this.currentIso() : undefined,
+              primaryProvider: this.resolvePrimaryProvider([
+                ...matchedUser.authIdentities,
+                { provider: profile.provider } as { provider: AuthProvider },
+              ], matchedUser.passwordHash),
+              profileComplete: Boolean((profile.fullName || matchedUser.fullName || '').trim()),
+            }),
+          },
+        });
+
+        return tx.user.findUniqueOrThrow({ where: { id: updated.id }, include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } } });
+      }
+
+      const loginEmail = profile.email && !this.isPlaceholderEmail(profile.email)
+        ? profile.email
+        : this.buildPlaceholderEmail(profile.provider, profile.providerUserId);
+      const fullName = (profile.fullName || '').trim() || this.defaultNameForProvider(profile.provider);
+
+      const createdUser = await tx.user.create({
+        data: {
+          email: loginEmail,
+          fullName,
+          metadataJson: this.mergeUserMetadata(null, {
+            emailVerifiedAt: profile.emailVerified && profile.email && !this.isPlaceholderEmail(profile.email)
+              ? this.currentIso()
+              : null,
+            primaryProvider: profile.provider,
+            hasPassword: false,
+            profileComplete: Boolean((profile.fullName || '').trim()),
+            businessComplete: false,
+            workspaceCreated: false,
+            passwordComplete: false,
+          }),
+        },
+      });
+
+      await tx.authIdentity.create({
+        data: {
+          userId: createdUser.id,
+          provider: profile.provider,
+          providerUserId: profile.providerUserId,
+          email: profile.email,
+          emailVerified: profile.emailVerified,
+          metadataJson: profile.rawClaims as Prisma.InputJsonValue,
+        },
+      });
+
+      return tx.user.findUniqueOrThrow({ where: { id: createdUser.id }, include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } } });
+    });
+
+    await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+
+    const membership =
+      user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
+      user.memberships[0];
+
+    if (!membership) {
+      return this.issueClientSession(user, null, undefined, undefined, null);
+    }
+
+    const clientId = await this.resolveClientId(user.id, membership.organizationId);
+    const clientState = clientId ? await this.loadClientState(clientId) : null;
+
+    return this.issueClientSession(user, membership.organization, clientId, membership.role, clientState);
+  }
+
+  private issueClientSession(
+    user: {
+      id: string;
+      email: string;
+      fullName: string;
+      passwordHash?: string | null;
+      metadataJson?: unknown;
+      authIdentities?: Array<{ provider: AuthProvider }>;
+    },
+    organization: { id: string; displayName: string; legalName: string; type: OrganizationType; isInternal?: boolean } | null,
+    clientId?: string,
+    memberRole?: MemberRole,
+    clientState?: {
+      setupCompleted: boolean;
+      setupCompletedAt: string | null;
+      selectedPlan: string | null;
+      selectedTier?: string | null;
+      subscriptionStatus: string;
+      country: string | null;
+      area: string | null;
+      industry: string | null;
+      scope: Record<string, unknown> | null;
+    } | null,
+  ) {
+    const token = this.signToken({
+      typ: 'session',
+      sub: user.id,
+      email: user.email,
+      organizationId: organization?.id,
+      clientId,
+      memberRole,
+      surface: 'client',
+      fullName: user.fullName,
+      exp: this.expiresInSeconds(30 * 24 * 3600),
+    });
+
+    return this.buildSessionResponse({
+      token,
+      user,
+      organization,
+      clientId,
+      memberRole,
+      surface: 'client',
+      clientState,
+    });
+  }
+
   private buildSessionResponse(input: {
     token: string;
-    user: { id: string; email: string; fullName: string; metadataJson?: unknown };
-    organization: { id: string; displayName: string; legalName: string; type: OrganizationType; isInternal?: boolean };
+    user: { id: string; email: string; fullName: string; passwordHash?: string | null; metadataJson?: unknown; authIdentities?: Array<{ provider: AuthProvider }> };
+    organization?: { id: string; displayName: string; legalName: string; type: OrganizationType; isInternal?: boolean } | null;
     memberRole?: MemberRole;
     clientId?: string;
     surface: SessionSurface;
@@ -603,6 +916,12 @@ export class AuthService {
   }) {
     const metadata = this.asObject(input.user.metadataJson);
     const auth = this.asObject(metadata.auth);
+    const onboarding = this.getOnboardingState(metadata, {
+      hasWorkspace: Boolean(input.organization),
+      hasPassword: Boolean(input.user.passwordHash),
+      fullName: input.user.fullName,
+      clientState: input.clientState ?? null,
+    });
 
     return {
       token: input.token,
@@ -616,12 +935,20 @@ export class AuthService {
         selectedTier: input.clientState?.selectedTier ?? null,
         subscriptionStatus: input.clientState?.subscriptionStatus ?? 'none',
       },
-      workspace: {
-        organizationId: input.organization.id,
-        displayName: input.organization.displayName,
-        legalName: input.organization.legalName,
-        type: input.organization.type,
+      auth: {
+        methods: this.listAuthMethods(input.user.authIdentities, input.user.passwordHash),
+        primaryProvider: this.resolvePrimaryProvider(input.user.authIdentities ?? [], input.user.passwordHash),
+        canAddPassword: !input.user.passwordHash,
       },
+      onboarding,
+      workspace: input.organization
+        ? {
+            organizationId: input.organization.id,
+            displayName: input.organization.displayName,
+            legalName: input.organization.legalName,
+            type: input.organization.type,
+          }
+        : null,
       session: {
         surface: input.surface,
         memberRole: input.memberRole,
@@ -758,7 +1085,6 @@ export class AuthService {
     return payload;
   }
 
-
   private getTokenSecret() {
     const secret = process.env.AUTH_TOKEN_SECRET?.trim() || process.env.APP_SECRET?.trim();
     if (!secret) {
@@ -810,4 +1136,359 @@ export class AuthService {
     const auth = this.asObject(metadata.auth);
     return Boolean(auth.emailVerifiedAt);
   }
+
+  private mergeUserMetadata(
+    current: unknown,
+    patch: {
+      emailVerifiedAt?: string | null;
+      hasPassword?: boolean;
+      primaryProvider?: AuthProvider | string | null;
+      defaultClientId?: string | null;
+      profileComplete?: boolean;
+      businessComplete?: boolean;
+      workspaceCreated?: boolean;
+      passwordComplete?: boolean;
+    },
+  ) {
+    const metadata = this.asObject(current);
+    const auth = this.asObject(metadata.auth);
+    const clientAccess = this.asObject(metadata.clientAccess);
+    const onboarding = this.asObject(metadata.onboarding);
+
+    if (patch.emailVerifiedAt !== undefined) auth.emailVerifiedAt = patch.emailVerifiedAt;
+    if (patch.hasPassword !== undefined) auth.hasPassword = patch.hasPassword;
+    if (patch.primaryProvider !== undefined && patch.primaryProvider !== null) {
+      auth.primaryProvider = String(patch.primaryProvider).toLowerCase();
+    }
+    if (patch.defaultClientId !== undefined && patch.defaultClientId !== null) {
+      clientAccess.defaultClientId = patch.defaultClientId;
+    }
+    if (patch.profileComplete !== undefined) onboarding.profileComplete = patch.profileComplete;
+    if (patch.businessComplete !== undefined) onboarding.businessComplete = patch.businessComplete;
+    if (patch.workspaceCreated !== undefined) onboarding.workspaceCreated = patch.workspaceCreated;
+    if (patch.passwordComplete !== undefined) onboarding.passwordComplete = patch.passwordComplete;
+
+    metadata.auth = auth;
+    metadata.clientAccess = clientAccess;
+    metadata.onboarding = onboarding;
+    return metadata;
+  }
+
+  private getOnboardingState(
+    metadata: Record<string, any>,
+    input: {
+      hasWorkspace: boolean;
+      hasPassword: boolean;
+      fullName?: string | null;
+      clientState?: { setupCompleted: boolean } | null;
+    },
+  ) {
+    const onboarding = this.asObject(metadata.onboarding);
+    const profileComplete = onboarding.profileComplete ?? Boolean((input.fullName || '').trim());
+    const businessComplete = onboarding.businessComplete ?? Boolean(input.clientState?.setupCompleted);
+    const workspaceCreated = onboarding.workspaceCreated ?? input.hasWorkspace;
+    const passwordComplete = onboarding.passwordComplete ?? input.hasPassword;
+
+    return {
+      profileComplete: Boolean(profileComplete),
+      businessComplete: Boolean(businessComplete),
+      workspaceCreated: Boolean(workspaceCreated),
+      passwordComplete: Boolean(passwordComplete),
+      needsProfileCompletion: !profileComplete,
+      needsBusinessCompletion: !businessComplete,
+      needsWorkspaceCreation: !workspaceCreated,
+      needsPasswordSetup: !passwordComplete,
+    };
+  }
+
+  private listAuthMethods(identities?: Array<{ provider: AuthProvider }>, passwordHash?: string | null) {
+    const methods = new Set<string>();
+    for (const identity of identities ?? []) {
+      methods.add(String(identity.provider).toLowerCase());
+    }
+    if (passwordHash) methods.add('password');
+    return Array.from(methods.values());
+  }
+
+  private resolvePrimaryProvider(
+    identities?: Array<{ provider: AuthProvider }>,
+    passwordHash?: string | null,
+  ): 'password' | 'google' | 'microsoft' | 'apple' | null {
+    const providers = new Set((identities ?? []).map((item) => String(item.provider).toLowerCase()));
+    if (providers.has('google')) return 'google';
+    if (providers.has('microsoft')) return 'microsoft';
+    if (providers.has('apple')) return 'apple';
+    if (passwordHash || providers.has('password')) return 'password';
+    return null;
+  }
+
+  private async ensurePasswordIdentity(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    email: string,
+    emailVerified: boolean,
+  ) {
+    const existing = await tx.authIdentity.findUnique({
+      where: {
+        provider_providerUserId: {
+          provider: AuthProvider.PASSWORD,
+          providerUserId: userId,
+        },
+      },
+    });
+
+    if (existing) {
+      await tx.authIdentity.update({
+        where: { id: existing.id },
+        data: { email, emailVerified },
+      });
+      return;
+    }
+
+    await tx.authIdentity.create({
+      data: {
+        userId,
+        provider: AuthProvider.PASSWORD,
+        providerUserId: userId,
+        email,
+        emailVerified,
+        metadataJson: { source: 'password' },
+      },
+    });
+  }
+
+  private shouldReplaceName(currentName: string | null | undefined) {
+    const value = (currentName || '').trim().toLowerCase();
+    return !value || value === 'orchestrate user' || value === 'apple user' || value === 'microsoft user' || value === 'google user';
+  }
+
+  private shouldReplaceLoginEmail(currentEmail: string, incomingEmail: string | null) {
+    return Boolean(incomingEmail && this.isPlaceholderEmail(currentEmail));
+  }
+
+  private buildPlaceholderEmail(provider: AuthProvider, providerUserId: string) {
+    const normalized = providerUserId.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || randomBytes(6).toString('hex');
+    return `${String(provider).toLowerCase()}-${normalized}@auth.orchestrate.local`;
+  }
+
+  private defaultNameForProvider(provider: AuthProvider) {
+    switch (provider) {
+      case AuthProvider.APPLE:
+        return 'Apple User';
+      case AuthProvider.MICROSOFT:
+        return 'Microsoft User';
+      case AuthProvider.GOOGLE:
+        return 'Google User';
+      default:
+        return 'Orchestrate User';
+    }
+  }
+
+  private isPlaceholderEmail(email: string | null | undefined) {
+    const value = (email || '').trim().toLowerCase();
+    return value.endsWith('@auth.orchestrate.local');
+  }
+
+  private currentIso() {
+    return new Date().toISOString();
+  }
+
+  private async verifyGoogleIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const payload = await this.verifyJwtWithJwks({
+      idToken: input.idToken,
+      jwksUrl: 'https://www.googleapis.com/oauth2/v3/certs',
+      expectedAudience: this.requireEnv('GOOGLE_CLIENT_ID'),
+      acceptedIssuers: ['https://accounts.google.com', 'accounts.google.com'],
+    });
+
+    const providerUserId = this.readRequiredString(payload.sub, 'Google subject is missing');
+    const email = this.normalizeOptionalEmail(payload.email ?? input.email);
+    const emailVerified = this.readBooleanLike(payload.email_verified);
+    const fullName = this.normalizeOptionalString(payload.name ?? input.fullName);
+
+    return {
+      provider: AuthProvider.GOOGLE,
+      providerUserId,
+      email,
+      emailVerified,
+      fullName,
+      rawClaims: payload,
+    };
+  }
+
+  private async verifyMicrosoftIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const payload = await this.verifyJwtWithJwks({
+      idToken: input.idToken,
+      jwksUrl: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+      expectedAudience: this.requireEnv('MICROSOFT_CLIENT_ID'),
+      acceptedIssuers: [
+        'https://login.microsoftonline.com/',
+        'https://sts.windows.net/',
+      ],
+      issuerMode: 'prefix',
+    });
+
+    const providerUserId = this.readRequiredString(payload.sub, 'Microsoft subject is missing');
+    const email = this.normalizeOptionalEmail(
+      payload.email ?? payload.preferred_username ?? input.email,
+    );
+    const emailVerified = email ? true : false;
+    const fullName = this.normalizeOptionalString(payload.name ?? input.fullName);
+
+    return {
+      provider: AuthProvider.MICROSOFT,
+      providerUserId,
+      email,
+      emailVerified,
+      fullName,
+      rawClaims: payload,
+    };
+  }
+
+  private async verifyAppleIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
+    const payload = await this.verifyJwtWithJwks({
+      idToken: input.idToken,
+      jwksUrl: 'https://appleid.apple.com/auth/keys',
+      expectedAudience: this.requireEnv('APPLE_CLIENT_ID'),
+      acceptedIssuers: ['https://appleid.apple.com'],
+    });
+
+    const providerUserId = this.readRequiredString(payload.sub, 'Apple subject is missing');
+    const email = this.normalizeOptionalEmail(input.email ?? payload.email);
+    const emailVerified = this.readBooleanLike(payload.email_verified) || Boolean(email);
+    const fullName = this.normalizeOptionalString(input.fullName ?? payload.name);
+
+    return {
+      provider: AuthProvider.APPLE,
+      providerUserId,
+      email,
+      emailVerified,
+      fullName,
+      rawClaims: payload,
+    };
+  }
+
+  private async verifyJwtWithJwks(input: {
+    idToken: string;
+    jwksUrl: string;
+    expectedAudience: string;
+    acceptedIssuers: string[];
+    issuerMode?: 'exact' | 'prefix';
+  }): Promise<JwtPayload> {
+    const { header, payload, signedPart, signature } = this.decodeJwt(input.idToken);
+    if ((header.alg || '').toUpperCase() !== 'RS256') {
+      throw new UnauthorizedException('Unsupported identity token algorithm');
+    }
+    if (!header.kid) {
+      throw new UnauthorizedException('Missing identity token key id');
+    }
+
+    const jwks = await this.fetchJson(input.jwksUrl);
+    const keys = Array.isArray((jwks as { keys?: unknown }).keys)
+      ? ((jwks as { keys: Array<Record<string, unknown>> }).keys)
+      : [];
+    const jwk = keys.find((item) => item.kid === header.kid);
+    if (!jwk) {
+      throw new UnauthorizedException('Identity token signing key was not found');
+    }
+
+    const publicKey = createPublicKey({
+      key: jwk as Record<string, unknown>,
+      format: 'jwk',
+    });
+    const isValid = verifySignature('RSA-SHA256', Buffer.from(signedPart), publicKey, signature);
+    if (!isValid) {
+      throw new UnauthorizedException('Identity token signature is invalid');
+    }
+
+    const issuer = this.normalizeOptionalString(payload.iss);
+    if (!issuer) throw new UnauthorizedException('Identity token issuer is missing');
+
+    const issuerMode = input.issuerMode || 'exact';
+    const issuerAllowed = issuerMode === 'prefix'
+      ? input.acceptedIssuers.some((allowed) => issuer.startsWith(allowed))
+      : input.acceptedIssuers.includes(issuer);
+    if (!issuerAllowed) {
+      throw new UnauthorizedException('Identity token issuer is not allowed');
+    }
+
+    const audience = payload.aud;
+    const audienceAllowed = Array.isArray(audience)
+      ? audience.includes(input.expectedAudience)
+      : audience === input.expectedAudience;
+    if (!audienceAllowed) {
+      throw new UnauthorizedException('Identity token audience is invalid');
+    }
+
+    const exp = typeof payload.exp === 'number' ? payload.exp : null;
+    if (!exp || exp < Math.floor(Date.now() / 1000)) {
+      throw new UnauthorizedException('Identity token has expired');
+    }
+
+    return payload;
+  }
+
+  private decodeJwt(token: string): {
+    header: JwtHeader;
+    payload: JwtPayload;
+    signedPart: string;
+    signature: Buffer;
+  } {
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      throw new UnauthorizedException('Identity token format is invalid');
+    }
+
+    const [encodedHeader, encodedPayload, encodedSignature] = parts;
+    const header = JSON.parse(Buffer.from(encodedHeader, 'base64url').toString('utf8')) as JwtHeader;
+    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as JwtPayload;
+
+    return {
+      header,
+      payload,
+      signedPart: `${encodedHeader}.${encodedPayload}`,
+      signature: Buffer.from(encodedSignature, 'base64url'),
+    };
+  }
+
+  private async fetchJson(url: string): Promise<unknown> {
+    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' } });
+    if (!response.ok) {
+      throw new UnauthorizedException(`Failed to fetch identity keys from ${url}`);
+    }
+    return response.json();
+  }
+
+  private requireEnv(name: string) {
+    const value = process.env[name]?.trim();
+    if (!value) throw new UnauthorizedException(`Missing ${name}`);
+    return value;
+  }
+
+  private normalizeOptionalEmail(value: unknown) {
+    const email = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    return email.length ? email : null;
+  }
+
+  private normalizeOptionalString(value: unknown) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return text.length ? text : null;
+  }
+
+  private readRequiredString(value: unknown, message: string) {
+    const text = this.normalizeOptionalString(value);
+    if (!text) throw new UnauthorizedException(message);
+    return text;
+  }
+
+  private readBooleanLike(value: unknown) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') return value.toLowerCase() === 'true';
+    return false;
+  }
+}
+
+function hydratedOrThrow<T>(value: T | null): T {
+  if (!value) throw new UnauthorizedException('Account not found');
+  return value;
 }

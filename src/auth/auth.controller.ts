@@ -8,6 +8,12 @@ import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 
+type OAuthLoginBody = {
+  idToken: string;
+  email?: string;
+  fullName?: string;
+};
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -30,6 +36,21 @@ export class AuthController {
   @Post('client/login')
   loginClient(@Body() dto: LoginDto) {
     return this.authService.loginClient(dto);
+  }
+
+  @Post('client/oauth/google')
+  loginClientWithGoogle(@Body() body: OAuthLoginBody) {
+    return this.authService.loginClientWithGoogle(body);
+  }
+
+  @Post('client/oauth/microsoft')
+  loginClientWithMicrosoft(@Body() body: OAuthLoginBody) {
+    return this.authService.loginClientWithMicrosoft(body);
+  }
+
+  @Post('client/oauth/apple')
+  loginClientWithApple(@Body() body: OAuthLoginBody) {
+    return this.authService.loginClientWithApple(body);
   }
 
   @Post('operator/bootstrap')

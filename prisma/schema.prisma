@@ -743,6 +743,13 @@ model WorkflowRun {
   @@index([createdAt])
 }
 
+enum AuthProvider {
+  PASSWORD
+  GOOGLE
+  MICROSOFT
+  APPLE
+}
+
 model Organization {
   id           String           @id @default(cuid())
   slug         String           @unique
@@ -819,6 +826,7 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  authIdentities     AuthIdentity[]
   memberships        WorkspaceMember[]
   createdClients     Client[]           @relation("ClientCreatedBy")
   createdCampaigns   Campaign[]         @relation("CampaignCreatedBy")
@@ -834,6 +842,24 @@ model User {
   submittedInquiries PublicInquiry[]    @relation("InquirySubmittedByUser")
   inquiryMessages    InquiryMessage[]   @relation("InquiryMessageCreatedBy")
   inquiryNotes       InquiryNote[]      @relation("InquiryNoteAuthor")
+}
+
+model AuthIdentity {
+  id             String       @id @default(cuid())
+  userId         String
+  provider       AuthProvider
+  providerUserId String
+  email          String?
+  emailVerified  Boolean      @default(false)
+  metadataJson   Json?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@index([provider, email])
 }
 
 model WorkspaceMember {
