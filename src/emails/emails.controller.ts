@@ -28,6 +28,12 @@ export class EmailsController {
     return this.emailsService.handleInboundWebhook(rawBody, headers);
   }
 
+  @Post('webhook')
+  async handleWebhook(@Req() req: any, @Headers() headers: Record<string, unknown>) {
+    const rawBody = this.extractRawBody(req);
+    return this.emailsService.handleInboundWebhook(rawBody, headers);
+  }
+
   private extractRawBody(req: any): string {
     const raw = req?.rawBody;
 

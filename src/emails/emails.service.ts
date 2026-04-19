@@ -4,6 +4,7 @@ import { DocumentDispatchStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RepliesService } from '../replies/replies.service';
+import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { SendTemplatedEmailDto } from './dto/send-templated-email.dto';
 
 import { accountApprovedTemplate } from './templates/account-approved.template';
@@ -171,6 +172,7 @@ export class EmailsService {
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
     private readonly repliesService: RepliesService,
+    private readonly deliverabilityService: DeliverabilityService,
   ) {}
 
   listDispatches(organizationId: string, clientId?: string) {
@@ -1264,6 +1266,7 @@ export class EmailsService {
   async handleInboundWebhook(rawPayload: string, headers: Record<string, unknown>): Promise<InboundWebhookResult> {
     const verified = this.verifyResendWebhook(rawPayload, headers);
     const event = this.parseInboundPayload(rawPayload);
+    const eventType = event.type ?? 'unknown';
     const emailId = this.readString(event.data?.email_id) ?? null;
     const eventId = this.readHeader(headers, 'svix-id') ?? emailId ?? null;
 
@@ -1271,13 +1274,13 @@ export class EmailsService {
       ? await this.prisma.webhookEventReceipt.upsert({
           where: { provider_eventId: { provider: 'resend', eventId } },
           update: {
-            eventType: event.type ?? 'unknown',
+            eventType,
             payloadJson: event as unknown as Prisma.InputJsonValue,
           },
           create: {
             provider: 'resend',
             eventId,
-            eventType: event.type ?? 'unknown',
+            eventType,
             status: 'received',
             payloadJson: event as unknown as Prisma.InputJsonValue,
           },
@@ -1289,47 +1292,69 @@ export class EmailsService {
         ok: true,
         verified,
         deduped: true,
-        type: event.type ?? 'unknown',
+        type: eventType,
         eventId,
         emailId,
       };
     }
 
     try {
-      if (event.type !== 'email.received') {
-        if (receipt) {
-          await this.prisma.webhookEventReceipt.update({
-            where: { id: receipt.id },
-            data: { status: 'ignored', processedAt: new Date() },
+      let result: unknown;
+
+      switch (eventType) {
+        case 'email.received': {
+          if (!emailId) {
+            throw new BadRequestException('Missing email.received data.email_id');
+          }
+
+          const received = await this.fetchReceivedEmail(emailId);
+          const inbound = this.normalizeInboundEmail(event, received);
+
+          if (!inbound.fromEmail || !inbound.mailboxEmail) {
+            throw new BadRequestException('Inbound email is missing sender or mailbox address');
+          }
+
+          result = await this.repliesService.ingestInboundReply({
+            ...inbound,
+            fromEmail: inbound.fromEmail,
+            mailboxEmail: inbound.mailboxEmail,
           });
+          break;
         }
+        case 'email.delivered': {
+          result = await this.handleDeliveredWebhook(event);
+          break;
+        }
+        case 'email.bounced': {
+          result = await this.handleBouncedWebhook(event);
+          break;
+        }
+        case 'email.complained': {
+          result = await this.handleComplainedWebhook(event);
+          break;
+        }
+        case 'email.failed': {
+          result = await this.handleFailedWebhook(event);
+          break;
+        }
+        default: {
+          if (receipt) {
+            await this.prisma.webhookEventReceipt.update({
+              where: { id: receipt.id },
+              data: { status: 'ignored', processedAt: new Date() },
+            });
+          }
 
-        return {
-          ok: true,
-          ignored: true,
-          verified,
-          type: event.type ?? 'unknown',
-          eventId,
-          emailId,
-        };
+          return {
+            ok: true,
+            ignored: true,
+            verified,
+            type: eventType,
+            eventId,
+            emailId,
+          };
+        }
       }
-
-      if (!emailId) {
-        throw new BadRequestException('Missing email.received data.email_id');
-      }
-
-      const received = await this.fetchReceivedEmail(emailId);
-      const inbound = this.normalizeInboundEmail(event, received);
-
-      if (!inbound.fromEmail || !inbound.mailboxEmail) {
-        throw new BadRequestException('Inbound email is missing sender or mailbox address');
-      }
-
-      const reply = await this.repliesService.ingestInboundReply({
-        ...inbound,
-        fromEmail: inbound.fromEmail,
-        mailboxEmail: inbound.mailboxEmail,
-      });
 
       if (receipt) {
         await this.prisma.webhookEventReceipt.update({
@@ -1337,7 +1362,7 @@ export class EmailsService {
           data: {
             status: 'processed',
             processedAt: new Date(),
-            payloadJson: { event, reply } as unknown as Prisma.InputJsonValue,
+            payloadJson: { event, result } as unknown as Prisma.InputJsonValue,
           },
         });
       }
@@ -1345,10 +1370,10 @@ export class EmailsService {
       return {
         ok: true,
         verified,
-        type: event.type,
+        type: eventType,
         eventId,
         emailId,
-        reply,
+        reply: result,
       };
     } catch (error) {
       if (receipt) {
@@ -1362,6 +1387,248 @@ export class EmailsService {
       }
       throw error;
     }
+  }
+
+  private async handleDeliveredWebhook(event: ResendWebhookEnvelope) {
+    const message = await this.resolveOutboundMessageFromEvent(event);
+    if (!message) {
+      return {
+        ok: true,
+        ignored: true,
+        reason: 'No matching outbound message found for delivered event',
+      };
+    }
+
+    const deliveredAt = this.resolveEventTimestamp(event);
+    const updated = await this.prisma.outreachMessage.update({
+      where: { id: message.id },
+      data: {
+        status: 'DELIVERED',
+        lifecycle: 'DELIVERED',
+        deliveredAt,
+        errorMessage: null,
+      },
+      select: {
+        id: true,
+        externalMessageId: true,
+        status: true,
+        lifecycle: true,
+        deliveredAt: true,
+      },
+    });
+
+    return {
+      ok: true,
+      action: 'delivered',
+      message: updated,
+    };
+  }
+
+  private async handleBouncedWebhook(event: ResendWebhookEnvelope) {
+    const message = await this.resolveOutboundMessageFromEvent(event);
+    if (!message) {
+      return {
+        ok: true,
+        ignored: true,
+        reason: 'No matching outbound message found for bounced event',
+      };
+    }
+
+    const eventData = event.data ?? {};
+    const bounceData = this.readRecord(eventData['bounce']);
+    const reason =
+      this.readString(bounceData?.['message']) ??
+      this.readString(eventData['subject']) ??
+      'Email bounced';
+    const bounceType =
+      this.readString(bounceData?.['type']) ??
+      this.readString(bounceData?.['subType']) ??
+      undefined;
+    const bouncedEmail = this.extractFirstEmail(eventData.to ?? []) ?? message.lead.contact?.email ?? '';
+    const failedAt = this.resolveEventTimestamp(event);
+
+    const updated = await this.prisma.outreachMessage.update({
+      where: { id: message.id },
+      data: {
+        status: 'BOUNCED',
+        lifecycle: 'BOUNCED',
+        failedAt,
+        errorMessage: reason,
+      },
+      select: {
+        id: true,
+        mailboxId: true,
+        externalMessageId: true,
+        status: true,
+        lifecycle: true,
+        failedAt: true,
+      },
+    });
+
+    if (message.mailboxId && bouncedEmail) {
+      await this.deliverabilityService.registerBounce(message.mailboxId, {
+        bouncedEmail,
+        messageId: updated.externalMessageId ?? undefined,
+        bounceType,
+        reason,
+        metadataJson: {
+          webhookType: event.type ?? null,
+          provider: 'resend',
+        },
+      });
+    }
+
+    return {
+      ok: true,
+      action: 'bounced',
+      message: updated,
+    };
+  }
+
+  private async handleComplainedWebhook(event: ResendWebhookEnvelope) {
+    const message = await this.resolveOutboundMessageFromEvent(event);
+    if (!message) {
+      return {
+        ok: true,
+        ignored: true,
+        reason: 'No matching outbound message found for complained event',
+      };
+    }
+
+    const eventData = event.data ?? {};
+    const complainedEmail = this.extractFirstEmail(eventData.to ?? []) ?? message.lead.contact?.email ?? '';
+    const failedAt = this.resolveEventTimestamp(event);
+    const reason = 'Recipient marked email as spam';
+
+    const updated = await this.prisma.outreachMessage.update({
+      where: { id: message.id },
+      data: {
+        status: 'FAILED',
+        failedAt,
+        errorMessage: reason,
+      },
+      select: {
+        id: true,
+        mailboxId: true,
+        externalMessageId: true,
+        status: true,
+        failedAt: true,
+      },
+    });
+
+    if (message.mailboxId && complainedEmail) {
+      await this.deliverabilityService.registerComplaint(message.mailboxId, {
+        complainedEmail,
+        messageId: updated.externalMessageId ?? undefined,
+        reason,
+        metadataJson: {
+          webhookType: event.type ?? null,
+          provider: 'resend',
+        },
+      });
+    }
+
+    return {
+      ok: true,
+      action: 'complained',
+      message: updated,
+    };
+  }
+
+  private async handleFailedWebhook(event: ResendWebhookEnvelope) {
+    const message = await this.resolveOutboundMessageFromEvent(event);
+    if (!message) {
+      return {
+        ok: true,
+        ignored: true,
+        reason: 'No matching outbound message found for failed event',
+      };
+    }
+
+    const eventData = event.data ?? {};
+    const failedData = this.readRecord(eventData['failed']);
+    const reason =
+      this.readString(failedData?.['message']) ??
+      this.readString(eventData['subject']) ??
+      'Email failed';
+    const failedAt = this.resolveEventTimestamp(event);
+
+    const updated = await this.prisma.outreachMessage.update({
+      where: { id: message.id },
+      data: {
+        status: 'FAILED',
+        lifecycle: 'FAILED',
+        failedAt,
+        errorMessage: reason,
+      },
+      select: {
+        id: true,
+        externalMessageId: true,
+        status: true,
+        lifecycle: true,
+        failedAt: true,
+      },
+    });
+
+    return {
+      ok: true,
+      action: 'failed',
+      message: updated,
+    };
+  }
+
+  private async resolveOutboundMessageFromEvent(event: ResendWebhookEnvelope) {
+    const eventData = event.data ?? {};
+    const emailId = this.readString(eventData.email_id);
+    const providerThreadId = this.readString(eventData.message_id);
+    const recipientEmail = this.extractFirstEmail(eventData.to ?? []);
+
+    if (!emailId && !providerThreadId) {
+      return null;
+    }
+
+    const where: Prisma.OutreachMessageWhereInput = {
+      direction: 'OUTBOUND',
+      OR: [
+        ...(emailId ? [{ externalMessageId: emailId }] : []),
+        ...(providerThreadId ? [{ threadKey: providerThreadId }] : []),
+      ],
+      ...(recipientEmail
+        ? {
+            lead: {
+              contact: {
+                email: recipientEmail,
+              },
+            },
+          }
+        : {}),
+    };
+
+    return this.prisma.outreachMessage.findFirst({
+      where,
+      include: {
+        lead: {
+          include: {
+            contact: true,
+          },
+        },
+      },
+      orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
+    });
+  }
+
+  private resolveEventTimestamp(event: ResendWebhookEnvelope) {
+    return new Date(
+      this.readString(event.data?.created_at) ??
+      this.readString(event.created_at) ??
+      new Date().toISOString(),
+    );
+  }
+
+  private readRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
   }
 
   private parseInboundPayload(rawPayload: string): ResendWebhookEnvelope {
