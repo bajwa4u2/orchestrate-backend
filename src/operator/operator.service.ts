@@ -9,6 +9,9 @@ import {
   InquiryMessageType,
   Prisma,
   PublicInquiryStatus,
+  AlertStatus,
+  JobStatus,
+  MailboxHealthStatus,
 } from '@prisma/client';
 import { BillingService } from '../billing/billing.service';
 import { ControlService } from '../control/control.service';
@@ -42,37 +45,90 @@ export class OperatorService {
   }
 
   async commandWorkspace(organizationId: string) {
-    const [overview, emailDispatches, deliverability, campaigns, clients, inquiries] =
-      await Promise.all([
-        this.controlService.overview(organizationId),
-        this.emailsService.listDispatches(organizationId),
-        this.deliverabilityService.overview({ organizationId }),
-        this.campaignsService.list({ organizationId, page: '1', limit: '10' } as any),
-        this.clientsService.list({ organizationId, page: '1', limit: '10' } as any),
-        this.listPublicInquiries(organizationId, { limit: '10' }),
-      ]);
+    const [
+      overview,
+      emailDispatches,
+      deliverability,
+      campaigns,
+      clients,
+      inquiries,
+      alerts,
+      failedJobs,
+    ] = await Promise.all([
+      this.controlService.overview(organizationId),
+      this.emailsService.listDispatches(organizationId),
+      this.deliverabilityService.overview({ organizationId }),
+      this.campaignsService.list({ organizationId, page: '1', limit: '10' } as any),
+      this.clientsService.list({ organizationId, page: '1', limit: '10' } as any),
+      this.listPublicInquiries(organizationId, { limit: '10' }),
+      this.prisma.alert.findMany({
+        where: { organizationId, status: AlertStatus.OPEN },
+        orderBy: [{ createdAt: 'desc' }],
+        take: 10,
+      }),
+      this.prisma.job.findMany({
+        where: { organizationId, status: JobStatus.FAILED },
+        orderBy: [{ updatedAt: 'desc' }],
+        take: 10,
+      }),
+    ]);
 
     const dispatchItems = Array.isArray(emailDispatches) ? emailDispatches : [];
     const campaignItems = Array.isArray(campaigns?.items) ? campaigns.items : [];
     const clientItems = Array.isArray(clients?.items) ? clients.items : [];
     const inquiryItems = Array.isArray(inquiries?.items) ? inquiries.items : [];
+    const alertItems = Array.isArray(alerts) ? alerts : [];
+    const failedJobItems = Array.isArray(failedJobs) ? failedJobs : [];
+    const deliverabilityMap =
+      deliverability && typeof deliverability === 'object'
+        ? (deliverability as Record<string, unknown>)
+        : {};
+
+    const mailboxItems = Array.isArray(deliverabilityMap['mailboxes'])
+      ? (deliverabilityMap['mailboxes'] as Array<Record<string, unknown>>)
+      : [];
+    const healthyMailboxes = mailboxItems.filter((item) => {
+      const status = this.safeString(item['healthStatus']);
+      return status && !['DEGRADED', 'CRITICAL'].includes(status);
+    }).length;
+    const degradedMailboxes = mailboxItems.filter((item) => {
+      const status = this.safeString(item['healthStatus']);
+      return ['DEGRADED', 'CRITICAL'].includes(status);
+    }).length;
 
     return {
+      title: 'Operator command',
+      subtitle:
+        'One place to see pressure, movement, and what needs operator attention before the rest of the workspace.',
       pulse: {
         totals: overview?.totals ?? {},
         today: overview?.today ?? {},
         execution: overview?.execution ?? {},
-        deliverability: overview?.deliverability ?? {},
+        deliverability: {
+          ...(overview?.deliverability ?? {}),
+          healthyMailboxes,
+          degradedMailboxes,
+        },
       },
       attention: this.buildCommandAttention({
-        alerts: Array.isArray(overview?.alerts) ? overview.alerts : [],
-        emailDispatches: dispatchItems,
-        campaigns: campaignItems,
-        inquiries: inquiryItems,
+        alerts: alertItems as Array<Record<string, unknown>>,
+        emailDispatches: dispatchItems as Array<Record<string, unknown>>,
+        campaigns: campaignItems as Array<Record<string, unknown>>,
+        inquiries: inquiryItems as Array<Record<string, unknown>>,
       }),
       execution: {
         queuedJobs: overview?.execution?.queuedJobs ?? 0,
-        failedJobs: overview?.execution?.failedJobs ?? 0,
+        failedJobs: failedJobItems.map((job) => ({
+          id: job.id,
+          type: job.type,
+          status: job.status,
+          error: job.lastError ?? '',
+          createdAt: job.createdAt,
+          updatedAt: job.updatedAt,
+          attemptCount: job.attemptCount,
+          maxAttempts: job.maxAttempts,
+        })),
+        failedJobsCount: failedJobItems.length,
         emailDispatches: dispatchItems.slice(0, 10),
       },
       outreach: {
@@ -88,7 +144,22 @@ export class OperatorService {
         meta: clients?.meta ?? null,
       },
       health: {
-        alerts: Array.isArray(overview?.alerts) ? overview.alerts : [],
+        alerts: alertItems.map((alert) => ({
+          id: alert.id,
+          title: alert.title,
+          severity: alert.severity,
+          status: alert.status,
+          category: alert.category,
+          bodyText: alert.bodyText,
+          createdAt: alert.createdAt,
+          resolvedAt: alert.resolvedAt,
+        })),
+        summary: {
+          open: alertItems.length,
+          critical: alertItems.filter((alert) => alert.severity === 'CRITICAL').length,
+          healthyMailboxes,
+          degradedMailboxes,
+        },
         deliverability,
       },
     };
