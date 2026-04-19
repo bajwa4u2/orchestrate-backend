@@ -299,20 +299,18 @@ export class AuthService {
       throw new UnauthorizedException('Please verify your email first');
     }
 
-    const membership =
-      user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
-      user.memberships[0];
-
-    if (!membership) {
-      return this.issueClientSession(user, null, undefined, undefined, null);
-    }
-
-    const clientId = await this.resolveClientId(user.id, membership.organizationId);
-    const clientState = clientId ? await this.loadClientState(clientId) : null;
-
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
-    return this.issueClientSession(user, membership.organization, clientId, membership.role, clientState);
+    const clientAccess = await this.ensureClientAccessForUser(user.id);
+    const clientState = clientAccess.clientId ? await this.loadClientState(clientAccess.clientId) : null;
+
+    return this.issueClientSession(
+      clientAccess.user,
+      clientAccess.organization,
+      clientAccess.clientId,
+      clientAccess.memberRole,
+      clientState,
+    );
   }
 
   async loginClientWithGoogle(input: OAuthLoginInput) {
@@ -711,7 +709,7 @@ export class AuthService {
     });
   }
 
-  private async loginClientWithExternalIdentity(profile: ExternalIdentityProfile) {
+  async loginClientWithExternalIdentity(profile: ExternalIdentityProfile) {
     const user = await this.prisma.$transaction(async (tx) => {
       const existingIdentity = await tx.authIdentity.findUnique({
         where: {
@@ -754,12 +752,19 @@ export class AuthService {
           },
         });
 
-        return tx.user.findUniqueOrThrow({ where: { id: updatedUser.id }, include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } } });
+        return tx.user.findUniqueOrThrow({
+          where: { id: updatedUser.id },
+          include: {
+            authIdentities: true,
+            memberships: { include: { organization: true }, where: { isActive: true } },
+          },
+        });
       }
 
-      const trustedEmail = profile.email && !this.isPlaceholderEmail(profile.email) && profile.emailVerified
-        ? profile.email
-        : null;
+      const trustedEmail =
+        profile.email && !this.isPlaceholderEmail(profile.email) && profile.emailVerified
+          ? profile.email
+          : null;
 
       const matchedUser = trustedEmail
         ? await tx.user.findUnique({ where: { email: trustedEmail }, include: { authIdentities: true } })
@@ -786,21 +791,28 @@ export class AuthService {
                 : undefined,
             metadataJson: this.mergeUserMetadata(matchedUser.metadataJson, {
               emailVerifiedAt: profile.emailVerified ? this.currentIso() : undefined,
-              primaryProvider: this.resolvePrimaryProvider([
-                ...matchedUser.authIdentities,
-                { provider: profile.provider } as { provider: AuthProvider },
-              ], matchedUser.passwordHash),
+              primaryProvider: this.resolvePrimaryProvider(
+                [...matchedUser.authIdentities, { provider: profile.provider } as { provider: AuthProvider }],
+                matchedUser.passwordHash,
+              ),
               profileComplete: Boolean((profile.fullName || matchedUser.fullName || '').trim()),
             }),
           },
         });
 
-        return tx.user.findUniqueOrThrow({ where: { id: updated.id }, include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } } });
+        return tx.user.findUniqueOrThrow({
+          where: { id: updated.id },
+          include: {
+            authIdentities: true,
+            memberships: { include: { organization: true }, where: { isActive: true } },
+          },
+        });
       }
 
-      const loginEmail = profile.email && !this.isPlaceholderEmail(profile.email)
-        ? profile.email
-        : this.buildPlaceholderEmail(profile.provider, profile.providerUserId);
+      const loginEmail =
+        profile.email && !this.isPlaceholderEmail(profile.email)
+          ? profile.email
+          : this.buildPlaceholderEmail(profile.provider, profile.providerUserId);
       const fullName = (profile.fullName || '').trim() || this.defaultNameForProvider(profile.provider);
 
       const createdUser = await tx.user.create({
@@ -808,9 +820,10 @@ export class AuthService {
           email: loginEmail,
           fullName,
           metadataJson: this.mergeUserMetadata(null, {
-            emailVerifiedAt: profile.emailVerified && profile.email && !this.isPlaceholderEmail(profile.email)
-              ? this.currentIso()
-              : null,
+            emailVerifiedAt:
+              profile.emailVerified && profile.email && !this.isPlaceholderEmail(profile.email)
+                ? this.currentIso()
+                : null,
             primaryProvider: profile.provider,
             hasPassword: false,
             profileComplete: Boolean((profile.fullName || '').trim()),
@@ -832,23 +845,27 @@ export class AuthService {
         },
       });
 
-      return tx.user.findUniqueOrThrow({ where: { id: createdUser.id }, include: { authIdentities: true, memberships: { include: { organization: true }, where: { isActive: true } } } });
+      return tx.user.findUniqueOrThrow({
+        where: { id: createdUser.id },
+        include: {
+          authIdentities: true,
+          memberships: { include: { organization: true }, where: { isActive: true } },
+        },
+      });
     });
 
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
-    const membership =
-      user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
-      user.memberships[0];
+    const clientAccess = await this.ensureClientAccessForUser(user.id);
+    const clientState = clientAccess.clientId ? await this.loadClientState(clientAccess.clientId) : null;
 
-    if (!membership) {
-      return this.issueClientSession(user, null, undefined, undefined, null);
-    }
-
-    const clientId = await this.resolveClientId(user.id, membership.organizationId);
-    const clientState = clientId ? await this.loadClientState(clientId) : null;
-
-    return this.issueClientSession(user, membership.organization, clientId, membership.role, clientState);
+    return this.issueClientSession(
+      clientAccess.user,
+      clientAccess.organization,
+      clientAccess.clientId,
+      clientAccess.memberRole,
+      clientState,
+    );
   }
 
   private issueClientSession(
@@ -1052,6 +1069,136 @@ export class AuthService {
     return client?.id;
   }
 
+
+  private async ensureClientAccessForUser(userId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        include: {
+          authIdentities: true,
+          memberships: { include: { organization: true }, where: { isActive: true } },
+        },
+      });
+
+      let membership =
+        user.memberships.find((item) => item.organization.type === 'CLIENT_ACCOUNT') ??
+        user.memberships[0] ??
+        null;
+
+      let organization = membership?.organization ?? null;
+      let memberRole = membership?.role ?? 'OWNER';
+
+      if (!organization) {
+        const workspaceName = this.deriveClientWorkspaceName(user.fullName, user.email);
+        const organizationSlug = await this.nextUniqueSlugTx(
+          tx,
+          this.slugify(workspaceName) || 'client-workspace',
+        );
+
+        organization = await tx.organization.create({
+          data: {
+            slug: organizationSlug,
+            legalName: workspaceName,
+            displayName: workspaceName,
+            type: OrganizationType.CLIENT_ACCOUNT,
+          },
+        });
+
+        membership = await tx.workspaceMember.create({
+          data: {
+            organizationId: organization.id,
+            userId: user.id,
+            role: 'OWNER',
+          },
+          include: { organization: true },
+        });
+
+        memberRole = membership.role;
+      }
+
+      let clientId = await this.resolveClientIdTx(tx, user, organization.id);
+
+      if (!clientId) {
+        const contactName =
+          (user.fullName || '').trim() ||
+          this.nameFromEmail(user.email) ||
+          organization.displayName ||
+          organization.legalName;
+
+        const client = await tx.client.create({
+          data: {
+            organizationId: organization.id,
+            createdById: user.id,
+            legalName: organization.legalName,
+            displayName: organization.displayName,
+            status: 'ACTIVE',
+            primaryEmail: user.email,
+            billingEmail: user.email,
+            legalEmail: user.email,
+            opsEmail: user.email,
+            primaryContactName: contactName,
+            billingContactName: contactName,
+            legalContactName: contactName,
+            opsContactName: contactName,
+          },
+        });
+
+        clientId = client.id;
+      }
+
+      const refreshedUser = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          metadataJson: this.mergeUserMetadata(user.metadataJson, {
+            defaultClientId: clientId,
+            workspaceCreated: true,
+            profileComplete: Boolean((user.fullName || '').trim()),
+            businessComplete: false,
+            primaryProvider: this.resolvePrimaryProvider(user.authIdentities, user.passwordHash),
+          }),
+        },
+        include: {
+          authIdentities: true,
+          memberships: { include: { organization: true }, where: { isActive: true } },
+        },
+      });
+
+      return {
+        user: refreshedUser,
+        organization,
+        clientId,
+        memberRole,
+      };
+    });
+  }
+
+  private async resolveClientIdTx(
+    tx: Prisma.TransactionClient,
+    user: { email: string; metadataJson?: unknown },
+    organizationId: string,
+  ) {
+    const metadata = this.asObject(user.metadataJson);
+    const clientAccess = this.asObject(metadata.clientAccess);
+    if (typeof clientAccess.defaultClientId === 'string' && clientAccess.defaultClientId.trim().length) {
+      return clientAccess.defaultClientId.trim();
+    }
+
+    const client = await tx.client.findFirst({
+      where: {
+        organizationId,
+        OR: [
+          { primaryEmail: user.email },
+          { billingEmail: user.email },
+          { legalEmail: user.email },
+          { opsEmail: user.email },
+        ],
+      },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return client?.id;
+  }
   private hashPassword(password: string) {
     const salt = randomBytes(16).toString('hex');
     const digest = scryptSync(password, salt, 64).toString('hex');
@@ -1119,6 +1266,32 @@ export class AuthService {
     return attempt;
   }
 
+
+  private async nextUniqueSlugTx(tx: Prisma.TransactionClient, base: string) {
+    let attempt = base;
+    let counter = 2;
+    while (await tx.organization.findUnique({ where: { slug: attempt } })) {
+      attempt = `${base}-${counter}`;
+      counter += 1;
+    }
+    return attempt;
+  }
+
+  private deriveClientWorkspaceName(fullName: string | null | undefined, email: string) {
+    const cleanName = (fullName || '').trim();
+    if (cleanName) return cleanName;
+    const emailName = this.nameFromEmail(email);
+    return emailName || 'Client Workspace';
+  }
+
+  private nameFromEmail(email: string | null | undefined) {
+    const local = String(email || '')
+      .trim()
+      .split('@')[0]
+      ?.replace(/[._-]+/g, ' ')
+      .trim();
+    return local ? local.replace(/\b\w/g, (match) => match.toUpperCase()) : '';
+  }
   private buildFrontendUrl(path: string, token: string) {
     const base = (process.env.APP_BASE_URL?.trim() || 'https://orchestrateops.com').replace(/\/$/, '');
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
