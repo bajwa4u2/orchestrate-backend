@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, OnModuleInit, Type } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+  Type,
+} from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { Job, JobType } from '@prisma/client';
 import { AlertGenerationWorkerService } from './alert_generation/alert-generation.worker.service';
@@ -16,6 +22,7 @@ import { JobWorker, WorkerContext } from './worker.types';
 
 @Injectable()
 export class WorkersService implements OnModuleInit {
+  private readonly logger = new Logger(WorkersService.name);
   private readonly registry = new Map<JobType, JobWorker>();
 
   constructor(private readonly moduleRef: ModuleRef) {}
@@ -61,20 +68,59 @@ export class WorkersService implements OnModuleInit {
     if (missing.length) {
       throw new Error(`Missing worker registrations: ${missing.join(', ')}`);
     }
+
+    this.logger.log(
+      `Workers registry ready for job types: ${Array.from(this.registry.keys()).join(', ')}`,
+    );
   }
 
   async run(job: Job, context: WorkerContext) {
     const worker = this.registry.get(job.type);
+
     if (!worker) {
+      this.logger.error(
+        `No worker registered for job type ${job.type} (jobId=${job.id})`,
+      );
       throw new BadRequestException(`No worker registered for job type ${job.type}`);
     }
 
-    return worker.run(job, context);
+    const workerName = (worker as object).constructor?.name ?? 'UnknownWorker';
+
+    this.logger.log(
+      `Running job ${job.id} type=${job.type} status=${job.status} via ${workerName}`,
+    );
+
+    try {
+      const result = await worker.run(job, context);
+
+      this.logger.log(
+        `Completed job ${job.id} type=${job.type} via ${workerName}`,
+      );
+
+      return result;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown worker execution error';
+
+      this.logger.error(
+        `Worker failed for job ${job.id} type=${job.type} via ${workerName}: ${message}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+      throw error;
+    }
   }
 
   private register(worker: JobWorker) {
+    const workerName = (worker as object).constructor?.name ?? 'UnknownWorker';
+
+    if (!Array.isArray(worker.jobTypes) || worker.jobTypes.length === 0) {
+      throw new Error(`Worker ${workerName} has no jobTypes defined`);
+    }
+
     for (const jobType of worker.jobTypes) {
       this.registry.set(jobType, worker);
+      this.logger.log(`Registered ${workerName} for ${jobType}`);
     }
   }
 }
