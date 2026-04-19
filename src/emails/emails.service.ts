@@ -40,7 +40,7 @@ import { subscriptionCreatedTemplate } from './templates/subscription-created.te
 import { subscriptionRenewedTemplate } from './templates/subscription-renewed.template';
 import { termsUpdatedTemplate } from './templates/terms-updated.template';
 
-type EmailCategory = 'support' | 'billing' | 'legal' | 'hello' | 'no-reply';
+type EmailCategory = 'support' | 'billing' | 'legal' | 'hello' | 'no-reply' | 'outreach';
 
 type EmailEvent =
   | 'account_welcome'
@@ -113,6 +113,7 @@ type DirectEmailInput = {
   replyToEmail?: string;
   templateVariables?: Record<string, unknown>;
   attachments?: DirectEmailAttachment[];
+  mode?: 'OUTREACH' | 'SYSTEM';
 };
 
 type RenderedEmail = {
@@ -357,10 +358,11 @@ export class EmailsService {
         bodyHtml: input.bodyHtml?.trim(),
         toEmail: input.toEmail.trim(),
         toName: input.toName?.trim(),
-        category: input.category ?? 'hello',
+        category: input.category ?? 'outreach',
         replyToEmail: input.replyToEmail?.trim(),
         templateVariables: input.templateVariables,
         attachments: input.attachments,
+        mode: 'OUTREACH',
       });
     }
 
@@ -393,6 +395,8 @@ export class EmailsService {
   }
 
   private isOutreachDirectEmail(input: DirectEmailInput): boolean {
+    if (input.mode === 'OUTREACH') return true;
+
     const variables = input.templateVariables ?? {};
     const hasLeadContext =
       variables['lead_id'] != null ||
@@ -410,7 +414,7 @@ export class EmailsService {
   }
 
   private async deliverPreservedDirectEmail(input: DirectEmailInput): Promise<TransportResult> {
-    const category = input.category ?? 'hello';
+    const category = input.category ?? 'outreach';
     const profile = this.resolveProfile(category, input.replyToEmail);
     const mode = this.resolveDeliveryMode();
 
@@ -1222,7 +1226,8 @@ export class EmailsService {
       normalized === 'billing' ||
       normalized === 'legal' ||
       normalized === 'hello' ||
-      normalized === 'no-reply'
+      normalized === 'no-reply' ||
+      normalized === 'outreach'
     ) {
       return normalized;
     }
@@ -1256,6 +1261,11 @@ export class EmailsService {
       },
       hello: {
         category: 'hello',
+        from: helloFrom,
+        replyTo: process.env.EMAIL_REPLY_TO_HELLO?.trim() || 'hello@orchestrateops.com',
+      },
+      outreach: {
+        category: 'outreach',
         from: helloFrom,
         replyTo: process.env.EMAIL_REPLY_TO_HELLO?.trim() || 'hello@orchestrateops.com',
       },
