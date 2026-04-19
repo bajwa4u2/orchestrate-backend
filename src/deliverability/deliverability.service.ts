@@ -1,5 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Mailbox, MailboxHealthStatus, MailboxProvider, MailboxRole, MailboxStatus, PolicyScope, Prisma, SuppressionType, WarmupStatus } from '@prisma/client';
+import {
+  Mailbox,
+  MailboxHealthStatus,
+  MailboxProvider,
+  MailboxRole,
+  MailboxStatus,
+  PolicyScope,
+  Prisma,
+  SuppressionType,
+  WarmupStatus,
+} from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { CreateMailboxDto } from './dto/create-mailbox.dto';
@@ -30,33 +40,83 @@ export class DeliverabilityService {
   }
 
   private async ensureDefaultMailbox(input: { organizationId: string; clientId?: string }) {
-    const existing = await this.pickMailboxForClient({
+    const existingScoped = await this.pickMailboxForClient({
       organizationId: input.organizationId,
       clientId: input.clientId,
     });
 
-    if (existing) return existing;
+    if (existingScoped) return existingScoped;
 
     const helloProfile = this.parseMailboxIdentity(process.env.EMAIL_FROM_HELLO);
     const fallbackProfile = this.parseMailboxIdentity(process.env.EMAIL_FROM);
     const supportProfile = this.parseMailboxIdentity(process.env.EMAIL_FROM_SUPPORT);
+
     const defaultAddress =
       helloProfile.emailAddress ??
       fallbackProfile.emailAddress ??
       supportProfile.emailAddress ??
       process.env.MAIL_FROM_ADDRESS?.trim()?.toLowerCase() ??
       'hello@orchestrateops.com';
+
     const defaultFromName =
       helloProfile.fromName ??
       fallbackProfile.fromName ??
       supportProfile.fromName ??
       process.env.MAIL_FROM_NAME?.trim() ??
       'Orchestrate';
+
     const defaultReplyTo =
       process.env.EMAIL_REPLY_TO_HELLO?.trim()?.toLowerCase() ??
       process.env.EMAIL_REPLY_TO_SUPPORT?.trim()?.toLowerCase() ??
       process.env.EMAIL_REPLY_TO?.trim()?.toLowerCase() ??
       defaultAddress;
+
+    /**
+     * emailAddress is globally unique in the current schema.
+     * So we must resolve by emailAddress before create, otherwise start/restart
+     * can crash with P2002 when the mailbox already exists but wasn't returned
+     * by pickMailboxForClient because of scope/status mismatch.
+     */
+    const existingByAddress = await this.prisma.mailbox.findUnique({
+      where: { emailAddress: defaultAddress },
+    });
+
+    if (existingByAddress) {
+      if (existingByAddress.organizationId !== input.organizationId) {
+        throw new Error(
+          `Default mailbox ${defaultAddress} already belongs to another organization. ` +
+            `Configure a unique EMAIL_FROM_HELLO / EMAIL_FROM for this deployment.`,
+        );
+      }
+
+      return this.prisma.mailbox.update({
+        where: { id: existingByAddress.id },
+        data: {
+          clientId: null,
+          label: existingByAddress.label || 'Primary outreach mailbox',
+          role: MailboxRole.PRIMARY_OUTREACH,
+          fromName: defaultFromName,
+          replyToAddress: defaultReplyTo,
+          provider: existingByAddress.provider ?? MailboxProvider.OTHER,
+          status: MailboxStatus.ACTIVE,
+          dailySendCap: existingByAddress.dailySendCap || 100,
+          hourlySendCap: existingByAddress.hourlySendCap || 20,
+          warmupStatus: existingByAddress.warmupStatus ?? WarmupStatus.NOT_STARTED,
+          healthStatus:
+            existingByAddress.healthStatus === MailboxHealthStatus.CRITICAL
+              ? MailboxHealthStatus.WATCH
+              : existingByAddress.healthStatus ?? MailboxHealthStatus.HEALTHY,
+          metadataJson: {
+            ...(this.asObject(existingByAddress.metadataJson) as Record<string, unknown>),
+            bootstrap: true,
+            bootstrapSource: 'campaign_activation',
+            transport: process.env.RESEND_API_KEY?.trim() ? 'resend' : 'log',
+            intendedClientId: input.clientId ?? null,
+            recoveredExistingMailbox: true,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
 
     return this.prisma.mailbox.create({
       data: {
@@ -97,7 +157,35 @@ export class DeliverabilityService {
       orderBy: { createdAt: 'desc' },
     });
 
-    if (existing) return existing;
+    if (existing) {
+      return this.prisma.sendPolicy.update({
+        where: { id: existing.id },
+        data: {
+          isActive: true,
+          clientId: null,
+          scope: PolicyScope.MAILBOX,
+          name: existing.name || 'Default bootstrap send policy',
+          timezone: existing.timezone ?? input.timezone ?? undefined,
+          dailyCap: existing.dailyCap || 100,
+          hourlyCap: existing.hourlyCap || 20,
+          minDelaySeconds: existing.minDelaySeconds || 60,
+          maxDelaySeconds: existing.maxDelaySeconds || 300,
+          allowedWeekdays:
+            existing.allowedWeekdays && existing.allowedWeekdays.length
+              ? existing.allowedWeekdays
+              : [1, 2, 3, 4, 5, 6, 7],
+          activeFromHour: existing.activeFromHour ?? 0,
+          activeToHour: existing.activeToHour ?? 23,
+          configJson: {
+            ...(this.asObject(existing.configJson) as Record<string, unknown>),
+            bootstrap: true,
+            bootstrapSource: 'campaign_activation',
+            intendedClientId: input.clientId ?? null,
+            recoveredExistingPolicy: true,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
 
     return this.prisma.sendPolicy.create({
       data: {
@@ -279,12 +367,18 @@ export class DeliverabilityService {
       this.prisma.complaintEvent.count({ where: { mailboxId, occurredAt: { gte: start } } }),
     ]);
 
-    const score = Math.max(0, 100 - bounceCount * 25 - complaintCount * 40 + replyCount * 3 - Math.max(0, sentCount - mailbox.dailySendCap) * 2);
+    const score = Math.max(
+      0,
+      100 - bounceCount * 25 - complaintCount * 40 + replyCount * 3 - Math.max(0, sentCount - mailbox.dailySendCap) * 2,
+    );
     const healthStatus =
-      complaintCount > 0 ? MailboxHealthStatus.CRITICAL :
-      bounceCount >= 2 ? MailboxHealthStatus.DEGRADED :
-      score < 75 ? MailboxHealthStatus.WATCH :
-      MailboxHealthStatus.HEALTHY;
+      complaintCount > 0
+        ? MailboxHealthStatus.CRITICAL
+        : bounceCount >= 2
+          ? MailboxHealthStatus.DEGRADED
+          : score < 75
+            ? MailboxHealthStatus.WATCH
+            : MailboxHealthStatus.HEALTHY;
 
     await this.prisma.mailbox.update({
       where: { id: mailboxId },
@@ -330,10 +424,7 @@ export class DeliverabilityService {
         organizationId: input.organizationId,
         AND: [
           {
-            OR: [
-              { emailAddress },
-              ...(domain ? [{ domain }] : []),
-            ],
+            OR: [{ emailAddress }, ...(domain ? [{ domain }] : [])],
           },
           ...(input.clientId ? [{ OR: [{ clientId: input.clientId }, { clientId: null }] }] : []),
         ],
@@ -349,10 +440,7 @@ export class DeliverabilityService {
         status: MailboxStatus.ACTIVE,
         ...(input.clientId ? { OR: [{ clientId: input.clientId }, { clientId: null }] } : {}),
       },
-      orderBy: [
-        { healthStatus: 'asc' },
-        { updatedAt: 'desc' },
-      ],
+      orderBy: [{ healthStatus: 'asc' }, { updatedAt: 'desc' }],
     });
   }
 
@@ -367,11 +455,7 @@ export class DeliverabilityService {
           { clientId: null, mailboxId: null },
         ],
       },
-      orderBy: [
-        { mailboxId: 'desc' },
-        { clientId: 'desc' },
-        { createdAt: 'desc' },
-      ],
+      orderBy: [{ mailboxId: 'desc' }, { clientId: 'desc' }, { createdAt: 'desc' }],
     });
 
     const now = new Date();
@@ -430,8 +514,16 @@ export class DeliverabilityService {
       this.prisma.mailbox.findMany({ where, orderBy: { createdAt: 'desc' } }),
       this.prisma.sendPolicy.findMany({ where, orderBy: { createdAt: 'desc' } }),
       this.prisma.suppressionEntry.findMany({ where, orderBy: { createdAt: 'desc' }, take: 50 }),
-      this.prisma.bounceEvent.findMany({ where: filters.clientId ? { mailbox: { clientId: filters.clientId } } : undefined, orderBy: { occurredAt: 'desc' }, take: 25 }),
-      this.prisma.complaintEvent.findMany({ where: filters.clientId ? { mailbox: { clientId: filters.clientId } } : undefined, orderBy: { occurredAt: 'desc' }, take: 25 }),
+      this.prisma.bounceEvent.findMany({
+        where: filters.clientId ? { mailbox: { clientId: filters.clientId } } : undefined,
+        orderBy: { occurredAt: 'desc' },
+        take: 25,
+      }),
+      this.prisma.complaintEvent.findMany({
+        where: filters.clientId ? { mailbox: { clientId: filters.clientId } } : undefined,
+        orderBy: { occurredAt: 'desc' },
+        take: 25,
+      }),
     ]);
 
     return {
@@ -442,6 +534,13 @@ export class DeliverabilityService {
       bounces,
       complaints,
     };
+  }
+
+  private asObject(value: unknown): Record<string, unknown> {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return {};
   }
 }
 

@@ -134,6 +134,14 @@ export class FirstSendWorkerService implements JobWorker {
       note: input.note,
     });
 
+    const tightened = this.tightenGeneratedMessage({
+      subject: generated.subject,
+      body: generated.body,
+      lead,
+      mailbox,
+      isFollowUp: input.jobType === JobType.FOLLOWUP_SEND,
+    });
+
     const lifecycle =
       input.simulateDeliveryOnly ? MessageLifecycle.SCHEDULED : MessageLifecycle.DISPATCHED;
     const status = input.simulateDeliveryOnly ? MessageStatus.SCHEDULED : MessageStatus.SENT;
@@ -152,14 +160,17 @@ export class FirstSendWorkerService implements JobWorker {
       : await this.emailsService.sendDirectEmail({
           toEmail: email,
           toName: lead.contact?.fullName ?? lead.contact?.firstName ?? undefined,
-          subject: generated.subject,
-          bodyText: generated.body,
-          category: 'hello',
+          subject: tightened.subject,
+          bodyText: tightened.body,
           replyToEmail: mailbox.emailAddress,
           templateVariables: {
             lead_id: lead.id,
             campaign_id: lead.campaignId,
             sequence_step: sequenceStepOrder,
+            outreach_intent: input.jobType,
+            client_display_name: this.resolveClientDisplayName(lead),
+            client_website: lead.client?.websiteUrl ?? null,
+            mailbox_email: mailbox.emailAddress,
           },
         });
 
@@ -176,8 +187,8 @@ export class FirstSendWorkerService implements JobWorker {
         status,
         source: 'SYSTEM_GENERATED',
         lifecycle,
-        subjectLine: generated.subject,
-        bodyText: generated.body,
+        subjectLine: tightened.subject,
+        bodyText: tightened.body,
         sentAt: input.simulateDeliveryOnly ? null : new Date(),
         externalMessageId: transport?.externalMessageId ?? null,
         threadKey: rootThreadKey,
@@ -303,6 +314,90 @@ export class FirstSendWorkerService implements JobWorker {
       simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
       jobId: input.job.id,
     };
+  }
+
+  private tightenGeneratedMessage(input: {
+    subject: string;
+    body: string;
+    lead: {
+      client: {
+        displayName: string | null;
+        legalName: string | null;
+        websiteUrl: string | null;
+      } | null;
+      contact: {
+        fullName: string | null;
+        firstName: string | null;
+      } | null;
+      account: {
+        companyName: string | null;
+      } | null;
+    };
+    mailbox: {
+      emailAddress: string;
+      fromName: string | null;
+    };
+    isFollowUp: boolean;
+  }) {
+    const clientName = this.resolveClientDisplayName(input.lead);
+    const senderName =
+      this.readString(input.mailbox.fromName) ??
+      clientName ??
+      'OrchestrateOps';
+    const senderTitle = 'Revenue Operations';
+    const senderEmail = input.mailbox.emailAddress;
+    const prospectCompany = this.readString(input.lead.account?.companyName);
+    const prospectName =
+      this.readString(input.lead.contact?.firstName) ??
+      this.readString(input.lead.contact?.fullName);
+
+    let subject = this.normalizeInlineWhitespace(input.subject);
+    let body = input.body.trim();
+
+    if (!subject) {
+      subject = input.isFollowUp
+        ? `Following up${prospectCompany ? ` on ${prospectCompany}` : ''}`
+        : `${clientName ?? 'OrchestrateOps'}${prospectCompany ? ` for ${prospectCompany}` : ''}`;
+    }
+
+    body = body
+      .replace(/\[Your Name\]/gi, senderName)
+      .replace(/\[Your Position\]/gi, senderTitle)
+      .replace(/\[Your Contact Information\]/gi, senderEmail)
+      .replace(/\[Your Company\]/gi, clientName ?? 'OrchestrateOps');
+
+    if (prospectName) {
+      body = body.replace(/\[First Name\]/gi, prospectName);
+    }
+
+    body = this.compactParagraphSpacing(body);
+
+    return { subject, body };
+  }
+
+  private resolveClientDisplayName(lead: {
+    client: {
+      displayName: string | null;
+      legalName: string | null;
+      websiteUrl: string | null;
+    } | null;
+  }) {
+    return (
+      this.readString(lead.client?.displayName) ??
+      this.readString(lead.client?.legalName) ??
+      'OrchestrateOps'
+    );
+  }
+
+  private compactParagraphSpacing(value: string) {
+    return value
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  private normalizeInlineWhitespace(value: string) {
+    return value.replace(/\s+/g, ' ').trim();
   }
 
   private asObject(value: unknown): Record<string, unknown> {
