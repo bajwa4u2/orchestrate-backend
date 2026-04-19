@@ -955,6 +955,7 @@ export class AuthService {
       session: {
         surface: input.surface,
         memberRole: input.memberRole,
+        organizationId: input.organization?.id ?? null,
         clientId: input.clientId,
       },
       setup: input.clientState
@@ -1354,11 +1355,7 @@ export class AuthService {
   }
 
   private async verifyMicrosoftIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
-    const idToken = this.normalizeOptionalString(input.idToken);
-    if (!idToken) {
-      throw new UnauthorizedException('Microsoft identity token is missing');
-    }
-
+    const idToken = this.readRequiredString(input.idToken, 'Microsoft idToken is missing');
     const payload = await this.verifyJwtWithJwks({
       idToken,
       jwksUrl: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
@@ -1388,11 +1385,7 @@ export class AuthService {
   }
 
   private async verifyAppleIdentityToken(input: OAuthLoginInput): Promise<ExternalIdentityProfile> {
-    const idToken = this.normalizeOptionalString(input.idToken);
-    if (!idToken) {
-      throw new UnauthorizedException('Apple identity token is missing');
-    }
-
+    const idToken = this.readRequiredString(input.idToken, 'Apple idToken is missing');
     const payload = await this.verifyJwtWithJwks({
       idToken,
       jwksUrl: 'https://appleid.apple.com/auth/keys',
