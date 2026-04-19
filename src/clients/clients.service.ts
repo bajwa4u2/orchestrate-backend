@@ -11,6 +11,7 @@ import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
 import { StripeService } from '../billing/stripe/stripe.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
+import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
@@ -58,6 +59,7 @@ export class ClientsService {
     private readonly prisma: PrismaService,
     private readonly stripeService: StripeService,
     private readonly campaignsService: CampaignsService,
+    private readonly deliverabilityService: DeliverabilityService,
   ) {}
 
   create(dto: CreateClientDto) {
@@ -688,6 +690,12 @@ export class ClientsService {
       });
     }
 
+    await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
+      organizationId: client.organizationId,
+      clientId: client.id,
+      timezone: client.primaryTimezone ?? undefined,
+    });
+
     const activation = await this.campaignsService.activateCampaign({
       campaignId: campaign.id,
       organizationId: client.organizationId,
@@ -896,6 +904,12 @@ export class ClientsService {
           },
         }),
       },
+    });
+
+    await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
+      organizationId: client.organizationId,
+      clientId: client.id,
+      timezone: client.primaryTimezone ?? undefined,
     });
 
     const activation = await this.campaignsService.restartCampaign({

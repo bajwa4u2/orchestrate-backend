@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Mailbox, MailboxHealthStatus, MailboxStatus, Prisma, SuppressionType } from '@prisma/client';
+import { Mailbox, MailboxHealthStatus, MailboxProvider, MailboxRole, MailboxStatus, PolicyScope, Prisma, SuppressionType, WarmupStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { CreateMailboxDto } from './dto/create-mailbox.dto';
@@ -12,6 +12,136 @@ import { RegisterComplaintDto } from './dto/register-complaint.dto';
 @Injectable()
 export class DeliverabilityService {
   constructor(private readonly prisma: PrismaService) {}
+
+  async ensureDefaultMailboxInfrastructure(input: {
+    organizationId: string;
+    clientId?: string;
+    timezone?: string | null;
+  }) {
+    const mailbox = await this.ensureDefaultMailbox(input);
+    const policy = await this.ensureDefaultSendPolicy({
+      organizationId: input.organizationId,
+      clientId: input.clientId,
+      mailboxId: mailbox.id,
+      timezone: input.timezone ?? undefined,
+    });
+
+    return { mailbox, policy };
+  }
+
+  private async ensureDefaultMailbox(input: { organizationId: string; clientId?: string }) {
+    const existing = await this.pickMailboxForClient({
+      organizationId: input.organizationId,
+      clientId: input.clientId,
+    });
+
+    if (existing) return existing;
+
+    const helloProfile = this.parseMailboxIdentity(process.env.EMAIL_FROM_HELLO);
+    const fallbackProfile = this.parseMailboxIdentity(process.env.EMAIL_FROM);
+    const supportProfile = this.parseMailboxIdentity(process.env.EMAIL_FROM_SUPPORT);
+    const defaultAddress =
+      helloProfile.emailAddress ??
+      fallbackProfile.emailAddress ??
+      supportProfile.emailAddress ??
+      process.env.MAIL_FROM_ADDRESS?.trim()?.toLowerCase() ??
+      'hello@orchestrateops.com';
+    const defaultFromName =
+      helloProfile.fromName ??
+      fallbackProfile.fromName ??
+      supportProfile.fromName ??
+      process.env.MAIL_FROM_NAME?.trim() ??
+      'Orchestrate';
+    const defaultReplyTo =
+      process.env.EMAIL_REPLY_TO_HELLO?.trim()?.toLowerCase() ??
+      process.env.EMAIL_REPLY_TO_SUPPORT?.trim()?.toLowerCase() ??
+      process.env.EMAIL_REPLY_TO?.trim()?.toLowerCase() ??
+      defaultAddress;
+
+    return this.prisma.mailbox.create({
+      data: {
+        organizationId: input.organizationId,
+        clientId: null,
+        label: 'Primary outreach mailbox',
+        role: MailboxRole.PRIMARY_OUTREACH,
+        emailAddress: defaultAddress,
+        fromName: defaultFromName,
+        replyToAddress: defaultReplyTo,
+        provider: MailboxProvider.OTHER,
+        status: MailboxStatus.ACTIVE,
+        dailySendCap: 100,
+        hourlySendCap: 20,
+        warmupStatus: WarmupStatus.NOT_STARTED,
+        healthStatus: MailboxHealthStatus.HEALTHY,
+        metadataJson: {
+          bootstrap: true,
+          bootstrapSource: 'campaign_activation',
+          transport: process.env.RESEND_API_KEY?.trim() ? 'resend' : 'log',
+          intendedClientId: input.clientId ?? null,
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  private async ensureDefaultSendPolicy(input: {
+    organizationId: string;
+    clientId?: string;
+    mailboxId: string;
+    timezone?: string;
+  }) {
+    const existing = await this.prisma.sendPolicy.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        mailboxId: input.mailboxId,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existing) return existing;
+
+    return this.prisma.sendPolicy.create({
+      data: {
+        organizationId: input.organizationId,
+        clientId: null,
+        mailboxId: input.mailboxId,
+        scope: PolicyScope.MAILBOX,
+        name: 'Default bootstrap send policy',
+        timezone: input.timezone ?? undefined,
+        dailyCap: 100,
+        hourlyCap: 20,
+        minDelaySeconds: 60,
+        maxDelaySeconds: 300,
+        allowedWeekdays: [1, 2, 3, 4, 5, 6, 7],
+        activeFromHour: 0,
+        activeToHour: 23,
+        isActive: true,
+        configJson: {
+          bootstrap: true,
+          bootstrapSource: 'campaign_activation',
+          intendedClientId: input.clientId ?? null,
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  private parseMailboxIdentity(value?: string | null): { fromName?: string; emailAddress?: string } {
+    const raw = value?.trim();
+    if (!raw) return {};
+
+    const angleMatch = raw.match(/^(.*?)<([^>]+)>$/);
+    if (angleMatch) {
+      return {
+        fromName: angleMatch[1].trim().replace(/^"|"$/g, '') || undefined,
+        emailAddress: angleMatch[2].trim().toLowerCase(),
+      };
+    }
+
+    if (raw.includes('@')) {
+      return { emailAddress: raw.toLowerCase() };
+    }
+
+    return { fromName: raw };
+  }
 
   async createDomain(dto: CreateSendingDomainDto) {
     return this.prisma.sendingDomain.create({
