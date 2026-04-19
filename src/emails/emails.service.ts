@@ -350,6 +350,20 @@ export class EmailsService {
       throw new BadRequestException('Missing email body.');
     }
 
+    if (this.isOutreachDirectEmail(input)) {
+      return this.deliverPreservedDirectEmail({
+        subject: input.subject.trim(),
+        bodyText: input.bodyText?.trim() || '',
+        bodyHtml: input.bodyHtml?.trim(),
+        toEmail: input.toEmail.trim(),
+        toName: input.toName?.trim(),
+        category: input.category ?? 'hello',
+        replyToEmail: input.replyToEmail?.trim(),
+        templateVariables: input.templateVariables,
+        attachments: input.attachments,
+      });
+    }
+
     const emailEvent = this.resolveEvent({
       explicitEvent: input.emailEvent,
       explicitCategory: input.category,
@@ -374,7 +388,91 @@ export class EmailsService {
       emailEvent,
       replyToEmail: input.replyToEmail?.trim(),
       templateVariables: input.templateVariables,
+      attachments: input.attachments,
     });
+  }
+
+  private isOutreachDirectEmail(input: DirectEmailInput): boolean {
+    const variables = input.templateVariables ?? {};
+    const hasLeadContext =
+      variables['lead_id'] != null ||
+      variables['leadId'] != null ||
+      variables['campaign_id'] != null ||
+      variables['campaignId'] != null ||
+      variables['sequence_step'] != null ||
+      variables['sequenceStep'] != null ||
+      variables['workflowRunId'] != null ||
+      variables['workflow_run_id'] != null ||
+      variables['jobType'] === 'FIRST_SEND' ||
+      variables['jobType'] === 'FOLLOWUP_SEND';
+
+    return hasLeadContext && !input.emailEvent;
+  }
+
+  private async deliverPreservedDirectEmail(input: DirectEmailInput): Promise<TransportResult> {
+    const category = input.category ?? 'hello';
+    const profile = this.resolveProfile(category, input.replyToEmail);
+    const mode = this.resolveDeliveryMode();
+
+    if (mode === 'disabled') {
+      return { mode, from: profile.from, replyTo: profile.replyTo };
+    }
+
+    if (mode === 'log') {
+      console.log('[emails] Prepared preserved direct email', {
+        to: this.formatRecipient(input.toEmail, input.toName),
+        subject: input.subject,
+        from: profile.from,
+        replyTo: profile.replyTo,
+        category: profile.category,
+        attachments: input.attachments?.map((attachment) => attachment.filename) ?? [],
+      });
+
+      return { mode, from: profile.from, replyTo: profile.replyTo };
+    }
+
+    const apiKey = process.env.RESEND_API_KEY?.trim();
+    if (!apiKey) {
+      throw new InternalServerErrorException('RESEND_API_KEY is missing.');
+    }
+
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: profile.from,
+        to: [this.formatRecipient(input.toEmail, input.toName)],
+        reply_to: profile.replyTo ? [profile.replyTo] : undefined,
+        subject: input.subject,
+        text: input.bodyText || this.stripHtml(input.bodyHtml ?? ''),
+        html: input.bodyHtml ?? this.textToHtml(input.bodyText),
+        attachments: input.attachments?.length
+          ? input.attachments.map((attachment) => ({
+              filename: attachment.filename,
+              content: attachment.contentBase64,
+              content_type: attachment.contentType,
+            }))
+          : undefined,
+      }),
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as { id?: string; message?: string; error?: unknown };
+
+    if (!response.ok) {
+      throw new InternalServerErrorException(
+        `Resend delivery failed${payload?.message ? `: ${payload.message}` : '.'}`,
+      );
+    }
+
+    return {
+      mode,
+      from: profile.from,
+      replyTo: profile.replyTo,
+      externalMessageId: payload?.id,
+    };
   }
 
   private async deliverEmail(input: DirectEmailInput): Promise<TransportResult> {
