@@ -28,6 +28,12 @@ export class OperatorController {
     return this.operatorService.commandOverview(context.organizationId!);
   }
 
+  @Get('command')
+  async commandWorkspace(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.operatorService.commandWorkspace(context.organizationId!);
+  }
+
   @Get('revenue/overview')
   async revenueOverview(@Headers() headers: Record<string, unknown>) {
     const context = await this.accessContextService.requireOperator(headers);

@@ -13,6 +13,10 @@ import {
 import { BillingService } from '../billing/billing.service';
 import { ControlService } from '../control/control.service';
 import { PrismaService } from '../database/prisma.service';
+import { ClientsService } from '../clients/clients.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
+import { EmailsService } from '../emails/emails.service';
+import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { AssignInquiryDto } from './dto/assign-inquiry.dto';
 import { CreateInquiryNoteDto } from './dto/create-inquiry-note.dto';
 import { CreateInquiryReplyDto } from './dto/create-inquiry-reply.dto';
@@ -27,10 +31,67 @@ export class OperatorService {
     private readonly prisma: PrismaService,
     private readonly controlService: ControlService,
     private readonly billingService: BillingService,
+    private readonly clientsService: ClientsService,
+    private readonly campaignsService: CampaignsService,
+    private readonly emailsService: EmailsService,
+    private readonly deliverabilityService: DeliverabilityService,
   ) {}
 
   commandOverview(organizationId: string) {
     return this.controlService.overview(organizationId);
+  }
+
+  async commandWorkspace(organizationId: string) {
+    const [overview, emailDispatches, deliverability, campaigns, clients, inquiries] =
+      await Promise.all([
+        this.controlService.overview(organizationId),
+        this.emailsService.listDispatches(organizationId),
+        this.deliverabilityService.overview({ organizationId }),
+        this.campaignsService.list({ organizationId, page: '1', limit: '10' } as any),
+        this.clientsService.list({ organizationId, page: '1', limit: '10' } as any),
+        this.listPublicInquiries(organizationId, { limit: '10' }),
+      ]);
+
+    const dispatchItems = Array.isArray(emailDispatches) ? emailDispatches : [];
+    const campaignItems = Array.isArray(campaigns?.items) ? campaigns.items : [];
+    const clientItems = Array.isArray(clients?.items) ? clients.items : [];
+    const inquiryItems = Array.isArray(inquiries?.items) ? inquiries.items : [];
+
+    return {
+      pulse: {
+        totals: overview?.totals ?? {},
+        today: overview?.today ?? {},
+        execution: overview?.execution ?? {},
+        deliverability: overview?.deliverability ?? {},
+      },
+      attention: this.buildCommandAttention({
+        alerts: Array.isArray(overview?.alerts) ? overview.alerts : [],
+        emailDispatches: dispatchItems,
+        campaigns: campaignItems,
+        inquiries: inquiryItems,
+      }),
+      execution: {
+        queuedJobs: overview?.execution?.queuedJobs ?? 0,
+        failedJobs: overview?.execution?.failedJobs ?? 0,
+        emailDispatches: dispatchItems.slice(0, 10),
+      },
+      outreach: {
+        campaigns: campaignItems,
+        meta: campaigns?.meta ?? null,
+      },
+      conversations: {
+        inquiries: inquiryItems,
+        summary: inquiries?.summary ?? null,
+      },
+      clients: {
+        items: clientItems,
+        meta: clients?.meta ?? null,
+      },
+      health: {
+        alerts: Array.isArray(overview?.alerts) ? overview.alerts : [],
+        deliverability,
+      },
+    };
   }
 
   revenueOverview(organizationId: string) {
@@ -533,6 +594,66 @@ export class OperatorService {
     };
   }
 
+  private buildCommandAttention(input: {
+    alerts: Array<Record<string, unknown>>;
+    emailDispatches: Array<Record<string, unknown>>;
+    campaigns: Array<Record<string, unknown>>;
+    inquiries: Array<Record<string, unknown>>;
+  }) {
+    const items: Array<Record<string, unknown>> = [];
+
+    for (const alert of input.alerts) {
+      const resolved = alert['resolvedAt'] ?? alert['closedAt'] ?? null;
+      if (resolved) continue;
+      items.push({
+        kind: 'alert',
+        id: alert['id'] ?? null,
+        title: this.safeString(alert['title']) || 'System alert',
+        severity: this.safeString(alert['severity']) || 'warning',
+      });
+    }
+
+    for (const dispatch of input.emailDispatches) {
+      const status = this.safeString(dispatch['status']);
+      if (!['FAILED', 'BOUNCED', 'BLOCKED'].includes(status)) continue;
+      items.push({
+        kind: 'email_dispatch',
+        id: dispatch['id'] ?? null,
+        title: 'Email dispatch needs review',
+        severity: status === 'FAILED' ? 'critical' : 'warning',
+        status,
+      });
+    }
+
+    for (const campaign of input.campaigns) {
+      const status = this.safeString(campaign['status']);
+      if (status === 'ACTIVE') continue;
+      items.push({
+        kind: 'campaign',
+        id: campaign['id'] ?? null,
+        title: 'Campaign not active',
+        severity: 'info',
+        status,
+      });
+    }
+
+    for (const inquiry of input.inquiries) {
+      const status = this.safeString(inquiry['status']);
+      if (status === 'CLOSED') continue;
+      items.push({
+        kind: 'inquiry',
+        id: inquiry['id'] ?? null,
+        title: this.safeString(inquiry['company'])
+          || this.safeString(inquiry['name'])
+          || 'Inquiry waiting',
+        severity: status === 'ESCALATED' ? 'critical' : 'info',
+        status,
+      });
+    }
+
+    return items.slice(0, 20);
+  }
+
   private async inquirySummary() {
     const [
       newCount,
@@ -585,6 +706,10 @@ export class OperatorService {
     }
 
     return inquiry;
+  }
+
+  private safeString(value: unknown) {
+    return typeof value === 'string' ? value : String(value ?? '');
   }
 
   private parseStatus(status?: string) {
