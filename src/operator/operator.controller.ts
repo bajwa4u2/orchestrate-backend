@@ -24,14 +24,14 @@ export class OperatorController {
 
   @Get('command/overview')
   async commandOverview(@Headers() headers: Record<string, unknown>) {
-    await this.accessContextService.requireOperator(headers);
-    return this.operatorService.commandOverview();
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.operatorService.commandOverview(context.organizationId!);
   }
 
   @Get('command')
   async commandWorkspace(@Headers() headers: Record<string, unknown>) {
-    await this.accessContextService.requireOperator(headers);
-    return this.operatorService.commandWorkspace();
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.operatorService.commandWorkspace(context.organizationId!);
   }
 
   @Get('revenue/overview')
@@ -42,35 +42,8 @@ export class OperatorController {
 
   @Get('records/overview')
   async recordsOverview(@Headers() headers: Record<string, unknown>) {
-    await this.accessContextService.requireOperator(headers);
-    return this.operatorService.recordsOverview();
-  }
-
-  @Post('campaigns/:id/activate')
-  async activateCampaignGlobal(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') campaignId: string,
-  ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.operatorService.activateCampaignGlobal(campaignId);
-  }
-
-  @Post('alerts/:id/resolve')
-  async resolveAlertGlobal(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') alertId: string,
-  ) {
     const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.resolveAlertGlobal(alertId, context.userId);
-  }
-
-  @Post('dispatch-due')
-  async dispatchDueGlobal(
-    @Headers() headers: Record<string, unknown>,
-    @Body() body: { limit?: number } = {},
-  ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.operatorService.dispatchDueJobsGlobal(body.limit);
+    return this.operatorService.recordsOverview(context.organizationId!);
   }
 
   @Get('inquiries')
