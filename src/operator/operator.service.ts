@@ -12,6 +12,8 @@ import {
   AlertStatus,
   JobStatus,
   MailboxHealthStatus,
+  CampaignStatus,
+  MeetingStatus,
 } from '@prisma/client';
 import { BillingService } from '../billing/billing.service';
 import { ControlService } from '../control/control.service';
@@ -20,6 +22,7 @@ import { ClientsService } from '../clients/clients.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { EmailsService } from '../emails/emails.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
+import { ExecutionService } from '../execution/execution.service';
 import { AssignInquiryDto } from './dto/assign-inquiry.dto';
 import { CreateInquiryNoteDto } from './dto/create-inquiry-note.dto';
 import { CreateInquiryReplyDto } from './dto/create-inquiry-reply.dto';
@@ -38,249 +41,444 @@ export class OperatorService {
     private readonly campaignsService: CampaignsService,
     private readonly emailsService: EmailsService,
     private readonly deliverabilityService: DeliverabilityService,
+    private readonly executionService: ExecutionService,
   ) {}
 
-  commandOverview(organizationId: string) {
-    return this.controlService.overview(organizationId);
-  }
 
-  async commandWorkspace(organizationId: string) {
-    const [
-      overview,
-      emailDispatches,
-      deliverability,
-      campaigns,
-      clients,
-      inquiries,
-      alerts,
-      failedJobs,
-    ] = await Promise.all([
-      this.controlService.overview(organizationId),
-      this.emailsService.listDispatches(organizationId),
-      this.deliverabilityService.overview({ organizationId }),
-      this.campaignsService.list({ organizationId, page: '1', limit: '10' } as any),
-      this.clientsService.list({ organizationId, page: '1', limit: '10' } as any),
-      this.listPublicInquiries(organizationId, { limit: '10' }),
-      this.prisma.alert.findMany({
-        where: { organizationId, status: AlertStatus.OPEN },
-        orderBy: [{ createdAt: 'desc' }],
-        take: 10,
-      }),
-      this.prisma.job.findMany({
-        where: { organizationId, status: JobStatus.FAILED },
-        orderBy: [{ updatedAt: 'desc' }],
-        take: 10,
-      }),
-    ]);
+commandOverview() {
+  return this.controlService.overview();
+}
 
-    const dispatchItems = Array.isArray(emailDispatches) ? emailDispatches : [];
-    const campaignItems = Array.isArray(campaigns?.items) ? campaigns.items : [];
-    const clientItems = Array.isArray(clients?.items) ? clients.items : [];
-    const inquiryItems = Array.isArray(inquiries?.items) ? inquiries.items : [];
-    const alertItems = Array.isArray(alerts) ? alerts : [];
-    const failedJobItems = Array.isArray(failedJobs) ? failedJobs : [];
-    const deliverabilityMap =
-      deliverability && typeof deliverability === 'object'
-        ? (deliverability as Record<string, unknown>)
-        : {};
-
-    const mailboxItems = Array.isArray(deliverabilityMap['mailboxes'])
-      ? (deliverabilityMap['mailboxes'] as Array<Record<string, unknown>>)
-      : [];
-    const healthyMailboxes = mailboxItems.filter((item) => {
-      const status = this.safeString(item['healthStatus']);
-      return status && !['DEGRADED', 'CRITICAL'].includes(status);
-    }).length;
-    const degradedMailboxes = mailboxItems.filter((item) => {
-      const status = this.safeString(item['healthStatus']);
-      return ['DEGRADED', 'CRITICAL'].includes(status);
-    }).length;
-
-    return {
-      title: 'Operator command',
-      subtitle:
-        'One place to see pressure, movement, and what needs operator attention before the rest of the workspace.',
-      pulse: {
-        totals: overview?.totals ?? {},
-        today: overview?.today ?? {},
-        execution: overview?.execution ?? {},
-        deliverability: {
-          ...(overview?.deliverability ?? {}),
-          healthyMailboxes,
-          degradedMailboxes,
+async commandWorkspace() {
+  const [
+    overview,
+    recentCampaigns,
+    activeCampaignCount,
+    pausedCampaignCount,
+    draftCampaignCount,
+    recentClients,
+    recentMessages,
+    recentReplies,
+    openAlerts,
+    failedJobs,
+    queuedJobs,
+    recentMailboxes,
+    inquiryBundle,
+    meetingsBookedToday,
+  ] = await Promise.all([
+    this.controlService.overview(),
+    this.prisma.campaign.findMany({
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+      },
+    }),
+    this.prisma.campaign.count({ where: { status: CampaignStatus.ACTIVE, archivedAt: null } }),
+    this.prisma.campaign.count({ where: { status: CampaignStatus.PAUSED, archivedAt: null } }),
+    this.prisma.campaign.count({ where: { status: CampaignStatus.DRAFT, archivedAt: null } }),
+    this.prisma.client.findMany({
+      where: { archivedAt: null },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        organization: { select: { id: true, displayName: true, legalName: true } },
+      },
+    }),
+    this.prisma.outreachMessage.findMany({
+      orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+        campaign: { select: { id: true, name: true, status: true } },
+        lead: { select: { id: true, firstName: true, lastName: true, companyName: true } },
+        mailbox: { select: { id: true, emailAddress: true, label: true, healthStatus: true } },
+      },
+    }),
+    this.prisma.reply.findMany({
+      orderBy: [{ receivedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+        campaign: { select: { id: true, name: true, status: true } },
+        lead: { select: { id: true, firstName: true, lastName: true, companyName: true } },
+        meeting: { select: { id: true, status: true, scheduledAt: true } },
+      },
+    }),
+    this.prisma.alert.findMany({
+      where: { status: AlertStatus.OPEN },
+      orderBy: [{ createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+        campaign: { select: { id: true, name: true, status: true } },
+      },
+    }),
+    this.prisma.job.findMany({
+      where: { status: JobStatus.FAILED },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+        campaign: { select: { id: true, name: true, status: true } },
+      },
+    }),
+    this.prisma.job.findMany({
+      where: { status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] } },
+      orderBy: [{ scheduledFor: 'asc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+        campaign: { select: { id: true, name: true, status: true } },
+      },
+    }),
+    this.prisma.mailbox.findMany({
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 12,
+      include: {
+        client: { select: { id: true, displayName: true, legalName: true } },
+      },
+    }),
+    this.listPublicInquiries(undefined, { limit: '12' }),
+    this.prisma.meeting.count({
+      where: {
+        status: MeetingStatus.BOOKED,
+        scheduledAt: {
+          gte: new Date(new Date().setHours(0, 0, 0, 0)),
         },
       },
-      attention: this.buildCommandAttention({
-        alerts: alertItems as Array<Record<string, unknown>>,
-        emailDispatches: dispatchItems as Array<Record<string, unknown>>,
-        campaigns: campaignItems as Array<Record<string, unknown>>,
-        inquiries: inquiryItems as Array<Record<string, unknown>>,
-      }),
+    }),
+  ]);
+
+  const healthyMailboxes = recentMailboxes.filter((mailbox) => {
+    return ![MailboxHealthStatus.DEGRADED, MailboxHealthStatus.CRITICAL].includes(mailbox.healthStatus);
+  }).length;
+  const degradedMailboxes = recentMailboxes.filter((mailbox) => {
+    return [MailboxHealthStatus.DEGRADED, MailboxHealthStatus.CRITICAL].includes(mailbox.healthStatus);
+  }).length;
+
+  const attention = this.buildCommandAttention({
+    alerts: openAlerts as Array<Record<string, unknown>>,
+    emailDispatches: recentMessages as Array<Record<string, unknown>>,
+    campaigns: recentCampaigns as Array<Record<string, unknown>>,
+    inquiries: Array.isArray(inquiryBundle?.items) ? (inquiryBundle.items as Array<Record<string, unknown>>) : [],
+  });
+
+  return {
+    title: 'Operator command',
+    subtitle:
+      'Live system state across clients, campaigns, outreach, replies, and pressure that needs intervention.',
+    pulse: {
+      totals: overview?.totals ?? {},
+      today: {
+        ...(overview?.today ?? {}),
+        booked: meetingsBookedToday,
+      },
       execution: {
-        queuedJobs: overview?.execution?.queuedJobs ?? 0,
-        failedJobs: failedJobItems.map((job) => ({
-          id: job.id,
-          type: job.type,
-          status: job.status,
-          error: job.lastError ?? '',
-          createdAt: job.createdAt,
-          updatedAt: job.updatedAt,
-          attemptCount: job.attemptCount,
-          maxAttempts: job.maxAttempts,
-        })),
-        failedJobsCount: failedJobItems.length,
-        emailDispatches: dispatchItems.slice(0, 10),
+        ...(overview?.execution ?? {}),
+        queuedJobs: queuedJobs.length,
+        failedJobs: failedJobs.length,
       },
-      outreach: {
-        campaigns: campaignItems,
-        meta: campaigns?.meta ?? null,
+      deliverability: {
+        ...(overview?.deliverability ?? {}),
+        healthyMailboxes,
+        degradedMailboxes,
       },
-      conversations: {
-        inquiries: inquiryItems,
-        summary: inquiries?.summary ?? null,
+      campaigns: {
+        active: activeCampaignCount,
+        paused: pausedCampaignCount,
+        draft: draftCampaignCount,
       },
-      clients: {
-        items: clientItems,
-        meta: clients?.meta ?? null,
+    },
+    attention,
+    execution: {
+      queuedJobs: queuedJobs.map((job) => ({
+        id: job.id,
+        type: job.type,
+        status: job.status,
+        scheduledFor: job.scheduledFor,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        clientName: job.client?.displayName ?? job.client?.legalName ?? '',
+        campaignName: job.campaign?.name ?? '',
+      })),
+      failedJobs: failedJobs.map((job) => ({
+        id: job.id,
+        type: job.type,
+        status: job.status,
+        error: job.lastError ?? '',
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        attemptCount: job.attemptCount,
+        maxAttempts: job.maxAttempts,
+        clientName: job.client?.displayName ?? job.client?.legalName ?? '',
+        campaignName: job.campaign?.name ?? '',
+      })),
+      emailDispatches: recentMessages.map((message) => ({
+        id: message.id,
+        status: message.status,
+        lifecycle: message.lifecycle,
+        createdAt: message.createdAt,
+        sentAt: message.sentAt,
+        subjectLine: message.subjectLine,
+        toEmail: message.toEmail,
+        clientName: message.client?.displayName ?? message.client?.legalName ?? '',
+        campaignName: message.campaign?.name ?? '',
+        leadId: message.leadId,
+        leadName: [message.lead?.firstName, message.lead?.lastName].where((part) => (part ?? '').trim().isNotEmpty).join(' ').trim(),
+        leadCompany: message.lead?.companyName ?? '',
+        mailboxId: message.mailboxId,
+        mailboxEmail: message.mailbox?.emailAddress ?? '',
+      })),
+    },
+    outreach: {
+      campaigns: recentCampaigns.map((campaign) => ({
+        id: campaign.id,
+        name: campaign.name,
+        status: campaign.status,
+        generationState: campaign.generationState,
+        createdAt: campaign.createdAt,
+        updatedAt: campaign.updatedAt,
+        clientId: campaign.clientId,
+        clientName: campaign.client?.displayName ?? campaign.client?.legalName ?? '',
+      })),
+    },
+    conversations: {
+      replies: recentReplies.map((reply) => ({
+        id: reply.id,
+        status: reply.status,
+        intent: reply.intent,
+        receivedAt: reply.receivedAt,
+        fromEmail: reply.fromEmail,
+        bodyText: reply.bodyText,
+        clientName: reply.client?.displayName ?? reply.client?.legalName ?? '',
+        campaignName: reply.campaign?.name ?? '',
+        leadName: [reply.lead?.firstName, reply.lead?.lastName].where((part) => (part ?? '').trim().isNotEmpty).join(' ').trim(),
+        leadCompany: reply.lead?.companyName ?? '',
+        meetingStatus: reply.meeting?.status ?? null,
+        meetingScheduledAt: reply.meeting?.scheduledAt ?? null,
+      })),
+      inquiries: inquiryBundle?.items ?? [],
+      summary: inquiryBundle?.summary ?? null,
+    },
+    clients: {
+      items: recentClients.map((client) => ({
+        id: client.id,
+        displayName: client.displayName,
+        legalName: client.legalName,
+        status: client.status,
+        industry: client.industry,
+        websiteUrl: client.websiteUrl,
+        createdAt: client.createdAt,
+        updatedAt: client.updatedAt,
+        organizationName: client.organization.displayName,
+      })),
+    },
+    health: {
+      alerts: openAlerts.map((alert) => ({
+        id: alert.id,
+        title: alert.title,
+        severity: alert.severity,
+        status: alert.status,
+        category: alert.category,
+        bodyText: alert.bodyText,
+        createdAt: alert.createdAt,
+        clientName: alert.client?.displayName ?? alert.client?.legalName ?? '',
+        campaignName: alert.campaign?.name ?? '',
+      })),
+      summary: {
+        open: openAlerts.length,
+        critical: openAlerts.filter((alert) => alert.severity === 'CRITICAL').length,
+        healthyMailboxes,
+        degradedMailboxes,
       },
-      health: {
-        alerts: alertItems.map((alert) => ({
-          id: alert.id,
-          title: alert.title,
-          severity: alert.severity,
-          status: alert.status,
-          category: alert.category,
-          bodyText: alert.bodyText,
-          createdAt: alert.createdAt,
-          resolvedAt: alert.resolvedAt,
-        })),
-        summary: {
-          open: alertItems.length,
-          critical: alertItems.filter((alert) => alert.severity === 'CRITICAL').length,
-          healthyMailboxes,
-          degradedMailboxes,
-        },
-        deliverability,
-      },
-    };
+      mailboxes: recentMailboxes.map((mailbox) => ({
+        id: mailbox.id,
+        label: mailbox.label,
+        emailAddress: mailbox.emailAddress,
+        provider: mailbox.provider,
+        status: mailbox.status,
+        healthStatus: mailbox.healthStatus,
+        warmupStatus: mailbox.warmupStatus,
+        dailySendCap: mailbox.dailySendCap,
+        updatedAt: mailbox.updatedAt,
+        clientName: mailbox.client?.displayName ?? mailbox.client?.legalName ?? '',
+      })),
+    },
+  };
+}
+
+revenueOverview(organizationId: string) {
+  return this.billingService.overview(organizationId);
+}
+
+async recordsOverview() {
+  const [
+    clients,
+    campaigns,
+    leads,
+    replies,
+    meetings,
+    agreements,
+    statements,
+    reminders,
+    templates,
+    alerts,
+    emailDispatches,
+    outreachMessages,
+    jobs,
+    mailboxes,
+  ] = await Promise.all([
+    this.prisma.client.count(),
+    this.prisma.campaign.count(),
+    this.prisma.lead.count(),
+    this.prisma.reply.count(),
+    this.prisma.meeting.count(),
+    this.prisma.serviceAgreement.count(),
+    this.prisma.statement.count(),
+    this.prisma.reminderArtifact.count(),
+    this.prisma.template.count(),
+    this.prisma.alert.count(),
+    this.prisma.documentDispatch.count({ where: { deliveryChannel: 'EMAIL' } }),
+    this.prisma.outreachMessage.count(),
+    this.prisma.job.count(),
+    this.prisma.mailbox.count(),
+  ]);
+
+  return {
+    clients,
+    campaigns,
+    leads,
+    replies,
+    meetings,
+    agreements,
+    statements,
+    reminders,
+    templates,
+    alerts,
+    emailDispatches,
+    outreachMessages,
+    jobs,
+    mailboxes,
+  };
+}
+
+async activateCampaignGlobal(campaignId: string) {
+  const campaign = await this.prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: { id: true, organizationId: true },
+  });
+
+  if (!campaign) {
+    throw new NotFoundException('Campaign not found');
   }
 
-  revenueOverview(organizationId: string) {
-    return this.billingService.overview(organizationId);
+  return this.campaignsService.activateCampaign({
+    campaignId: campaign.id,
+    organizationId: campaign.organizationId,
+  });
+}
+
+async resolveAlertGlobal(alertId: string, userId?: string) {
+  const alert = await this.prisma.alert.findUnique({
+    where: { id: alertId },
+    select: { id: true, status: true },
+  });
+
+  if (!alert) {
+    throw new NotFoundException('Alert not found');
   }
 
-  async recordsOverview(organizationId: string) {
-    const [
-      clients,
-      campaigns,
-      leads,
-      replies,
-      meetings,
-      agreements,
-      statements,
-      reminders,
-      templates,
-      alerts,
-      emailDispatches,
-    ] = await Promise.all([
-      this.prisma.client.count({ where: { organizationId } }),
-      this.prisma.campaign.count({ where: { organizationId } }),
-      this.prisma.lead.count({ where: { organizationId } }),
-      this.prisma.reply.count({ where: { organizationId } }),
-      this.prisma.meeting.count({ where: { organizationId } }),
-      this.prisma.serviceAgreement.count({ where: { organizationId } }),
-      this.prisma.statement.count({ where: { organizationId } }),
-      this.prisma.reminderArtifact.count({ where: { organizationId } }),
-      this.prisma.template.count({ where: { organizationId } }),
-      this.prisma.alert.count({ where: { organizationId } }),
-      this.prisma.documentDispatch.count({
-        where: { organizationId, deliveryChannel: 'EMAIL' },
-      }),
-    ]);
-
-    return {
-      clients,
-      campaigns,
-      leads,
-      replies,
-      meetings,
-      agreements,
-      statements,
-      reminders,
-      templates,
-      alerts,
-      emailDispatches,
-    };
+  if (alert.status === AlertStatus.RESOLVED) {
+    return { ok: true, status: AlertStatus.RESOLVED, id: alert.id };
   }
 
-  async listPublicInquiries(
-    organizationId: string,
-    filters: { limit?: string; status?: string; q?: string } = {},
-  ) {
-    const parsedLimit = Number.parseInt(filters.limit ?? '', 10);
-    const take = Number.isFinite(parsedLimit)
-      ? Math.min(Math.max(parsedLimit, 1), 100)
-      : 20;
+  return this.prisma.alert.update({
+    where: { id: alert.id },
+    data: {
+      status: AlertStatus.RESOLVED,
+      resolvedAt: new Date(),
+      resolvedById: userId,
+    },
+  });
+}
 
-    const where: Prisma.PublicInquiryWhereInput = {};
-    const normalizedStatus = this.parseStatus(filters.status);
-    if (normalizedStatus) {
-      where.status = normalizedStatus;
-    }
+async dispatchDueJobsGlobal(limit?: number) {
+  const parsed = Number.isFinite(limit as number) ? Number(limit) : Number.parseInt(String(limit ?? ''), 10);
+  const safeLimit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 100) : 25;
+  return this.executionService.dispatchDueJobs({ limit: safeLimit });
+}
 
-    const q = filters.q?.trim();
-    if (q) {
-      where.OR = [
-        { name: { contains: q, mode: 'insensitive' } },
-        { email: { contains: q, mode: 'insensitive' } },
-        { company: { contains: q, mode: 'insensitive' } },
-        { message: { contains: q, mode: 'insensitive' } },
-      ];
-    }
+async listPublicInquiries(
+  organizationId?: string,
+  filters: { limit?: string; status?: string; q?: string } = {},
+) {
+  void organizationId;
+  const parsedLimit = Number.parseInt(filters.limit ?? '', 10);
+  const take = Number.isFinite(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), 100)
+    : 20;
 
-    const [items, summary] = await Promise.all([
-      this.prisma.publicInquiry.findMany({
-        where,
-        orderBy: [{ lastActivityAt: 'desc' }, { submittedAt: 'desc' }],
-        take,
-        include: {
-          assignedTo: {
-            select: {
-              id: true,
-              fullName: true,
-              email: true,
-            },
+  const where: Prisma.PublicInquiryWhereInput = {};
+  const normalizedStatus = this.parseStatus(filters.status);
+  if (normalizedStatus) {
+    where.status = normalizedStatus;
+  }
+
+  const q = filters.q?.trim();
+  if (q) {
+    where.OR = [
+      { name: { contains: q, mode: 'insensitive' } },
+      { email: { contains: q, mode: 'insensitive' } },
+      { company: { contains: q, mode: 'insensitive' } },
+      { message: { contains: q, mode: 'insensitive' } },
+    ];
+  }
+
+  const [items, summary] = await Promise.all([
+    this.prisma.publicInquiry.findMany({
+      where,
+      orderBy: [{ lastActivityAt: 'desc' }, { submittedAt: 'desc' }],
+      take,
+      include: {
+        assignedTo: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
           },
         },
-      }),
-      this.inquirySummary(),
-    ]);
+      },
+    }),
+    this.inquirySummary(),
+  ]);
 
-    return {
-      items: items.map((item) => ({
-        id: item.id,
-        name: item.name,
-        email: item.email,
-        company: item.company,
-        inquiryType: item.inquiryType,
-        type: this.humanizeInquiryType(item.inquiryType),
-        status: item.status,
-        message: item.message,
-        submittedAt: item.submittedAt,
-        createdAt: item.submittedAt,
-        notifiedAt: item.notifiedAt,
-        acknowledgedAt: item.acknowledgedAt,
-        closedAt: item.closedAt,
-        assignedToUserId: item.assignedToUserId,
-        assignedToName: item.assignedTo?.fullName ?? '',
-        isEscalated: item.isEscalated,
-        lastActivityAt: item.lastActivityAt,
-      })),
-      summary,
-    };
-  }
+  return {
+    items: items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      email: item.email,
+      company: item.company,
+      inquiryType: item.inquiryType,
+      type: this.humanizeInquiryType(item.inquiryType),
+      status: item.status,
+      message: item.message,
+      submittedAt: item.submittedAt,
+      createdAt: item.submittedAt,
+      notifiedAt: item.notifiedAt,
+      acknowledgedAt: item.acknowledgedAt,
+      closedAt: item.closedAt,
+      assignedToUserId: item.assignedToUserId,
+      assignedToName: item.assignedTo?.fullName ?? '',
+      isEscalated: item.isEscalated,
+      lastActivityAt: item.lastActivityAt,
+    })),
+    summary,
+  };
+}
 
-  async getInquiryDetail(organizationId: string, inquiryId: string) {
+async getInquiryDetail(organizationId: string, inquiryId: string) {
+
     const inquiry = await this.requireInquiry(organizationId, inquiryId);
     return {
       id: inquiry.id,

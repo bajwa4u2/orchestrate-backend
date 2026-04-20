@@ -6,6 +6,7 @@ import { ClientsModule } from '../clients/clients.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { EmailsModule } from '../emails/emails.module';
 import { DeliverabilityModule } from '../deliverability/deliverability.module';
+import { ExecutionModule } from '../execution/execution.module';
 import { OperatorController } from './operator.controller';
 import { OperatorService } from './operator.service';
 
@@ -18,6 +19,7 @@ import { OperatorService } from './operator.service';
     CampaignsModule,
     EmailsModule,
     DeliverabilityModule,
+    ExecutionModule,
   ],
   controllers: [OperatorController],
   providers: [OperatorService],
