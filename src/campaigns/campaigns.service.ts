@@ -158,11 +158,10 @@ export class CampaignsService {
     return { items, meta: { page, limit, total } };
   }
 
-  async activateCampaign(input: { campaignId: string; organizationId: string }) {
+  async activateCampaign(input: { campaignId: string }) {
     const campaign = await this.prisma.campaign.findFirst({
       where: {
         id: input.campaignId,
-        organizationId: input.organizationId,
       },
     });
 
@@ -331,7 +330,6 @@ export class CampaignsService {
       message: 'Campaign activation has started. We are preparing the first lead bootstrap now.',
     };
   }
-
 
   async restartCampaign(input: { campaignId: string; organizationId: string }) {
     const campaign = await this.prisma.campaign.findFirst({

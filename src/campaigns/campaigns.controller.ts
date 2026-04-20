@@ -30,17 +30,15 @@ export class CampaignsController {
     });
   }
 
-  // ✅ NEW: Activation endpoint
   @Post(':id/activate')
   async activate(
     @Headers() headers: Record<string, unknown>,
     @Param('id') campaignId: string,
   ) {
-    const context = await this.accessContextService.requireOperator(headers);
+    await this.accessContextService.requireOperator(headers);
 
     return this.campaignsService.activateCampaign({
       campaignId,
-      organizationId: context.organizationId!,
     });
   }
 }
