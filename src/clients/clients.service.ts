@@ -697,8 +697,7 @@ export class ClientsService {
     });
 
     const activation = await this.campaignsService.activateCampaign({
-      campaignId: campaign.id,
-      organizationId: client.organizationId,
+      campaignId: campaign.id,      
     });
 
     const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
