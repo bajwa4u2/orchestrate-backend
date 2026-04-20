@@ -20,7 +20,9 @@ export class MessageGenerationWorkerService implements JobWorker {
     const organizationId = this.readString(context.payload.organizationId) ?? job.organizationId;
 
     if (!leadId || !campaignId || !clientId || !organizationId) {
-      throw new BadRequestException(`Job ${job.id} is missing lead, campaign, client, or organization context`);
+      throw new BadRequestException(
+        `Job ${job.id} is missing lead, campaign, client, or organization context`,
+      );
     }
 
     const prepared = await this.prepareLeadMessage({
@@ -80,17 +82,34 @@ export class MessageGenerationWorkerService implements JobWorker {
 
     const templateSubject = this.readString(step?.subjectTemplate);
     const templateBody = this.readString(step?.bodyTemplate);
-    const aiDraft = await this.aiService.generateOutboundDraftFromContext({
+
+    const writerBrief = this.buildWriterBrief({
+      lead: lead as any,
+      stepOrderIndex: step?.orderIndex ?? desiredStep,
+      jobType: input.jobType,
+      templateSubject,
+      templateBody,
+      note: input.note,
+    });
+
+    const aiDraft = (await this.aiService.generateOutboundDraftFromContext({
       clientId: input.clientId,
       campaignId: input.campaignId,
       leadId: input.leadId,
       stepOrderIndex: step?.orderIndex ?? desiredStep,
       jobType: input.jobType,
-      note: [templateBody, input.note].filter(Boolean).join(' | ') || undefined,
-    });
+      note: writerBrief,
+    })) as any;
 
-    const subject = templateSubject || this.readString(aiDraft.draft.subject) || this.defaultSubject(lead);
-    const body = templateBody || this.readString(aiDraft.draft.body) || this.defaultBody(lead, input.note);
+    const subject =
+      templateSubject ||
+      this.readString(aiDraft?.draft?.subject) ||
+      this.defaultSubject(lead as any);
+
+    const body =
+      this.cleanTemplateBody(templateBody) ||
+      this.readString(aiDraft?.draft?.body) ||
+      this.defaultBody(lead as any, input.note);
 
     return {
       leadId: lead.id,
@@ -100,43 +119,174 @@ export class MessageGenerationWorkerService implements JobWorker {
       subject,
       body,
       metadata: {
-        usedSequenceTemplate: Boolean(step && templateSubject && templateBody),
+        usedSequenceTemplate: Boolean(templateSubject || templateBody),
         usedAiDraft: Boolean(aiDraft?.draft),
         currentStep,
         desiredStep,
         aiTone: this.readString(aiDraft?.draft?.tone) ?? null,
         aiIntent: this.readString(aiDraft?.draft?.intent) ?? null,
-        candidateCompany: aiDraft?.candidate?.companyName ?? null,
-      } satisfies Prisma.JsonObject,
+        candidateCompany: this.readString(aiDraft?.candidate?.companyName) ?? null,
+      } as Prisma.JsonObject,
     };
   }
 
-  private defaultSubject(lead: { account?: { companyName?: string | null } | null; client: { displayName: string } }) {
-    const company = lead.account?.companyName?.trim();
-    return company ? `${lead.client.displayName} x ${company}` : `${lead.client.displayName}`;
-  }
+  private buildWriterBrief(input: {
+    lead: any;
+    stepOrderIndex: number;
+    jobType: JobType;
+    templateSubject?: string;
+    templateBody?: string;
+    note?: string;
+  }) {
+    const lead = input.lead;
+    const metadata = this.asObject(lead?.metadataJson);
 
-  private defaultBody(
-    lead: { contact?: { fullName?: string | null } | null; client: { displayName: string } },
-    note?: string,
-  ) {
-    const firstName = lead.contact?.fullName?.trim()?.split(' ')?.[0] || 'there';
+    const contactName = this.readString(lead?.contact?.fullName);
+    const firstName = contactName?.split(' ')?.[0] ?? 'there';
+    const title = this.readString(lead?.contact?.title);
+    const companyName = this.readString(lead?.account?.companyName);
+    const companyIndustry = this.readString(lead?.account?.industry);
+    const companyWebsite = this.readString(lead?.account?.websiteUrl);
+    const clientName =
+      this.readString(lead?.client?.displayName) ||
+      this.readString(lead?.client?.legalName) ||
+      'our client';
+    const clientIndustry = this.readString(lead?.client?.industry);
+    const campaignName = this.readString(lead?.campaign?.name);
+    const offer =
+      this.readString(lead?.campaign?.outboundOffer) ||
+      this.readString(lead?.client?.outboundOffer);
+
+    const recentSignal =
+      this.readString(metadata.recentSignal) ||
+      this.readString(metadata.signal) ||
+      this.readString(metadata.observation) ||
+      this.readString(metadata.reasonForFit);
+
+    const painPoint =
+      this.readString(metadata.painPoint) ||
+      this.readString(metadata.problem) ||
+      this.readString(metadata.qualificationNotes);
+
+    const roleFocus = this.inferRoleFocus(title, companyIndustry);
+
     return [
-      `Hi ${firstName},`,
+      'Write a short cold outreach email from a real human to a specific prospect.',
       '',
-      `I’m reaching out from ${lead.client.displayName}.`,
-      note?.trim() || 'I thought this might be relevant to what your team is working on.',
+      'Hard rules:',
+      '- Do not use generic vendor language.',
+      '- Do not say "I hope this message finds you well".',
+      '- Do not say "enhance revenue operations", "scalable solutions", or similar buzzwords.',
+      '- Do not front-load with product explanation.',
+      '- Do not force a meeting ask in the first email.',
+      '- Keep it under 120 words.',
+      '- Make it feel thoughtful, calm, and human.',
       '',
-      'Best,',
-      lead.client.displayName,
+      'Structure:',
+      '1. Personal or contextual opening',
+      '2. One believable observation, tension, or operational friction',
+      '3. One simple question that invites reply',
+      '4. Simple sign-off',
+      '',
+      `Prospect first name: ${firstName}`,
+      `Prospect full name: ${contactName ?? 'unknown'}`,
+      `Prospect role: ${title ?? 'unknown'}`,
+      `Prospect company: ${companyName ?? 'unknown'}`,
+      `Prospect industry: ${companyIndustry ?? 'unknown'}`,
+      companyWebsite ? `Prospect website: ${companyWebsite}` : null,
+      `Likely role focus: ${roleFocus}`,
+      `Client name: ${clientName}`,
+      `Client industry: ${clientIndustry ?? 'unknown'}`,
+      `Campaign name: ${campaignName ?? 'unknown'}`,
+      `Offer or service context: ${offer ?? 'not provided'}`,
+      `Sequence step: ${input.stepOrderIndex}`,
+      `Job type: ${input.jobType}`,
+      recentSignal ? `Observed signal: ${recentSignal}` : null,
+      painPoint ? `Likely friction: ${painPoint}` : null,
+      input.note ? `Operator note: ${input.note}` : null,
+      input.templateSubject ? `Prior subject guidance: ${input.templateSubject}` : null,
+      input.templateBody ? `Prior template guidance: ${this.cleanTemplateBody(input.templateBody)}` : null,
+      '',
+      'Write only the email subject and body in natural business English.',
     ]
       .filter(Boolean)
       .join('\n');
   }
 
-  private asObject(value: unknown): Record<string, unknown> {
+  private inferRoleFocus(title?: string, industry?: string) {
+    const normalizedTitle = (title ?? '').toLowerCase();
+    const normalizedIndustry = (industry ?? '').toLowerCase();
+
+    if (normalizedTitle.includes('revenue')) {
+      return 'revenue execution, pipeline coverage, forecasting pressure';
+    }
+    if (normalizedTitle.includes('growth')) {
+      return 'pipeline generation, campaign performance, acquisition efficiency';
+    }
+    if (normalizedTitle.includes('marketing')) {
+      return 'campaign execution, lead quality, channel coordination';
+    }
+    if (normalizedTitle.includes('sales')) {
+      return 'pipeline consistency, follow-up execution, meeting flow';
+    }
+    if (normalizedIndustry.includes('saas') || normalizedIndustry.includes('software')) {
+      return 'repeatable pipeline generation and reliable outbound execution';
+    }
+    return 'operational consistency, follow-through, and execution quality';
+  }
+
+  private cleanTemplateBody(value?: string) {
+    const body = this.readString(value);
+    if (!body) {
+      return undefined;
+    }
+    return body.replace(/\r\n/g, '\n').trim();
+  }
+
+  private defaultSubject(lead: any) {
+    const company = this.readString(lead?.account?.companyName);
+    const clientName =
+      this.readString(lead?.client?.displayName) ||
+      this.readString(lead?.client?.legalName) ||
+      'Our team';
+
+    return company ? `${clientName} x ${company}` : clientName;
+  }
+
+  private defaultBody(lead: any, note?: string) {
+    const firstName = this.readString(lead?.contact?.fullName)?.split(' ')?.[0] || 'there';
+    const companyName = this.readString(lead?.account?.companyName);
+    const title = this.readString(lead?.contact?.title);
+    const clientName =
+      this.readString(lead?.client?.displayName) ||
+      this.readString(lead?.client?.legalName) ||
+      'Our team';
+
+    const roleLine =
+      title && companyName
+        ? `${title} work at ${companyName}`
+        : companyName
+          ? `what your team is building at ${companyName}`
+          : 'what your team is working on';
+
+    return [
+      `Hi ${firstName},`,
+      '',
+      `Came across ${companyName ?? 'your company'} and wanted to reach out about ${roleLine}.`,
+      note?.trim() || 'We often see strong teams lose momentum not on strategy, but on execution consistency.',
+      '',
+      'Curious how you are currently handling that on your side?',
+      '',
+      'Best,',
+      clientName,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private asObject(value: unknown): Record<string, any> {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return value as Record<string, unknown>;
+      return value as Record<string, any>;
     }
     return {};
   }
