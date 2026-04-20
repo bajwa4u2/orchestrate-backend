@@ -199,6 +199,7 @@ export class EmailsService {
         id: true,
         displayName: true,
         legalName: true,
+        primaryEmail: true,
         metadataJson: true,
       },
     });
@@ -208,7 +209,7 @@ export class EmailsService {
     return {
       clientId: client.id,
       name: client.displayName || client.legalName || 'Client',
-      email: this.extractEmailAddress(client.metadataJson),
+      email: client.primaryEmail?.trim() || this.extractEmailAddress(client.metadataJson),
     };
   }
 

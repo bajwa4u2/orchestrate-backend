@@ -66,4 +66,11 @@ export class ClientsController {
     await this.accessContextService.requireClient(headers);
     return this.clientsService.saveProfile(headers, dto);
   }
+
+  @Post('me/representation-auth/accept')
+  async acceptRepresentationAuth(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
+    return this.clientsService.acceptRepresentationAuth(headers);
+  }
+
 }

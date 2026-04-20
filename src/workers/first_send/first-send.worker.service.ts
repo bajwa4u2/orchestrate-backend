@@ -162,7 +162,7 @@ export class FirstSendWorkerService implements JobWorker {
           toName: lead.contact?.fullName ?? lead.contact?.firstName ?? undefined,
           subject: tightened.subject,
           bodyText: tightened.body,
-          replyToEmail: mailbox.emailAddress,
+          replyToEmail: this.resolveClientReplyToEmail(lead),
           templateVariables: {
             lead_id: lead.id,
             campaign_id: lead.campaignId,
@@ -171,6 +171,8 @@ export class FirstSendWorkerService implements JobWorker {
             client_display_name: this.resolveClientDisplayName(lead),
             client_website: lead.client?.websiteUrl ?? null,
             mailbox_email: mailbox.emailAddress,
+            client_reply_to_email: this.resolveClientReplyToEmail(lead),
+            representation_mode: 'orchestrate_on_behalf_of_client',
           },
         });
 
@@ -195,6 +197,8 @@ export class FirstSendWorkerService implements JobWorker {
         metadataJson: {
           simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
           mailboxEmail: mailbox.emailAddress,
+          clientReplyToEmail: this.resolveClientReplyToEmail(lead),
+          representationMode: 'orchestrate_on_behalf_of_client',
           jobType: input.jobType,
           workflowRunId: input.workflowRunId,
           sequenceId: generated.sequenceId,
@@ -388,6 +392,31 @@ export class FirstSendWorkerService implements JobWorker {
       'OrchestrateOps'
     );
   }
+
+
+private resolveClientReplyToEmail(lead: {
+  clientId: string | null;
+  client: {
+    primaryEmail: string | null;
+    email?: string | null;
+    metadataJson?: unknown;
+  } | null;
+}) {
+  const clientPrimaryEmail = this.readString(lead.client?.primaryEmail);
+  const metadataEmail = this.readString(this.asObject(lead.client?.metadataJson).email);
+  const fallbackEmail = this.readString(lead.client?.email);
+
+  const resolved = clientPrimaryEmail ?? metadataEmail ?? fallbackEmail;
+
+  if (!resolved) {
+    throw new BadRequestException(
+      `Client ${lead.clientId ?? 'unknown'} is missing primaryEmail for representative outreach reply handling`,
+    );
+  }
+
+  return resolved.toLowerCase();
+}
+
 
   private compactParagraphSpacing(value: string) {
     return value

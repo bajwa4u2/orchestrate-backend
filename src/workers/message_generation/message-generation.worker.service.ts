@@ -177,6 +177,8 @@ export class MessageGenerationWorkerService implements JobWorker {
       '- Do not use generic vendor language.',
       '- Do not say "I hope this message finds you well".',
       '- Do not say "enhance revenue operations", "scalable solutions", or similar buzzwords.',
+      '- This message is sent by Orchestrate on behalf of the client, so do not pretend the sender is the client directly.',
+      '- Make the representation explicit in a natural way, usually with a line like "I’m reaching out on behalf of [Client Name]."',
       '- Do not front-load with product explanation.',
       '- Do not force a meeting ask in the first email.',
       '- Keep it under 120 words.',
@@ -197,6 +199,7 @@ export class MessageGenerationWorkerService implements JobWorker {
       `Likely role focus: ${roleFocus}`,
       `Client name: ${clientName}`,
       `Client industry: ${clientIndustry ?? 'unknown'}`,
+      `Representation mode: Orchestrate reaching out on behalf of ${clientName}`,
       `Campaign name: ${campaignName ?? 'unknown'}`,
       `Offer or service context: ${offer ?? 'not provided'}`,
       `Sequence step: ${input.stepOrderIndex}`,
@@ -250,7 +253,7 @@ export class MessageGenerationWorkerService implements JobWorker {
       this.readString(lead?.client?.legalName) ||
       'Our team';
 
-    return company ? `${clientName} x ${company}` : clientName;
+    return company ? `On behalf of ${clientName} | ${company}` : `On behalf of ${clientName}`;
   }
 
   private defaultBody(lead: any, note?: string) {
@@ -272,13 +275,14 @@ export class MessageGenerationWorkerService implements JobWorker {
     return [
       `Hi ${firstName},`,
       '',
+      `I’m reaching out from Orchestrate on behalf of ${clientName}.`,
       `Came across ${companyName ?? 'your company'} and wanted to reach out about ${roleLine}.`,
       note?.trim() || 'We often see strong teams lose momentum not on strategy, but on execution consistency.',
       '',
       'Curious how you are currently handling that on your side?',
       '',
       'Best,',
-      clientName,
+      `Orchestrate, on behalf of ${clientName}`,
     ]
       .filter(Boolean)
       .join('\n');

@@ -813,6 +813,7 @@ model Organization {
   tagAssignments         TagAssignment[]
   invoiceAccessEvents    InvoiceAccessEvent[]
   workflowRuns           WorkflowRun[]
+  representationAuths    ClientRepresentationAuth[]
 }
 
 model User {
@@ -912,8 +913,8 @@ model Client {
   updatedAt          DateTime     @updatedAt
   archivedAt         DateTime?
 
-  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdBy              User?                   @relation("ClientCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  organization           Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy              User?                      @relation("ClientCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   subscriptions          Subscription[]
   billingProfiles        BillingProfile[]
   invoices               Invoice[]
@@ -955,7 +956,8 @@ model Client {
   tagDefinitions         TagDefinition[]
   invoiceAccessEvents    InvoiceAccessEvent[]
   workflowRuns           WorkflowRun[]
-  inquiries              PublicInquiry[]         @relation("InquiryClient")
+  inquiries              PublicInquiry[]            @relation("InquiryClient")
+  representationAuths    ClientRepresentationAuth[]
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
@@ -2441,6 +2443,27 @@ model CollectionAction {
   reminder     ReminderArtifact? @relation(fields: [reminderId], references: [id], onDelete: SetNull)
 
   @@index([clientId, status, scheduledAt])
+}
+
+model ClientRepresentationAuth {
+  id               String   @id @default(cuid())
+  organizationId   String
+  clientId         String
+  version          Int
+  acceptedByUserId String?
+  acceptedByName   String?
+  acceptedByEmail  String?
+  acceptedAt       DateTime
+  metadataJson     Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, version])
+  @@index([organizationId])
+  @@index([organizationId, clientId])
 }
 
 model ServiceAgreement {

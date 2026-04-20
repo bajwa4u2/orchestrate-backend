@@ -32,6 +32,9 @@ type SetupRegion = {
 type SetupMetro = { countryCode: string; regionCode: string; label: string };
 type SetupIndustry = { code: string; label: string };
 
+
+const CURRENT_REPRESENTATION_AUTH_VERSION = 1;
+
 type ScopeJson = {
   version: 2;
   lane: ServiceType;
@@ -553,6 +556,70 @@ export class ClientsService {
     };
   }
 
+  async acceptRepresentationAuth(headers: Record<string, unknown>) {
+    const context = await this.accessContextService.buildFromHeaders(headers);
+    if (!context.userId) {
+      throw new UnauthorizedException('No active session');
+    }
+    if (context.surface !== 'client') {
+      throw new UnauthorizedException('Client access is required');
+    }
+
+    const client = await this.resolveClientForRequest(headers);
+    const existing = await this.getCurrentRepresentationAuth(client.id);
+
+    if (existing) {
+      return {
+        success: true,
+        status: 'already_accepted',
+        clientId: client.id,
+        organizationId: client.organizationId,
+        version: existing.version,
+        acceptedAt: existing.acceptedAt.toISOString(),
+      };
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: context.userId },
+      select: { fullName: true, email: true },
+    });
+
+    const acceptedAt = new Date();
+    const record = await this.prisma.clientRepresentationAuth.create({
+      data: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+        version: CURRENT_REPRESENTATION_AUTH_VERSION,
+        acceptedByUserId: context.userId,
+        acceptedByName:
+          user?.fullName?.trim() ||
+          client.primaryContactName ||
+          client.opsContactName ||
+          client.displayName,
+        acceptedByEmail:
+          user?.email?.trim() ||
+          client.primaryEmail ||
+          client.opsEmail ||
+          client.legalEmail ||
+          null,
+        acceptedAt,
+        metadataJson: {
+          source: 'client_surface',
+          action: 'campaign_representation_auth_accept',
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return {
+      success: true,
+      status: 'accepted',
+      clientId: client.id,
+      organizationId: client.organizationId,
+      version: record.version,
+      acceptedAt: record.acceptedAt.toISOString(),
+    };
+  }
+
 
   async startCampaign(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
@@ -584,6 +651,12 @@ export class ClientsService {
         campaignId: null,
         jobId: null,
       };
+    }
+
+
+    const representationAuth = await this.getCurrentRepresentationAuth(client.id);
+    if (!representationAuth) {
+      return this.buildRepresentationAuthRequiredResponse(client);
     }
 
     const effectiveLane: ServiceType = commercial.service ?? scope.lane;
@@ -690,12 +763,6 @@ export class ClientsService {
       });
     }
 
-    await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
-      organizationId: client.organizationId,
-      clientId: client.id,
-      timezone: client.primaryTimezone ?? undefined,
-    });
-
     const activation = await this.campaignsService.activateCampaign({
       campaignId: campaign.id,      
     });
@@ -783,6 +850,13 @@ export class ClientsService {
         campaignId: null,
         jobId: null,
       };
+    }
+
+
+
+    const representationAuth = await this.getCurrentRepresentationAuth(client.id);
+    if (!representationAuth) {
+      return this.buildRepresentationAuthRequiredResponse(client);
     }
 
     const effectiveLane: ServiceType = commercial.service ?? scope.lane;
@@ -903,12 +977,6 @@ export class ClientsService {
           },
         }),
       },
-    });
-
-    await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
-      organizationId: client.organizationId,
-      clientId: client.id,
-      timezone: client.primaryTimezone ?? undefined,
     });
 
     const activation = await this.campaignsService.restartCampaign({
@@ -1204,6 +1272,38 @@ export class ClientsService {
       },
     };
   }
+  private async getCurrentRepresentationAuth(clientId: string) {
+    return this.prisma.clientRepresentationAuth.findUnique({
+      where: {
+        clientId_version: {
+          clientId,
+          version: CURRENT_REPRESENTATION_AUTH_VERSION,
+        },
+      },
+    });
+  }
+
+  private buildRepresentationAuthRequiredResponse(client: {
+    id: string;
+    organizationId: string;
+  }) {
+    return {
+      success: false,
+      status: 'representation_auth_required',
+      code: 'REPRESENTATION_AUTH_REQUIRED',
+      clientId: client.id,
+      organizationId: client.organizationId,
+      campaignId: null,
+      jobId: null,
+      representationAuth: {
+        required: true,
+        version: CURRENT_REPRESENTATION_AUTH_VERSION,
+      },
+      message:
+        'Before Orchestrate can start outreach on your behalf, please accept the representation authorization.',
+    };
+  }
+
 
   private async resolveClientForRequest(headers: Record<string, unknown>) {
     const context = await this.accessContextService.buildFromHeaders(headers);
