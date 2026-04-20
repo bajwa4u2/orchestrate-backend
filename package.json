@@ -13,7 +13,8 @@
     "prisma:generate": "npx prisma generate --config ./prisma.config.ts",
     "prisma:migrate:dev": "prisma migrate dev --config ./prisma.config.ts",
     "prisma:migrate:deploy": "prisma migrate deploy --config ./prisma.config.ts",
-    "prisma:studio": "prisma studio --config ./prisma.config.ts"
+    "prisma:studio": "prisma studio --config ./prisma.config.ts",
+    "postinstall": "npm prune --omit=dev"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",
@@ -34,7 +35,7 @@
     "stripe": "^22.0.0"
   },
   "devDependencies": {
-    "@nestjs/cli": "^11.0.10",
+    "@nestjs/cli": "^11.0.21",
     "@nestjs/schematics": "^11.0.7",
     "@nestjs/testing": "^11.1.6",
     "@types/express": "^5.0.3",
