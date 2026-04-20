@@ -11,7 +11,6 @@ import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
 import { StripeService } from '../billing/stripe/stripe.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
-import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
@@ -31,9 +30,6 @@ type SetupRegion = {
 };
 type SetupMetro = { countryCode: string; regionCode: string; label: string };
 type SetupIndustry = { code: string; label: string };
-
-
-const CURRENT_REPRESENTATION_AUTH_VERSION = 1;
 
 type ScopeJson = {
   version: 2;
@@ -55,6 +51,8 @@ type ScopeJson = {
   };
 };
 
+const CURRENT_REPRESENTATION_AUTH_VERSION = 1;
+
 @Injectable()
 export class ClientsService {
   constructor(
@@ -62,7 +60,6 @@ export class ClientsService {
     private readonly prisma: PrismaService,
     private readonly stripeService: StripeService,
     private readonly campaignsService: CampaignsService,
-    private readonly deliverabilityService: DeliverabilityService,
   ) {}
 
   create(dto: CreateClientDto) {
@@ -556,70 +553,87 @@ export class ClientsService {
     };
   }
 
-  async acceptRepresentationAuth(headers: Record<string, unknown>) {
-    const context = await this.accessContextService.buildFromHeaders(headers);
-    if (!context.userId) {
-      throw new UnauthorizedException('No active session');
-    }
-    if (context.surface !== 'client') {
-      throw new UnauthorizedException('Client access is required');
-    }
 
+  async acceptRepresentationAuth(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
-    const existing = await this.getCurrentRepresentationAuth(client.id);
+    const context = await this.accessContextService.buildFromHeaders(headers);
+
+    const existing = await this.prisma.clientRepresentationAuth.findUnique({
+      where: {
+        clientId_version: {
+          clientId: client.id,
+          version: CURRENT_REPRESENTATION_AUTH_VERSION,
+        },
+      },
+    });
 
     if (existing) {
       return {
         success: true,
-        status: 'already_accepted',
+        status: 'representation_auth_already_recorded',
         clientId: client.id,
         organizationId: client.organizationId,
-        version: existing.version,
-        acceptedAt: existing.acceptedAt.toISOString(),
+        version: CURRENT_REPRESENTATION_AUTH_VERSION,
+        acceptedAt: existing.acceptedAt,
       };
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: context.userId },
-      select: { fullName: true, email: true },
-    });
-
-    const acceptedAt = new Date();
-    const record = await this.prisma.clientRepresentationAuth.create({
+    const created = await this.prisma.clientRepresentationAuth.create({
       data: {
         organizationId: client.organizationId,
         clientId: client.id,
         version: CURRENT_REPRESENTATION_AUTH_VERSION,
-        acceptedByUserId: context.userId,
-        acceptedByName:
-          user?.fullName?.trim() ||
-          client.primaryContactName ||
-          client.opsContactName ||
-          client.displayName,
-        acceptedByEmail:
-          user?.email?.trim() ||
-          client.primaryEmail ||
-          client.opsEmail ||
-          client.legalEmail ||
-          null,
-        acceptedAt,
-        metadataJson: {
-          source: 'client_surface',
-          action: 'campaign_representation_auth_accept',
-        } as Prisma.InputJsonValue,
+        acceptedByUserId: context.userId ?? null,
+        acceptedByName: this.readString((context as any).userName) ?? client.displayName ?? client.legalName ?? null,
+        acceptedByEmail: this.readString((context as any).userEmail) ?? client.primaryEmail ?? null,
+        acceptedAt: new Date(),
+        metadataJson: toPrismaJson({
+          source: 'client_campaign_restart_gate',
+          acceptedFromSurface: context.surface ?? 'client',
+        }),
       },
     });
 
     return {
       success: true,
-      status: 'accepted',
+      status: 'representation_auth_recorded',
       clientId: client.id,
       organizationId: client.organizationId,
-      version: record.version,
-      acceptedAt: record.acceptedAt.toISOString(),
+      version: CURRENT_REPRESENTATION_AUTH_VERSION,
+      acceptedAt: created.acceptedAt,
     };
   }
 
+  private async ensureRepresentationAuth(client: any) {
+    const existing = await this.prisma.clientRepresentationAuth.findUnique({
+      where: {
+        clientId_version: {
+          clientId: client.id,
+          version: CURRENT_REPRESENTATION_AUTH_VERSION,
+        },
+      },
+    });
+
+    if (existing) {
+      return null;
+    }
+
+    return {
+      success: false,
+      status: 'representation_auth_required',
+      code: 'REPRESENTATION_AUTH_REQUIRED',
+      clientId: client.id,
+      organizationId: client.organizationId,
+      campaignId: null,
+      jobId: null,
+      representationAuth: {
+        required: true,
+        version: CURRENT_REPRESENTATION_AUTH_VERSION,
+      },
+      message:
+        'Before Orchestrate can start outreach on your behalf, you need to authorize representation for your business.',
+    };
+  }
 
   async startCampaign(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
@@ -653,10 +667,9 @@ export class ClientsService {
       };
     }
 
-
-    const representationAuth = await this.getCurrentRepresentationAuth(client.id);
-    if (!representationAuth) {
-      return this.buildRepresentationAuthRequiredResponse(client);
+    const representationAuthRequired = await this.ensureRepresentationAuth(client);
+    if (representationAuthRequired) {
+      return representationAuthRequired;
     }
 
     const effectiveLane: ServiceType = commercial.service ?? scope.lane;
@@ -767,6 +780,28 @@ export class ClientsService {
       campaignId: campaign.id,      
     });
 
+    const cooldownStampSource = await this.prisma.campaign.findUnique({
+      where: { id: campaign.id },
+      select: { metadataJson: true },
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...this.asObject(cooldownStampSource?.metadataJson),
+          governor: {
+            ...this.asObject(this.asObject(cooldownStampSource?.metadataJson).governor),
+            status: 'healthy',
+            reason: null,
+            note: null,
+            lastManualRestartAt: new Date().toISOString(),
+            lastManualRestartBy: 'client',
+          },
+        }),
+      },
+    });
+
     const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
     const campaignHealth = refreshedCampaign
       ? await this.buildCampaignHealthSnapshot(client.organizationId, client.id, refreshedCampaign)
@@ -852,11 +887,9 @@ export class ClientsService {
       };
     }
 
-
-
-    const representationAuth = await this.getCurrentRepresentationAuth(client.id);
-    if (!representationAuth) {
-      return this.buildRepresentationAuthRequiredResponse(client);
+    const representationAuthRequired = await this.ensureRepresentationAuth(client);
+    if (representationAuthRequired) {
+      return representationAuthRequired;
     }
 
     const effectiveLane: ServiceType = commercial.service ?? scope.lane;
@@ -1272,38 +1305,6 @@ export class ClientsService {
       },
     };
   }
-  private async getCurrentRepresentationAuth(clientId: string) {
-    return this.prisma.clientRepresentationAuth.findUnique({
-      where: {
-        clientId_version: {
-          clientId,
-          version: CURRENT_REPRESENTATION_AUTH_VERSION,
-        },
-      },
-    });
-  }
-
-  private buildRepresentationAuthRequiredResponse(client: {
-    id: string;
-    organizationId: string;
-  }) {
-    return {
-      success: false,
-      status: 'representation_auth_required',
-      code: 'REPRESENTATION_AUTH_REQUIRED',
-      clientId: client.id,
-      organizationId: client.organizationId,
-      campaignId: null,
-      jobId: null,
-      representationAuth: {
-        required: true,
-        version: CURRENT_REPRESENTATION_AUTH_VERSION,
-      },
-      message:
-        'Before Orchestrate can start outreach on your behalf, please accept the representation authorization.',
-    };
-  }
-
 
   private async resolveClientForRequest(headers: Record<string, unknown>) {
     const context = await this.accessContextService.buildFromHeaders(headers);
