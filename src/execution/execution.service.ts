@@ -1082,6 +1082,7 @@ export class ExecutionService implements OnModuleInit {
       await this.prisma.campaign.update({
         where: { id: lead.campaignId },
         data: {
+          status: 'ACTIVE',
           generationState: 'ACTIVE',
         },
       });

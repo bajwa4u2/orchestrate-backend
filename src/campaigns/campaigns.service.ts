@@ -228,7 +228,7 @@ export class CampaignsService {
       await this.prisma.campaign.update({
         where: { id: campaign.id },
         data: {
-          status: 'READY',
+          status: 'ACTIVE',
           generationState: 'TARGETING_READY',
           metadataJson: toPrismaJson({
             ...metadata,
@@ -282,7 +282,7 @@ export class CampaignsService {
     const activatedCampaign = await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
-        status: 'READY',
+        status: 'ACTIVE',
         generationState: 'TARGETING_READY',
         metadataJson: toPrismaJson(nextMetadata),
       },
@@ -413,7 +413,7 @@ export class CampaignsService {
       await tx.campaign.update({
         where: { id: campaign.id },
         data: {
-          status: 'READY',
+          status: 'ACTIVE',
           generationState: 'TARGETING_READY',
           metadataJson: toPrismaJson(nextMetadata),
         },

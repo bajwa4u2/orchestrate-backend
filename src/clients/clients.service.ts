@@ -1005,8 +1005,6 @@ export class ClientsService {
             status: 'healthy',
             reason: null,
             note: null,
-            lastManualRestartAt: new Date().toISOString(),
-            lastManualRestartBy: 'client',
           },
         }),
       },
