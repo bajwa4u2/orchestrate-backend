@@ -780,28 +780,6 @@ export class ClientsService {
       campaignId: campaign.id,      
     });
 
-    const cooldownStampSource = await this.prisma.campaign.findUnique({
-      where: { id: campaign.id },
-      select: { metadataJson: true },
-    });
-
-    await this.prisma.campaign.update({
-      where: { id: campaign.id },
-      data: {
-        metadataJson: toPrismaJson({
-          ...this.asObject(cooldownStampSource?.metadataJson),
-          governor: {
-            ...this.asObject(this.asObject(cooldownStampSource?.metadataJson).governor),
-            status: 'healthy',
-            reason: null,
-            note: null,
-            lastManualRestartAt: new Date().toISOString(),
-            lastManualRestartBy: 'client',
-          },
-        }),
-      },
-    });
-
     const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
     const campaignHealth = refreshedCampaign
       ? await this.buildCampaignHealthSnapshot(client.organizationId, client.id, refreshedCampaign)
@@ -1013,6 +991,28 @@ export class ClientsService {
     const activation = await this.campaignsService.restartCampaign({
       campaignId: campaign.id,
       organizationId: client.organizationId,
+    });
+
+    const cooldownStampSource = await this.prisma.campaign.findUnique({
+      where: { id: campaign.id },
+      select: { metadataJson: true },
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        metadataJson: toPrismaJson({
+          ...this.asObject(cooldownStampSource?.metadataJson),
+          governor: {
+            ...this.asObject(this.asObject(cooldownStampSource?.metadataJson).governor),
+            status: 'healthy',
+            reason: null,
+            note: null,
+            lastManualRestartAt: new Date().toISOString(),
+            lastManualRestartBy: 'client',
+          },
+        }),
+      },
     });
 
     const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);

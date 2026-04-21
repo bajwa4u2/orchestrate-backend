@@ -921,7 +921,7 @@ export class ExecutionService implements OnModuleInit {
     await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
-        status: 'READY',
+        status: 'ACTIVE',
         generationState: 'TARGETING_READY',
         metadataJson: toPrismaJson({
           ...currentMetadata,
