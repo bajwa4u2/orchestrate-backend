@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RepliesService } from '../replies/replies.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { SendTemplatedEmailDto } from './dto/send-templated-email.dto';
+import { renderBaseEmail } from './templates/base.template';
 
 import { accountApprovedTemplate } from './templates/account-approved.template';
 import { accountEmailVerificationTemplate } from './templates/account-email-verification.template';
@@ -414,6 +415,18 @@ export class EmailsService {
     return hasLeadContext && !input.emailEvent;
   }
 
+  private renderFinalEmailHtml(input: DirectEmailInput): string {
+    const rawHtml = input.bodyHtml?.trim();
+    const contentHtml = rawHtml && rawHtml.length ? rawHtml : this.textToHtml(input.bodyText || '');
+    const previewText = (input.bodyText || this.stripHtml(contentHtml)).slice(0, 160);
+
+    return renderBaseEmail({
+      title: input.subject,
+      previewText,
+      contentHtml,
+    });
+  }
+
   private async deliverPreservedDirectEmail(input: DirectEmailInput): Promise<TransportResult> {
     const category = input.category ?? 'outreach';
     const profile = this.resolveProfile(category, input.replyToEmail);
@@ -453,7 +466,7 @@ export class EmailsService {
         reply_to: profile.replyTo ? [profile.replyTo] : undefined,
         subject: input.subject,
         text: input.bodyText || this.stripHtml(input.bodyHtml ?? ''),
-        html: input.bodyHtml ?? this.textToHtml(input.bodyText),
+        html: this.renderFinalEmailHtml(input),
         attachments: input.attachments?.length
           ? input.attachments.map((attachment) => ({
               filename: attachment.filename,
@@ -525,7 +538,7 @@ export class EmailsService {
         reply_to: profile.replyTo ? [profile.replyTo] : undefined,
         subject: input.subject,
         text: input.bodyText || this.stripHtml(input.bodyHtml ?? ''),
-        html: input.bodyHtml ?? this.textToHtml(input.bodyText),
+        html: this.renderFinalEmailHtml(input),
         attachments: input.attachments?.length
           ? input.attachments.map((attachment) => ({
               filename: attachment.filename,

@@ -114,13 +114,9 @@ export class MessageGenerationWorkerService implements JobWorker {
       note: writerBrief,
     })) as any;
 
-    const subject =
-      templateSubject ||
-      this.readString(aiDraft?.draft?.subject);
+    const subject = templateSubject || this.readString(aiDraft?.draft?.subject);
 
-    const body =
-      this.cleanTemplateBody(templateBody) ||
-      this.readString(aiDraft?.draft?.body);
+    const body = this.cleanTemplateBody(templateBody) || this.readString(aiDraft?.draft?.body);
 
     if (!subject || !body) {
       throw new BadRequestException(
@@ -193,6 +189,8 @@ export class MessageGenerationWorkerService implements JobWorker {
         ? await this.prisma.discoveredEntity.findUnique({ where: { id: qualification.discoveredEntityId } })
         : null;
 
+    const qualificationReasonJson = this.asObject(qualification?.reasonJson);
+
     return {
       opportunityProfileId: opportunity?.id ?? null,
       opportunityType: this.readString(opportunity?.opportunityType),
@@ -203,7 +201,7 @@ export class MessageGenerationWorkerService implements JobWorker {
       qualificationDecisionId: qualification?.id ?? null,
       qualificationDecision: this.readString(qualification?.decision),
       qualificationScore: qualification?.finalScore != null ? Number(qualification.finalScore) : null,
-      qualificationReasoning: this.readString(qualification?.reasoningSummary),
+      qualificationReasoning: this.buildQualificationReasoning(qualificationReasonJson),
       discoveredEntityId: discoveredEntity?.id ?? null,
       discoveredEntityEvidence: this.asObject(discoveredEntity?.sourceEvidenceJson),
       signalEventIds: signals.map((item) => item.id),
@@ -350,8 +348,7 @@ export class MessageGenerationWorkerService implements JobWorker {
       'Let the client business context stay central throughout the email.',
     ]
       .filter(Boolean)
-      .join('
-');
+      .join('\n');
   }
 
   private inferRoleFocus(title?: string, industry?: string) {
@@ -381,9 +378,24 @@ export class MessageGenerationWorkerService implements JobWorker {
     if (!body) {
       return undefined;
     }
-    return body.replace(/
-/g, '
-').trim();
+    return body.replace(/\r\n/g, '\n').trim();
+  }
+
+  private buildQualificationReasoning(reasonJson: Record<string, any>) {
+    return [
+      reasonJson.hasDirectPerson === true ? 'direct person identified' : null,
+      reasonJson.hasEmailCandidate === true ? 'email candidate available' : null,
+      this.readString(reasonJson.inferredRole) ? `role: ${this.readString(reasonJson.inferredRole)}` : null,
+      this.readString(reasonJson.sourcePolicyStatus)
+        ? `source policy: ${this.readString(reasonJson.sourcePolicyStatus)}`
+        : null,
+      this.readString(reasonJson.contactPolicyStatus)
+        ? `contact policy: ${this.readString(reasonJson.contactPolicyStatus)}`
+        : null,
+      reasonJson.policyPenalty != null ? `policy penalty: ${String(reasonJson.policyPenalty)}` : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
   }
 
   private asObject(value: unknown): Record<string, any> {
