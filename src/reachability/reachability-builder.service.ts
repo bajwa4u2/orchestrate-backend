@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { toPrismaJson } from '../common/utils/prisma-json';
+import { evaluateContactPolicy } from '../common/policy/data-policy';
 
 @Injectable()
 export class ReachabilityBuilderService {
@@ -12,6 +13,9 @@ export class ReachabilityBuilderService {
     });
     if (!entity) throw new NotFoundException('Discovered entity not found');
 
+    const sourceEvidence = this.asObject(entity.sourceEvidenceJson);
+    const sourceType = this.readString(sourceEvidence.sourceType) ?? 'UNKNOWN';
+
     const domain = entity.domain || this.deriveDomain(entity.websiteUrl, entity.companyName);
     const personName = entity.personName?.trim() || '';
     const parts = personName.split(/\s+/).filter(Boolean);
@@ -19,8 +23,17 @@ export class ReachabilityBuilderService {
     const lastName = parts.length > 1 ? parts[parts.length - 1].toLowerCase() : 'team';
     const roleLocalPart = this.roleLocalPart(entity.inferredRole);
     const pattern = personName ? 'first.last' : roleLocalPart;
-    const emailCandidate = domain ? (personName ? `${firstName}.${lastName}@${domain}` : `${roleLocalPart}@${domain}`) : null;
-    const score = emailCandidate ? (personName ? 82 : 68) : 30;
+    const candidateEmail = domain ? (personName ? `${firstName}.${lastName}@${domain}` : `${roleLocalPart}@${domain}`) : null;
+
+    const contactPolicy = evaluateContactPolicy({
+      email: candidateEmail,
+      sourceType,
+      domain,
+      inferredRole: entity.inferredRole,
+    });
+
+    const emailCandidate = contactPolicy.status === 'BLOCKED' ? null : candidateEmail;
+    const score = !emailCandidate ? 25 : contactPolicy.status === 'JUSTIFIED' ? (personName ? 82 : 74) : 58;
 
     const record = await this.prisma.reachabilityRecord.create({
       data: {
@@ -32,17 +45,20 @@ export class ReachabilityBuilderService {
         contactPageUrl: entity.websiteUrl ? `${entity.websiteUrl.replace(/\/$/, '')}/contact` : null,
         emailCandidate,
         emailPattern: pattern,
-        verificationStatus: emailCandidate ? 'PATTERN_CONSTRUCTED' : 'UNVERIFIED',
+        verificationStatus: emailCandidate ? (contactPolicy.status === 'JUSTIFIED' ? 'PATTERN_CONSTRUCTED' : 'REVIEW_REQUIRED') : 'UNVERIFIED',
         reachabilityScore: score,
         suppressionStatus: null,
         notesJson: toPrismaJson({
           derivedFrom: 'internal_reachability_builder',
           inferredRole: entity.inferredRole,
+          sourceType,
+          contactPolicyStatus: contactPolicy.status,
+          policyReason: contactPolicy.reason,
         }),
       },
     });
 
-    return { entity, record };
+    return { entity, record, policy: contactPolicy.status };
   }
 
   private deriveDomain(websiteUrl: string | null | undefined, companyName: string) {
@@ -62,5 +78,15 @@ export class ReachabilityBuilderService {
     if (text.includes('director')) return 'director';
     if (text.includes('manager')) return 'manager';
     return 'hello';
+  }
+
+  private asObject(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(value as Record<string, unknown>) }
+      : {};
+  }
+
+  private readString(value: unknown) {
+    return typeof value === 'string' ? value.trim() : null;
   }
 }

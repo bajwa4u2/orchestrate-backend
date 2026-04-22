@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { evaluateSourcePolicy } from '../common/policy/data-policy';
 import { InternalDiscoveryOrchestrator } from './internal-discovery.orchestrator';
 
 @Injectable()
@@ -31,6 +32,14 @@ export class SourcePlannerService {
     const metadata = this.asObject(campaign.metadataJson);
     const seedProspects = this.readObjectArray(metadata.seedProspects);
 
+    const sourcePolicies = ['SEARCH', 'DIRECTORY', 'WEBSITE'].map((sourceType) => ({
+      sourceType,
+      ...evaluateSourcePolicy({ sourceType }),
+    }));
+    const allowedSourceTypes = sourcePolicies
+      .filter((item) => item.status !== 'BLOCKED')
+      .map((item) => item.sourceType);
+
     return this.orchestrator.discover({
       organizationId: campaign.organizationId,
       clientId: campaign.clientId,
@@ -46,6 +55,8 @@ export class SourcePlannerService {
       geography,
       seedProspects,
       limit: Math.max(10, Math.min(campaign.dailySendCap ?? 25, 50)),
+      allowedSourceTypes,
+      sourcePolicies,
     });
   }
 

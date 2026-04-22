@@ -1,11 +1,11 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   ContactEmailStatus,
-  DiscoveredEntity,
   Job,
   JobStatus,
   JobType,
   LeadQualificationState,
+  LeadSourceType,
   LeadStatus,
   QualificationStatus,
   RecordSource,
@@ -49,7 +49,6 @@ export class LeadImportWorkerService implements JobWorker {
       where: { id: campaignId },
       include: { client: true },
     });
-
     if (!campaign) {
       throw new NotFoundException(`Campaign ${campaignId} not found`);
     }
@@ -61,35 +60,23 @@ export class LeadImportWorkerService implements JobWorker {
     const activation = this.asObject(campaignMetadata.activation);
     const continuity = this.asObject(campaignMetadata.continuity);
 
-    await this.markCampaignInProgress(
-      campaign.id,
-      campaignMetadata,
-      activation,
-      continuity,
-      refillMode,
-      job.id,
-      targetSendableFloor,
-      maxLeadCount,
-    );
+    await this.markCampaignInProgress(campaign.id, campaignMetadata, activation, continuity, refillMode, job.id, targetSendableFloor, maxLeadCount);
 
     const strategyResult = await this.strategyService.generateForCampaign({
       campaignId: campaign.id,
       organizationId: campaign.organizationId,
     });
-
     const signals = await this.signalDetectionService.detectForCampaign({
       campaignId: campaign.id,
       organizationId: campaign.organizationId,
     });
-
     const discovery = await this.sourcePlannerService.discoverForCampaign({
       campaignId: campaign.id,
       organizationId: campaign.organizationId,
     });
 
     let externalProspectsImported = 0;
-    let discoveredEntities: DiscoveredEntity[] = [...discovery.entities];
-
+    let discoveredEntities = discovery.entities;
     if (!discoveredEntities.length) {
       const fallbackDecision = await this.providerFallbackService.canUseApollo({
         organizationId: campaign.organizationId,
@@ -122,12 +109,8 @@ export class LeadImportWorkerService implements JobWorker {
         });
 
         externalProspectsImported = apollo.importedCount;
-
         for (const prospect of apollo.prospects) {
-          const dedupeKey = `${prospect.companyName.toLowerCase()}|${(
-            prospect.contactFullName || ''
-          ).toLowerCase()}|${(prospect.domain || '').toLowerCase()}`;
-
+          const dedupeKey = `${prospect.companyName.toLowerCase()}|${(prospect.contactFullName || '').toLowerCase()}|${(prospect.domain || '').toLowerCase()}`;
           const entity = await this.prisma.discoveredEntity.upsert({
             where: { campaignId_dedupeKey: { campaignId: campaign.id, dedupeKey } },
             update: {
@@ -136,10 +119,7 @@ export class LeadImportWorkerService implements JobWorker {
               inferredRole: prospect.title ?? null,
               domain: prospect.domain ?? null,
               geography: [prospect.city, prospect.region, prospect.countryCode].filter(Boolean).join(', ') || null,
-              sourceEvidenceJson: toPrismaJson({
-                provider: prospect.provider,
-                sourcePayload: prospect.sourcePayload,
-              }),
+              sourceEvidenceJson: toPrismaJson({ provider: prospect.provider, sourcePayload: prospect.sourcePayload }),
               entityConfidence: prospect.priority ?? 75,
               status: 'DISCOVERED',
             },
@@ -154,35 +134,26 @@ export class LeadImportWorkerService implements JobWorker {
               websiteUrl: prospect.domain ? `https://${prospect.domain}` : null,
               domain: prospect.domain ?? null,
               geography: [prospect.city, prospect.region, prospect.countryCode].filter(Boolean).join(', ') || null,
-              sourceEvidenceJson: toPrismaJson({
-                provider: prospect.provider,
-                sourcePayload: prospect.sourcePayload,
-              }),
+              sourceEvidenceJson: toPrismaJson({ provider: prospect.provider, sourcePayload: prospect.sourcePayload }),
               entityConfidence: prospect.priority ?? 75,
               dedupeKey,
               status: 'DISCOVERED',
             },
           });
-
           discoveredEntities.push(entity);
         }
       }
     }
 
     const acceptedLeadIds: string[] = [];
-
     for (const entity of discoveredEntities.slice(0, maxLeadCount)) {
-      const reachability = await this.reachabilityBuilderService.buildForEntity({
-        entityId: entity.id,
-        organizationId: campaign.organizationId,
-      });
-
-      const evaluation = await this.qualificationService.evaluateEntity({
-        entityId: entity.id,
-        organizationId: campaign.organizationId,
-      });
-
+      const reachability = await this.reachabilityBuilderService.buildForEntity({ entityId: entity.id, organizationId: campaign.organizationId });
+      const evaluation = await this.qualificationService.evaluateEntity({ entityId: entity.id, organizationId: campaign.organizationId });
       if (evaluation.qualification.decision !== 'ACCEPT') {
+        continue;
+      }
+
+      if (reachability.policy === 'BLOCKED') {
         continue;
       }
 
@@ -200,10 +171,7 @@ export class LeadImportWorkerService implements JobWorker {
           websiteUrl: entity.websiteUrl ?? null,
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({
-            entityId: entity.id,
-            opportunityProfileId: entity.opportunityProfileId,
-          }),
+          enrichmentJson: toPrismaJson({ entityId: entity.id, opportunityProfileId: entity.opportunityProfileId }),
         },
         create: {
           id: entity.id,
@@ -215,10 +183,7 @@ export class LeadImportWorkerService implements JobWorker {
           websiteUrl: entity.websiteUrl ?? null,
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({
-            entityId: entity.id,
-            opportunityProfileId: entity.opportunityProfileId,
-          }),
+          enrichmentJson: toPrismaJson({ entityId: entity.id, opportunityProfileId: entity.opportunityProfileId }),
         },
       });
 
@@ -233,9 +198,7 @@ export class LeadImportWorkerService implements JobWorker {
           city: this.firstToken(entity.geography),
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({
-            reachabilityRecordId: reachability.record.id,
-          }),
+          enrichmentJson: toPrismaJson({ reachabilityRecordId: reachability.record.id }),
         },
         create: {
           id: entity.id,
@@ -249,9 +212,7 @@ export class LeadImportWorkerService implements JobWorker {
           city: this.firstToken(entity.geography),
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({
-            reachabilityRecordId: reachability.record.id,
-          }),
+          enrichmentJson: toPrismaJson({ reachabilityRecordId: reachability.record.id }),
         },
       });
 
@@ -300,20 +261,15 @@ export class LeadImportWorkerService implements JobWorker {
     }
 
     const queuedJobIds: string[] = [];
-
     for (const leadId of acceptedLeadIds.slice(0, maxLeadCount)) {
       const dedupeKey = `first_send:${leadId}`;
-
       const existing = await this.prisma.job.findFirst({
         where: {
           dedupeKey,
-          status: {
-            in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED],
-          },
+          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED] },
         },
         select: { id: true },
       });
-
       if (existing) continue;
 
       const sendJob = await this.prisma.job.create({
@@ -334,39 +290,23 @@ export class LeadImportWorkerService implements JobWorker {
           }),
         },
       });
-
       queuedJobIds.push(sendJob.id);
     }
 
-    await this.adaptationService.runForCampaign({
-      campaignId: campaign.id,
-      organizationId: campaign.organizationId,
-    });
+    await this.adaptationService.runForCampaign({ campaignId: campaign.id, organizationId: campaign.organizationId });
 
     const visibleLeadCount = await this.prisma.lead.count({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-      },
+      where: { campaignId: campaign.id, status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] } },
     });
-
     const sendableLeadCount = await this.prisma.lead.count({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-        contact: { is: { email: { not: null } } },
-      },
+      where: { campaignId: campaign.id, status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] }, contact: { is: { email: { not: null } } } },
     });
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
       data: {
         status: visibleLeadCount ? 'ACTIVE' : 'READY',
-        generationState: visibleLeadCount
-          ? sendableLeadCount
-            ? 'ACTIVE'
-            : 'LEADS_READY'
-          : 'TARGETING_READY',
+        generationState: visibleLeadCount ? (sendableLeadCount ? 'ACTIVE' : 'LEADS_READY') : 'TARGETING_READY',
         metadataJson: toPrismaJson({
           ...campaignMetadata,
           activation: {
@@ -454,9 +394,7 @@ export class LeadImportWorkerService implements JobWorker {
   }
 
   private asObject(value: unknown): Record<string, unknown> {
-    return value && typeof value === 'object' && !Array.isArray(value)
-      ? { ...(value as Record<string, unknown>) }
-      : {};
+    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
   }
 
   private readString(value: unknown) {
@@ -472,22 +410,18 @@ export class LeadImportWorkerService implements JobWorker {
     const scope = this.asObject(scopeJson);
     const metadata = this.asObject(metadataJson);
     const geography = this.asObject(scope.geography);
-
     const targets = [
       ...this.readStringArray(geography.countries),
       ...this.readStringArray(geography.regions),
       ...this.readStringArray(geography.cities),
       ...this.readStringArray(this.asObject(metadata.targeting).regions),
     ];
-
     return Array.from(new Set(targets)).slice(0, 8);
   }
 
   private readStringArray(value: unknown) {
     if (!Array.isArray(value)) return [] as string[];
-    return value
-      .map((item) => (typeof item === 'string' ? item.trim() : ''))
-      .filter(Boolean);
+    return value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
   }
 
   private firstToken(value?: string | null) {
