@@ -105,10 +105,19 @@ export class FirstSendWorkerService implements JobWorker {
       };
     }
 
-    const mailbox = await this.deliverabilityService.pickMailboxForClient({
+    let mailbox = await this.deliverabilityService.pickMailboxForClient({
       organizationId: lead.organizationId,
       clientId: lead.clientId,
     });
+
+    if (!mailbox) {
+      const ensured = await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
+        organizationId: lead.organizationId,
+        clientId: lead.clientId,
+        timezone: lead.campaign.timezone ?? lead.client.primaryTimezone ?? undefined,
+      });
+      mailbox = ensured.mailbox;
+    }
 
     if (!mailbox) {
       throw new BadRequestException(`No active mailbox available for lead ${lead.id}`);

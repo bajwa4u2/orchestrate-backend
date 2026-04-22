@@ -83,6 +83,18 @@ export class MessageGenerationWorkerService implements JobWorker {
     const templateSubject = this.readString(step?.subjectTemplate);
     const templateBody = this.readString(step?.bodyTemplate);
 
+    const intelligence = await this.loadIntelligenceContext({
+      campaignId: input.campaignId,
+      metadata,
+    });
+
+    this.assertMessageContext({
+      lead,
+      intelligence,
+      templateSubject,
+      templateBody,
+    });
+
     const writerBrief = this.buildWriterBrief({
       lead: lead as any,
       stepOrderIndex: step?.orderIndex ?? desiredStep,
@@ -90,6 +102,7 @@ export class MessageGenerationWorkerService implements JobWorker {
       templateSubject,
       templateBody,
       note: input.note,
+      intelligence,
     });
 
     const aiDraft = (await this.aiService.generateOutboundDraftFromContext({
@@ -103,13 +116,17 @@ export class MessageGenerationWorkerService implements JobWorker {
 
     const subject =
       templateSubject ||
-      this.readString(aiDraft?.draft?.subject) ||
-      this.defaultSubject(lead as any);
+      this.readString(aiDraft?.draft?.subject);
 
     const body =
       this.cleanTemplateBody(templateBody) ||
-      this.readString(aiDraft?.draft?.body) ||
-      this.defaultBody(lead as any, input.note);
+      this.readString(aiDraft?.draft?.body);
+
+    if (!subject || !body) {
+      throw new BadRequestException(
+        `No message draft could be generated for lead ${lead.id} with real business context`,
+      );
+    }
 
     return {
       leadId: lead.id,
@@ -126,8 +143,110 @@ export class MessageGenerationWorkerService implements JobWorker {
         aiTone: this.readString(aiDraft?.draft?.tone) ?? null,
         aiIntent: this.readString(aiDraft?.draft?.intent) ?? null,
         candidateCompany: this.readString(aiDraft?.candidate?.companyName) ?? null,
+        opportunityProfileId: intelligence.opportunityProfileId,
+        signalEventIds: intelligence.signalEventIds,
+        qualificationDecisionId: intelligence.qualificationDecisionId,
+        discoveredEntityId: intelligence.discoveredEntityId,
       } as Prisma.JsonObject,
     };
+  }
+
+  private async loadIntelligenceContext(input: {
+    campaignId: string;
+    metadata: Record<string, any>;
+  }) {
+    const opportunityProfileId = this.readString(input.metadata.opportunityProfileId);
+    const qualificationDecisionId = this.readString(input.metadata.qualificationDecisionId);
+    const discoveredEntityId = this.readString(input.metadata.discoveredEntityId);
+
+    const opportunity = opportunityProfileId
+      ? await this.prisma.opportunityProfile.findUnique({ where: { id: opportunityProfileId } })
+      : await this.prisma.opportunityProfile.findFirst({
+          where: { campaignId: input.campaignId },
+          orderBy: { createdAt: 'desc' },
+        });
+
+    const qualification = qualificationDecisionId
+      ? await this.prisma.qualificationDecision.findUnique({ where: { id: qualificationDecisionId } })
+      : discoveredEntityId
+        ? await this.prisma.qualificationDecision.findFirst({
+            where: { campaignId: input.campaignId, discoveredEntityId },
+            orderBy: { createdAt: 'desc' },
+          })
+        : await this.prisma.qualificationDecision.findFirst({
+            where: { campaignId: input.campaignId },
+            orderBy: { createdAt: 'desc' },
+          });
+
+    const signals = await this.prisma.signalEvent.findMany({
+      where: {
+        campaignId: input.campaignId,
+        ...(opportunity?.id ? { opportunityProfileId: opportunity.id } : {}),
+      },
+      orderBy: [{ confidenceScore: 'desc' }, { createdAt: 'desc' }],
+      take: 3,
+    });
+
+    const discoveredEntity = discoveredEntityId
+      ? await this.prisma.discoveredEntity.findUnique({ where: { id: discoveredEntityId } })
+      : qualification?.discoveredEntityId
+        ? await this.prisma.discoveredEntity.findUnique({ where: { id: qualification.discoveredEntityId } })
+        : null;
+
+    return {
+      opportunityProfileId: opportunity?.id ?? null,
+      opportunityType: this.readString(opportunity?.opportunityType),
+      targetDescription: this.readString(opportunity?.targetDescription),
+      serviceContext: this.readString(opportunity?.serviceContext),
+      offerContext: this.readString(opportunity?.offerContext),
+      strategyJson: this.asObject(opportunity?.strategyJson),
+      qualificationDecisionId: qualification?.id ?? null,
+      qualificationDecision: this.readString(qualification?.decision),
+      qualificationScore: qualification?.finalScore != null ? Number(qualification.finalScore) : null,
+      qualificationReasoning: this.readString(qualification?.reasoningSummary),
+      discoveredEntityId: discoveredEntity?.id ?? null,
+      discoveredEntityEvidence: this.asObject(discoveredEntity?.sourceEvidenceJson),
+      signalEventIds: signals.map((item) => item.id),
+      signals: signals.map((item) => ({
+        type: item.signalType,
+        sourceType: item.signalSourceType,
+        headline: this.readString(item.headlineOrLabel),
+        geography: this.readString(item.geography),
+        confidenceScore: item.confidenceScore,
+        recencyScore: item.recencyScore,
+        payload: this.asObject(item.payloadJson),
+        normalized: this.asObject(item.normalizedJson),
+      })),
+    };
+  }
+
+  private assertMessageContext(input: {
+    lead: any;
+    intelligence: any;
+    templateSubject?: string;
+    templateBody?: string;
+  }) {
+    const hasOpportunity = Boolean(
+      input.intelligence.opportunityProfileId &&
+        (input.intelligence.targetDescription ||
+          input.intelligence.offerContext ||
+          input.intelligence.serviceContext ||
+          input.intelligence.opportunityType),
+    );
+    const hasSignal = Array.isArray(input.intelligence.signals) && input.intelligence.signals.length > 0;
+    const hasQualification = Boolean(
+      input.intelligence.qualificationDecisionId &&
+        (input.intelligence.qualificationReasoning ||
+          input.intelligence.qualificationDecision ||
+          input.intelligence.qualificationScore != null),
+    );
+    const hasTemplate = Boolean(input.templateSubject || input.templateBody);
+
+    if (!hasOpportunity && !hasSignal && !hasQualification && !hasTemplate) {
+      throw new BadRequestException(
+        `Lead ${input.lead.id} is missing opportunity, signal, and qualification context for first outreach`,
+      );
+    }
   }
 
   private buildWriterBrief(input: {
@@ -137,6 +256,7 @@ export class MessageGenerationWorkerService implements JobWorker {
     templateSubject?: string;
     templateBody?: string;
     note?: string;
+    intelligence: any;
   }) {
     const lead = input.lead;
     const metadata = this.asObject(lead?.metadataJson);
@@ -154,41 +274,50 @@ export class MessageGenerationWorkerService implements JobWorker {
     const clientIndustry = this.readString(lead?.client?.industry);
     const campaignName = this.readString(lead?.campaign?.name);
     const offer =
+      this.readString(lead?.campaign?.offerSummary) ||
       this.readString(lead?.campaign?.outboundOffer) ||
-      this.readString(lead?.client?.outboundOffer);
+      this.readString(lead?.client?.outboundOffer) ||
+      this.readString(input.intelligence.offerContext);
+    const serviceContext =
+      this.readString(input.intelligence.serviceContext) ||
+      this.readString(input.intelligence.targetDescription) ||
+      this.readString(lead?.campaign?.objective);
 
-    const recentSignal =
-      this.readString(metadata.recentSignal) ||
-      this.readString(metadata.signal) ||
-      this.readString(metadata.observation) ||
-      this.readString(metadata.reasonForFit);
-
-    const painPoint =
+    const roleFocus = this.inferRoleFocus(title, companyIndustry);
+    const strongestSignal = Array.isArray(input.intelligence.signals)
+      ? input.intelligence.signals[0]
+      : null;
+    const signalLine = strongestSignal
+      ? [
+          this.readString(strongestSignal.headline),
+          this.readString(strongestSignal.geography),
+          this.readString(strongestSignal.type),
+        ]
+          .filter(Boolean)
+          .join(' | ')
+      : this.readString(metadata.recentSignal) ||
+        this.readString(metadata.signal) ||
+        this.readString(metadata.observation) ||
+        this.readString(metadata.reasonForFit);
+    const qualificationReason =
+      this.readString(input.intelligence.qualificationReasoning) ||
       this.readString(metadata.painPoint) ||
       this.readString(metadata.problem) ||
       this.readString(metadata.qualificationNotes);
 
-    const roleFocus = this.inferRoleFocus(title, companyIndustry);
-
     return [
-      'Write a short cold outreach email from a real human to a specific prospect.',
+      'Write a short, specific B2B cold outreach email from a real human to a real prospect.',
       '',
       'Hard rules:',
-      '- Do not use generic vendor language.',
+      '- Do not use generic vendor language or broad claims.',
       '- Do not say "I hope this message finds you well".',
       '- Do not say "enhance revenue operations", "scalable solutions", or similar buzzwords.',
-      '- This message is sent by Orchestrate on behalf of the client, so do not pretend the sender is the client directly.',
-      '- Make the representation explicit in a natural way, usually with a line like "I’m reaching out on behalf of [Client Name]."',
-      '- Do not front-load with product explanation.',
-      '- Do not force a meeting ask in the first email.',
+      '- Do not say "on behalf of" in the body unless there is no better natural phrasing.',
+      '- The recipient should feel the client business context, not the platform brand.',
+      '- Do not invent pain points. Use only the context provided below.',
+      '- If the signal is weak, stay restrained and observational.',
       '- Keep it under 120 words.',
-      '- Make it feel thoughtful, calm, and human.',
-      '',
-      'Structure:',
-      '1. Personal or contextual opening',
-      '2. One believable observation, tension, or operational friction',
-      '3. One simple question that invites reply',
-      '4. Simple sign-off',
+      '- End with one simple reply-opening question.',
       '',
       `Prospect first name: ${firstName}`,
       `Prospect full name: ${contactName ?? 'unknown'}`,
@@ -199,21 +328,30 @@ export class MessageGenerationWorkerService implements JobWorker {
       `Likely role focus: ${roleFocus}`,
       `Client name: ${clientName}`,
       `Client industry: ${clientIndustry ?? 'unknown'}`,
-      `Representation mode: Orchestrate reaching out on behalf of ${clientName}`,
       `Campaign name: ${campaignName ?? 'unknown'}`,
-      `Offer or service context: ${offer ?? 'not provided'}`,
-      `Sequence step: ${input.stepOrderIndex}`,
-      `Job type: ${input.jobType}`,
-      recentSignal ? `Observed signal: ${recentSignal}` : null,
-      painPoint ? `Likely friction: ${painPoint}` : null,
+      offer ? `Client offer context: ${offer}` : null,
+      serviceContext ? `Service / objective context: ${serviceContext}` : null,
+      input.intelligence.opportunityType
+        ? `Opportunity type: ${input.intelligence.opportunityType}`
+        : null,
+      signalLine ? `Observed signal: ${signalLine}` : null,
+      qualificationReason ? `Qualification reasoning: ${qualificationReason}` : null,
+      input.intelligence.qualificationScore != null
+        ? `Qualification score: ${input.intelligence.qualificationScore}`
+        : null,
       input.note ? `Operator note: ${input.note}` : null,
       input.templateSubject ? `Prior subject guidance: ${input.templateSubject}` : null,
-      input.templateBody ? `Prior template guidance: ${this.cleanTemplateBody(input.templateBody)}` : null,
+      input.templateBody
+        ? `Prior template guidance: ${this.cleanTemplateBody(input.templateBody)}`
+        : null,
       '',
       'Write only the email subject and body in natural business English.',
+      'Make the opening depend on the observed signal or qualification reasoning, not generic outreach language.',
+      'Let the client business context stay central throughout the email.',
     ]
       .filter(Boolean)
-      .join('\n');
+      .join('
+');
   }
 
   private inferRoleFocus(title?: string, industry?: string) {
@@ -243,49 +381,9 @@ export class MessageGenerationWorkerService implements JobWorker {
     if (!body) {
       return undefined;
     }
-    return body.replace(/\r\n/g, '\n').trim();
-  }
-
-  private defaultSubject(lead: any) {
-    const company = this.readString(lead?.account?.companyName);
-    const clientName =
-      this.readString(lead?.client?.displayName) ||
-      this.readString(lead?.client?.legalName) ||
-      'Our team';
-
-    return company ? `On behalf of ${clientName} | ${company}` : `On behalf of ${clientName}`;
-  }
-
-  private defaultBody(lead: any, note?: string) {
-    const firstName = this.readString(lead?.contact?.fullName)?.split(' ')?.[0] || 'there';
-    const companyName = this.readString(lead?.account?.companyName);
-    const title = this.readString(lead?.contact?.title);
-    const clientName =
-      this.readString(lead?.client?.displayName) ||
-      this.readString(lead?.client?.legalName) ||
-      'Our team';
-
-    const roleLine =
-      title && companyName
-        ? `${title} work at ${companyName}`
-        : companyName
-          ? `what your team is building at ${companyName}`
-          : 'what your team is working on';
-
-    return [
-      `Hi ${firstName},`,
-      '',
-      `I’m reaching out from Orchestrate on behalf of ${clientName}.`,
-      `Came across ${companyName ?? 'your company'} and wanted to reach out about ${roleLine}.`,
-      note?.trim() || 'We often see strong teams lose momentum not on strategy, but on execution consistency.',
-      '',
-      'Curious how you are currently handling that on your side?',
-      '',
-      'Best,',
-      `Orchestrate, on behalf of ${clientName}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
+    return body.replace(/
+/g, '
+').trim();
   }
 
   private asObject(value: unknown): Record<string, any> {

@@ -15,6 +15,7 @@ import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowsService } from '../workflows/workflows.service';
+import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { ListCampaignsDto } from './dto/list-campaigns.dto';
 
@@ -25,6 +26,7 @@ export class CampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workflowsService: WorkflowsService,
+    private readonly deliverabilityService: DeliverabilityService,
   ) {}
 
   async create(dto: CreateCampaignDto) {
@@ -169,6 +171,12 @@ export class CampaignsService {
     if (!campaign) {
       throw new Error('Campaign not found');
     }
+
+    await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
+      organizationId: campaign.organizationId,
+      clientId: campaign.clientId,
+      timezone: campaign.timezone ?? undefined,
+    });
 
     const metadata = this.asObject(campaign.metadataJson);
     const activation = this.asObject(metadata.activation);
