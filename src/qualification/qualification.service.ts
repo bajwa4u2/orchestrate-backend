@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { toPrismaJson } from '../common/utils/prisma-json';
+import { policyService } from '../common/policy/data-policy';
 
 @Injectable()
 export class QualificationService {
@@ -17,33 +18,33 @@ export class QualificationService {
       orderBy: { createdAt: 'desc' },
     });
 
-    const reachabilityNotes = this.asObject(reachability?.notesJson);
-    const contactPolicyStatus = this.readString(reachabilityNotes.contactPolicyStatus) ?? 'BLOCKED';
-    const sourceEvidence = this.asObject(entity.sourceEvidenceJson);
-    const sourcePolicyStatus = this.readString(sourceEvidence.sourcePolicyStatus) ?? 'BLOCKED';
+    const executionPolicy = policyService.evaluateExecution({
+      email: reachability?.emailCandidate,
+      companyName: entity.companyName,
+      domain: reachability?.domain ?? entity.domain,
+    });
 
     const relevanceScore = Math.max(45, Number(entity.entityConfidence ?? 60));
     const timelinessScore = entity.status === 'DISCOVERED' ? 78 : 62;
-    const reachabilityScore = Number(reachability?.reachabilityScore ?? 25);
+    const reachabilityScore = executionPolicy.status === 'BLOCKED'
+      ? 5
+      : Number(reachability?.reachabilityScore ?? 25);
     const valueScore = entity.personName ? 74 : 60;
-    const policyPenalty =
-      sourcePolicyStatus === 'BLOCKED' || contactPolicyStatus === 'BLOCKED'
-        ? 35
-        : contactPolicyStatus === 'REVIEW_REQUIRED'
-        ? 10
-        : 0;
-
-    const weightedScore = Math.round((relevanceScore * 0.35) + (timelinessScore * 0.2) + (reachabilityScore * 0.3) + (valueScore * 0.15));
-    const finalScore = Math.max(0, weightedScore - policyPenalty);
+    const finalScore = Math.round(
+      relevanceScore * 0.35 +
+        timelinessScore * 0.2 +
+        reachabilityScore * 0.3 +
+        valueScore * 0.15,
+    );
 
     const decision =
-      sourcePolicyStatus === 'BLOCKED' || contactPolicyStatus === 'BLOCKED'
+      executionPolicy.status === 'BLOCKED'
         ? 'DISCARD'
         : finalScore >= 70
-        ? 'ACCEPT'
-        : finalScore >= 55
-        ? 'HOLD'
-        : 'DISCARD';
+          ? 'ACCEPT'
+          : finalScore >= 55
+            ? 'HOLD'
+            : 'DISCARD';
 
     const record = await this.prisma.qualificationDecision.create({
       data: {
@@ -62,23 +63,11 @@ export class QualificationService {
           hasDirectPerson: Boolean(entity.personName),
           hasEmailCandidate: Boolean(reachability?.emailCandidate),
           inferredRole: entity.inferredRole,
-          sourcePolicyStatus,
-          contactPolicyStatus,
-          policyPenalty,
+          executionPolicy,
         }),
       },
     });
 
-    return { entity, reachability, qualification: record };
-  }
-
-  private asObject(value: unknown): Record<string, unknown> {
-    return value && typeof value === 'object' && !Array.isArray(value)
-      ? { ...(value as Record<string, unknown>) }
-      : {};
-  }
-
-  private readString(value: unknown) {
-    return typeof value === 'string' ? value.trim() : null;
+    return { entity, reachability, qualification: record, policy: executionPolicy };
   }
 }

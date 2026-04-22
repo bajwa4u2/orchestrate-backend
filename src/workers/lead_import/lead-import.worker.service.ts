@@ -5,12 +5,12 @@ import {
   JobStatus,
   JobType,
   LeadQualificationState,
-  LeadSourceType,
   LeadStatus,
   QualificationStatus,
   RecordSource,
 } from '@prisma/client';
 import { toPrismaJson } from '../../common/utils/prisma-json';
+import { policyService } from '../../common/policy/data-policy';
 import { PrismaService } from '../../database/prisma.service';
 import { AdaptationService } from '../../adaptation/adaptation.service';
 import { LeadSourcesService } from '../../lead-sources/lead-sources.service';
@@ -60,7 +60,16 @@ export class LeadImportWorkerService implements JobWorker {
     const activation = this.asObject(campaignMetadata.activation);
     const continuity = this.asObject(campaignMetadata.continuity);
 
-    await this.markCampaignInProgress(campaign.id, campaignMetadata, activation, continuity, refillMode, job.id, targetSendableFloor, maxLeadCount);
+    await this.markCampaignInProgress(
+      campaign.id,
+      campaignMetadata,
+      activation,
+      continuity,
+      refillMode,
+      job.id,
+      targetSendableFloor,
+      maxLeadCount,
+    );
 
     const strategyResult = await this.strategyService.generateForCampaign({
       campaignId: campaign.id,
@@ -76,7 +85,8 @@ export class LeadImportWorkerService implements JobWorker {
     });
 
     let externalProspectsImported = 0;
-    let discoveredEntities = discovery.entities;
+    const discoveredEntities = [...discovery.entities];
+
     if (!discoveredEntities.length) {
       const fallbackDecision = await this.providerFallbackService.canUseApollo({
         organizationId: campaign.organizationId,
@@ -110,6 +120,16 @@ export class LeadImportWorkerService implements JobWorker {
 
         externalProspectsImported = apollo.importedCount;
         for (const prospect of apollo.prospects) {
+          const entityPolicy = policyService.evaluateEntity({
+            companyName: prospect.companyName,
+            personName: prospect.contactFullName,
+            domain: prospect.domain,
+            websiteUrl: prospect.domain ? `https://${prospect.domain}` : null,
+          });
+          if (entityPolicy.status === 'BLOCKED') {
+            continue;
+          }
+
           const dedupeKey = `${prospect.companyName.toLowerCase()}|${(prospect.contactFullName || '').toLowerCase()}|${(prospect.domain || '').toLowerCase()}`;
           const entity = await this.prisma.discoveredEntity.upsert({
             where: { campaignId_dedupeKey: { campaignId: campaign.id, dedupeKey } },
@@ -119,7 +139,16 @@ export class LeadImportWorkerService implements JobWorker {
               inferredRole: prospect.title ?? null,
               domain: prospect.domain ?? null,
               geography: [prospect.city, prospect.region, prospect.countryCode].filter(Boolean).join(', ') || null,
-              sourceEvidenceJson: toPrismaJson({ provider: prospect.provider, sourcePayload: prospect.sourcePayload }),
+              sourceEvidenceJson: toPrismaJson({
+                provider: prospect.provider,
+                sourcePayload: prospect.sourcePayload,
+                policy: {
+                  sourceStatus: 'RESTRICTED',
+                  sourceReason: 'provider_fallback_only',
+                  entityStatus: entityPolicy.status,
+                  entityReason: entityPolicy.reason,
+                },
+              }),
               entityConfidence: prospect.priority ?? 75,
               status: 'DISCOVERED',
             },
@@ -134,7 +163,16 @@ export class LeadImportWorkerService implements JobWorker {
               websiteUrl: prospect.domain ? `https://${prospect.domain}` : null,
               domain: prospect.domain ?? null,
               geography: [prospect.city, prospect.region, prospect.countryCode].filter(Boolean).join(', ') || null,
-              sourceEvidenceJson: toPrismaJson({ provider: prospect.provider, sourcePayload: prospect.sourcePayload }),
+              sourceEvidenceJson: toPrismaJson({
+                provider: prospect.provider,
+                sourcePayload: prospect.sourcePayload,
+                policy: {
+                  sourceStatus: 'RESTRICTED',
+                  sourceReason: 'provider_fallback_only',
+                  entityStatus: entityPolicy.status,
+                  entityReason: entityPolicy.reason,
+                },
+              }),
               entityConfidence: prospect.priority ?? 75,
               dedupeKey,
               status: 'DISCOVERED',
@@ -147,18 +185,35 @@ export class LeadImportWorkerService implements JobWorker {
 
     const acceptedLeadIds: string[] = [];
     for (const entity of discoveredEntities.slice(0, maxLeadCount)) {
-      const reachability = await this.reachabilityBuilderService.buildForEntity({ entityId: entity.id, organizationId: campaign.organizationId });
-      const evaluation = await this.qualificationService.evaluateEntity({ entityId: entity.id, organizationId: campaign.organizationId });
+      const entityPolicy = policyService.evaluateEntity({
+        companyName: entity.companyName,
+        personName: entity.personName,
+        domain: entity.domain,
+        websiteUrl: entity.websiteUrl,
+      });
+      if (entityPolicy.status === 'BLOCKED') {
+        continue;
+      }
+
+      const reachability = await this.reachabilityBuilderService.buildForEntity({
+        entityId: entity.id,
+        organizationId: campaign.organizationId,
+      });
+      const evaluation = await this.qualificationService.evaluateEntity({
+        entityId: entity.id,
+        organizationId: campaign.organizationId,
+      });
       if (evaluation.qualification.decision !== 'ACCEPT') {
         continue;
       }
 
-      if (reachability.policy === 'BLOCKED') {
-        continue;
-      }
-
       const email = reachability.record.emailCandidate;
-      if (!email) {
+      const executionPolicy = policyService.evaluateExecution({
+        email,
+        companyName: entity.companyName,
+        domain: reachability.record.domain ?? entity.domain,
+      });
+      if (!email || executionPolicy.status === 'BLOCKED') {
         continue;
       }
 
@@ -171,7 +226,11 @@ export class LeadImportWorkerService implements JobWorker {
           websiteUrl: entity.websiteUrl ?? null,
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({ entityId: entity.id, opportunityProfileId: entity.opportunityProfileId }),
+          enrichmentJson: toPrismaJson({
+            entityId: entity.id,
+            opportunityProfileId: entity.opportunityProfileId,
+            executionPolicy,
+          }),
         },
         create: {
           id: entity.id,
@@ -183,7 +242,11 @@ export class LeadImportWorkerService implements JobWorker {
           websiteUrl: entity.websiteUrl ?? null,
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({ entityId: entity.id, opportunityProfileId: entity.opportunityProfileId }),
+          enrichmentJson: toPrismaJson({
+            entityId: entity.id,
+            opportunityProfileId: entity.opportunityProfileId,
+            executionPolicy,
+          }),
         },
       });
 
@@ -198,7 +261,10 @@ export class LeadImportWorkerService implements JobWorker {
           city: this.firstToken(entity.geography),
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({ reachabilityRecordId: reachability.record.id }),
+          enrichmentJson: toPrismaJson({
+            reachabilityRecordId: reachability.record.id,
+            executionPolicy,
+          }),
         },
         create: {
           id: entity.id,
@@ -212,7 +278,10 @@ export class LeadImportWorkerService implements JobWorker {
           city: this.firstToken(entity.geography),
           qualificationStatus: QualificationStatus.ACCEPTED,
           score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({ reachabilityRecordId: reachability.record.id }),
+          enrichmentJson: toPrismaJson({
+            reachabilityRecordId: reachability.record.id,
+            executionPolicy,
+          }),
         },
       });
 
@@ -233,6 +302,7 @@ export class LeadImportWorkerService implements JobWorker {
             reachabilityRecordId: reachability.record.id,
             qualificationDecisionId: evaluation.qualification.id,
             signalCount: signals.items.length,
+            executionPolicy,
           }),
         },
         create: {
@@ -253,6 +323,7 @@ export class LeadImportWorkerService implements JobWorker {
             reachabilityRecordId: reachability.record.id,
             qualificationDecisionId: evaluation.qualification.id,
             signalCount: signals.items.length,
+            executionPolicy,
           }),
         },
       });
@@ -266,7 +337,9 @@ export class LeadImportWorkerService implements JobWorker {
       const existing = await this.prisma.job.findFirst({
         where: {
           dedupeKey,
-          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED] },
+          status: {
+            in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED, JobStatus.SUCCEEDED],
+          },
         },
         select: { id: true },
       });
@@ -299,7 +372,11 @@ export class LeadImportWorkerService implements JobWorker {
       where: { campaignId: campaign.id, status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] } },
     });
     const sendableLeadCount = await this.prisma.lead.count({
-      where: { campaignId: campaign.id, status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] }, contact: { is: { email: { not: null } } } },
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+        contact: { is: { email: { not: null } } },
+      },
     });
 
     await this.prisma.campaign.update({
