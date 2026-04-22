@@ -47,6 +47,7 @@ export class InternalDiscoveryOrchestrator {
       },
     });
     sourceRuns.push({ id: searchRun.id, sourceType: 'SEARCH' });
+
     const searchCandidates = await this.searchProvider.discover({
       campaignName: input.campaignName,
       objective: input.objective,
@@ -55,9 +56,14 @@ export class InternalDiscoveryOrchestrator {
       geography: input.geography,
       limit: input.limit,
     });
+
     await this.prisma.sourceRun.update({
       where: { id: searchRun.id },
-      data: { status: 'SUCCEEDED', finishedAt: new Date(), resultCount: searchCandidates.length },
+      data: {
+        status: 'SUCCEEDED',
+        finishedAt: new Date(),
+        resultCount: searchCandidates.length,
+      },
     });
 
     const directoryRun = await this.prisma.sourceRun.create({
@@ -72,15 +78,21 @@ export class InternalDiscoveryOrchestrator {
       },
     });
     sourceRuns.push({ id: directoryRun.id, sourceType: 'DIRECTORY' });
+
     const directoryCandidates = await this.directoryProvider.discover({
       clientName: input.clientName,
       industry: input.industry,
       geography: input.geography,
       limit: Math.min(input.limit, 10),
     });
+
     await this.prisma.sourceRun.update({
       where: { id: directoryRun.id },
-      data: { status: 'SUCCEEDED', finishedAt: new Date(), resultCount: directoryCandidates.length },
+      data: {
+        status: 'SUCCEEDED',
+        finishedAt: new Date(),
+        resultCount: directoryCandidates.length,
+      },
     });
 
     const websiteCandidates = await this.websiteProvider.discover({
@@ -102,6 +114,7 @@ export class InternalDiscoveryOrchestrator {
         domain: candidate.domain,
         websiteUrl: candidate.websiteUrl,
       });
+
       if (sourcePolicy.status === 'BLOCKED') {
         continue;
       }
@@ -112,12 +125,18 @@ export class InternalDiscoveryOrchestrator {
         domain: candidate.domain,
         websiteUrl: candidate.websiteUrl,
       });
+
       if (entityPolicy.status === 'BLOCKED') {
         continue;
       }
 
-      const matchingRun = sourceRuns.find((item) => item.sourceType === candidate.sourceType) ?? sourceRuns[0];
-      const dedupeKey = `${candidate.companyName.toLowerCase()}|${(candidate.personName || '').toLowerCase()}|${(candidate.domain || '').toLowerCase()}`;
+      const matchingRun =
+        sourceRuns.find((item) => item.sourceType === candidate.sourceType) ?? sourceRuns[0];
+
+      const dedupeKey = `${candidate.companyName.toLowerCase()}|${(
+        candidate.personName || ''
+      ).toLowerCase()}|${(candidate.domain || '').toLowerCase()}`;
+
       const evidence = {
         ...(candidate.evidence && typeof candidate.evidence === 'object' ? candidate.evidence : {}),
         policy: {
@@ -129,7 +148,12 @@ export class InternalDiscoveryOrchestrator {
       };
 
       const entity = await this.prisma.discoveredEntity.upsert({
-        where: { campaignId_dedupeKey: { campaignId: input.campaignId, dedupeKey } },
+        where: {
+          campaignId_dedupeKey: {
+            campaignId: input.campaignId,
+            dedupeKey,
+          },
+        },
         update: {
           sourceRunId: matchingRun?.id ?? null,
           opportunityProfileId: input.opportunityProfileId,
@@ -161,6 +185,7 @@ export class InternalDiscoveryOrchestrator {
           status: 'DISCOVERED',
         },
       });
+
       created.push(entity);
     }
 
@@ -169,12 +194,17 @@ export class InternalDiscoveryOrchestrator {
 
   private uniqueCandidates(items: DiscoveryCandidate[]) {
     const map = new Map<string, DiscoveryCandidate>();
+
     for (const item of items) {
-      const key = `${item.companyName.toLowerCase()}|${(item.personName || '').toLowerCase()}|${(item.domain || '').toLowerCase()}`;
+      const key = `${item.companyName.toLowerCase()}|${(item.personName || '').toLowerCase()}|${(
+        item.domain || ''
+      ).toLowerCase()}`;
+
       if (!map.has(key) || (map.get(key)?.confidence ?? 0) < item.confidence) {
         map.set(key, item);
       }
     }
+
     return Array.from(map.values());
   }
 }
