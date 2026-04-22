@@ -88,12 +88,27 @@ export class MessageGenerationWorkerService implements JobWorker {
       metadata,
     });
 
-    this.assertMessageContext({
+    const blockReasons = this.collectBlockReasons({
       lead,
       intelligence,
       templateSubject,
       templateBody,
     });
+
+    if (blockReasons.length > 0) {
+      await this.persistBlockingReasons({
+        leadId: lead.id,
+        existingMetadata: metadata,
+        blockReasons,
+        sequenceId: sequence?.id ?? null,
+        sequenceStepId: step?.id ?? null,
+        stepOrderIndex: step?.orderIndex ?? desiredStep,
+      });
+
+      throw new BadRequestException(
+        `Lead ${lead.id} is blocked for message generation: ${blockReasons.join(', ')}`,
+      );
+    }
 
     const writerBrief = this.buildWriterBrief({
       lead: lead as any,
@@ -115,14 +130,24 @@ export class MessageGenerationWorkerService implements JobWorker {
     })) as any;
 
     const subject = templateSubject || this.readString(aiDraft?.draft?.subject);
-
     const body = this.cleanTemplateBody(templateBody) || this.readString(aiDraft?.draft?.body);
 
     if (!subject || !body) {
+      await this.persistBlockingReasons({
+        leadId: lead.id,
+        existingMetadata: metadata,
+        blockReasons: ['GENERATION_FAILED'],
+        sequenceId: sequence?.id ?? null,
+        sequenceStepId: step?.id ?? null,
+        stepOrderIndex: step?.orderIndex ?? desiredStep,
+      });
+
       throw new BadRequestException(
         `No message draft could be generated for lead ${lead.id} with real business context`,
       );
     }
+
+    const cleanedMetadata = this.stripBlockingReasons(metadata);
 
     return {
       leadId: lead.id,
@@ -132,6 +157,7 @@ export class MessageGenerationWorkerService implements JobWorker {
       subject,
       body,
       metadata: {
+        ...cleanedMetadata,
         usedSequenceTemplate: Boolean(templateSubject || templateBody),
         usedAiDraft: Boolean(aiDraft?.draft),
         currentStep,
@@ -218,12 +244,14 @@ export class MessageGenerationWorkerService implements JobWorker {
     };
   }
 
-  private assertMessageContext(input: {
+  private collectBlockReasons(input: {
     lead: any;
     intelligence: any;
     templateSubject?: string;
     templateBody?: string;
   }) {
+    const reasons: string[] = [];
+
     const hasOpportunity = Boolean(
       input.intelligence.opportunityProfileId &&
         (input.intelligence.targetDescription ||
@@ -239,12 +267,75 @@ export class MessageGenerationWorkerService implements JobWorker {
           input.intelligence.qualificationScore != null),
     );
     const hasTemplate = Boolean(input.templateSubject || input.templateBody);
+    const hasEmail = Boolean(this.readString(input.lead?.contact?.email));
 
+    if (!hasOpportunity) reasons.push('NO_OPPORTUNITY');
+    if (!hasSignal) reasons.push('NO_SIGNAL');
+    if (!hasQualification) reasons.push('NO_QUALIFICATION');
+    if (!hasEmail) reasons.push('NO_EMAIL');
     if (!hasOpportunity && !hasSignal && !hasQualification && !hasTemplate) {
-      throw new BadRequestException(
-        `Lead ${input.lead.id} is missing opportunity, signal, and qualification context for first outreach`,
-      );
+      reasons.push('NO_REAL_CONTEXT');
     }
+
+    return Array.from(new Set(reasons));
+  }
+
+  private async persistBlockingReasons(input: {
+    leadId: string;
+    existingMetadata: Record<string, any>;
+    blockReasons: string[];
+    sequenceId: string | null;
+    sequenceStepId: string | null;
+    stepOrderIndex: number;
+  }) {
+    const metadata = this.stripBlockingReasons(input.existingMetadata);
+    const nextMetadata: Prisma.JsonObject = {
+      ...metadata,
+      messageGeneration: {
+        blocked: true,
+        reasons: input.blockReasons,
+        sequenceId: input.sequenceId,
+        sequenceStepId: input.sequenceStepId,
+        stepOrderIndex: input.stepOrderIndex,
+        blockedAt: new Date().toISOString(),
+      },
+      blockReasons: input.blockReasons,
+    };
+
+    await this.prisma.lead.update({
+      where: { id: input.leadId },
+      data: {
+        metadataJson: nextMetadata,
+      },
+    });
+  }
+
+  private stripBlockingReasons(metadata: Record<string, any>) {
+    const next = { ...metadata };
+    delete next.blockReasons;
+    delete next.messageGeneration;
+    return next;
+  }
+
+  private buildQualificationReasoning(reasonJson: Record<string, any>) {
+    const direct =
+      this.readString(reasonJson.summary) ||
+      this.readString(reasonJson.reason) ||
+      this.readString(reasonJson.primaryReason) ||
+      this.readString(reasonJson.notes);
+
+    if (direct) {
+      return direct;
+    }
+
+    const parts = [
+      this.readString(reasonJson.relevance),
+      this.readString(reasonJson.timing),
+      this.readString(reasonJson.reachability),
+      this.readString(reasonJson.value),
+    ].filter(Boolean);
+
+    return parts.length ? parts.join(' | ') : undefined;
   }
 
   private buildWriterBrief(input: {
@@ -379,23 +470,6 @@ export class MessageGenerationWorkerService implements JobWorker {
       return undefined;
     }
     return body.replace(/\r\n/g, '\n').trim();
-  }
-
-  private buildQualificationReasoning(reasonJson: Record<string, any>) {
-    return [
-      reasonJson.hasDirectPerson === true ? 'direct person identified' : null,
-      reasonJson.hasEmailCandidate === true ? 'email candidate available' : null,
-      this.readString(reasonJson.inferredRole) ? `role: ${this.readString(reasonJson.inferredRole)}` : null,
-      this.readString(reasonJson.sourcePolicyStatus)
-        ? `source policy: ${this.readString(reasonJson.sourcePolicyStatus)}`
-        : null,
-      this.readString(reasonJson.contactPolicyStatus)
-        ? `contact policy: ${this.readString(reasonJson.contactPolicyStatus)}`
-        : null,
-      reasonJson.policyPenalty != null ? `policy penalty: ${String(reasonJson.policyPenalty)}` : null,
-    ]
-      .filter(Boolean)
-      .join(', ');
   }
 
   private asObject(value: unknown): Record<string, any> {
