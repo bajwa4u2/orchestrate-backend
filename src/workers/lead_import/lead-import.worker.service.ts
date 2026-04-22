@@ -1,34 +1,42 @@
-
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   ContactEmailStatus,
+  DiscoveredEntity,
   Job,
   JobStatus,
   JobType,
   LeadQualificationState,
-  LeadSourceType,
   LeadStatus,
   QualificationStatus,
-  Prisma,
   RecordSource,
 } from '@prisma/client';
-import { AiService } from '../../ai/ai.service';
 import { toPrismaJson } from '../../common/utils/prisma-json';
 import { PrismaService } from '../../database/prisma.service';
+import { AdaptationService } from '../../adaptation/adaptation.service';
 import { LeadSourcesService } from '../../lead-sources/lead-sources.service';
-import { ExternalLeadCandidate, LeadTargetingContext } from '../../lead-sources/lead-sources.types';
+import { ProviderFallbackService } from '../../providers/provider-fallback.service';
+import { QualificationService } from '../../qualification/qualification.service';
+import { ReachabilityBuilderService } from '../../reachability/reachability-builder.service';
+import { SignalDetectionService } from '../../signals/signal-detection.service';
+import { SourcePlannerService } from '../../sources/source-planner.service';
+import { StrategyService } from '../../strategy/strategy.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
 @Injectable()
 export class LeadImportWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.LEAD_IMPORT];
-
   private readonly logger = new Logger(LeadImportWorkerService.name);
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly aiService: AiService,
+    private readonly strategyService: StrategyService,
+    private readonly signalDetectionService: SignalDetectionService,
+    private readonly sourcePlannerService: SourcePlannerService,
+    private readonly reachabilityBuilderService: ReachabilityBuilderService,
+    private readonly qualificationService: QualificationService,
+    private readonly adaptationService: AdaptationService,
     private readonly leadSourcesService: LeadSourcesService,
+    private readonly providerFallbackService: ProviderFallbackService,
   ) {}
 
   async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
@@ -41,162 +49,261 @@ export class LeadImportWorkerService implements JobWorker {
       where: { id: campaignId },
       include: { client: true },
     });
+
     if (!campaign) {
       throw new NotFoundException(`Campaign ${campaignId} not found`);
     }
 
+    const refillMode = this.readString(context.payload.refillMode) === 'continuity_refill';
+    const targetSendableFloor = this.readPositiveInt(context.payload.targetSendableFloor) ?? 10;
+    const maxLeadCount = Math.max(1, Math.min(this.readPositiveInt(context.payload.maxLeadCount) ?? 25, 50));
     const campaignMetadata = this.asObject(campaign.metadataJson);
     const activation = this.asObject(campaignMetadata.activation);
     const continuity = this.asObject(campaignMetadata.continuity);
-    const activationBootstrapStatus = this.readString(activation.bootstrapStatus);
-    const activationJobId = this.readString(activation.jobId) ?? this.readString(activation.currentJobId);
-    const refillMode = this.readString(context.payload.refillMode) === 'continuity_refill';
-    const targetSendableFloor = this.readPositiveInt(context.payload.targetSendableFloor) ?? 10;
-    const maxLeadCount = Math.max(1, Math.min(this.readPositiveInt(context.payload.maxLeadCount) ?? 25, 25));
 
-    if (!refillMode && activationJobId && activationJobId !== job.id) {
-      this.logger.log(
-        `Skipping lead import for campaign ${campaign.id}; activation is owned by job ${activationJobId}.`,
-      );
-      return {
-        ok: true,
-        campaignId: campaign.id,
-        createdLeadCount: 0,
-        visibleLeadCount: 0,
-        sendableLeadCount: 0,
-        queuedFirstSendCount: 0,
-        queuedJobIds: [],
-        waitingForLeadSource: false,
-      };
-    }
+    await this.markCampaignInProgress(
+      campaign.id,
+      campaignMetadata,
+      activation,
+      continuity,
+      refillMode,
+      job.id,
+      targetSendableFloor,
+      maxLeadCount,
+    );
 
-    if (
-      !refillMode &&
-      activationBootstrapStatus &&
-      ['activation_completed', 'launch_queued', 'leads_ready_non_sendable', 'blocked_no_sendable_leads'].includes(
-        activationBootstrapStatus,
-      )
-    ) {
-      this.logger.log(
-        `Skipping lead import for campaign ${campaign.id}; bootstrap already settled at ${activationBootstrapStatus}.`,
-      );
-      return {
-        ok: true,
-        campaignId: campaign.id,
-        createdLeadCount: 0,
-        visibleLeadCount: 0,
-        sendableLeadCount: 0,
-        queuedFirstSendCount: 0,
-        queuedJobIds: [],
-        waitingForLeadSource: activationBootstrapStatus === 'blocked_no_sendable_leads',
-      };
-    }
-
-    await this.prisma.campaign.update({
-      where: { id: campaign.id },
-      data: {
-        metadataJson: toPrismaJson({
-          ...campaignMetadata,
-          ...(refillMode
-            ? {
-                continuity: {
-                  ...continuity,
-                  status: 'refill_in_progress',
-                  jobId: job.id,
-                  currentJobId: job.id,
-                  targetSendableFloor,
-                  maxLeadCount,
-                  startedAt: new Date().toISOString(),
-                  lastError: null,
-                  retryAt: null,
-                  failedAt: null,
-                },
-              }
-            : {
-                activation: {
-                  ...activation,
-                  jobId: job.id,
-                  currentJobId: job.id,
-                  bootstrapStatus: 'activation_in_progress',
-                  startedAt: new Date().toISOString(),
-                  lastError: null,
-                  retryAt: null,
-                  failedAt: null,
-                  bootstrapSkippedReason: null,
-                },
-              }),
-        }),
-      },
+    const strategyResult = await this.strategyService.generateForCampaign({
+      campaignId: campaign.id,
+      organizationId: campaign.organizationId,
     });
 
-    const existingVisibleLeads = await this.prisma.lead.findMany({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-      },
-      select: { id: true },
-      take: maxLeadCount,
-      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+    const signals = await this.signalDetectionService.detectForCampaign({
+      campaignId: campaign.id,
+      organizationId: campaign.organizationId,
     });
 
-    const existingSendableLeadCount = await this.prisma.lead.count({
-      where: {
-        campaignId: campaign.id,
-        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-        contact: { email: { not: null } },
-      },
+    const discovery = await this.sourcePlannerService.discoverForCampaign({
+      campaignId: campaign.id,
+      organizationId: campaign.organizationId,
     });
 
-    let createdLeadIds: string[] = [];
-    const shouldBootstrap = refillMode
-      ? existingSendableLeadCount < targetSendableFloor
-      : !existingVisibleLeads.length;
+    let externalProspectsImported = 0;
+    let discoveredEntities: DiscoveredEntity[] = [...discovery.entities];
 
-    if (shouldBootstrap) {
-      createdLeadIds = await this.bootstrapLeadsFromClientAssets({
+    if (!discoveredEntities.length) {
+      const fallbackDecision = await this.providerFallbackService.canUseApollo({
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
         campaignId: campaign.id,
-        workflowRunId: context.workflowRunId,
-        campaignMetadataJson: campaign.metadataJson,
-        clientMetadataJson: campaign.client.metadataJson,
-        clientScopeJson: campaign.client.scopeJson,
-        clientIndustry: campaign.client.industry,
-        maxLeadCount,
+        reason: 'internal_paths_insufficient',
+        budgetUnitsRequested: maxLeadCount,
+        internalResultCount: 0,
       });
+
+      if (fallbackDecision.allowed) {
+        const apollo = await this.leadSourcesService.searchApollo({
+          organizationId: campaign.organizationId,
+          clientId: campaign.clientId,
+          campaignId: campaign.id,
+          workflowRunId: context.workflowRunId,
+          targeting: {
+            campaignName: campaign.name,
+            objective: campaign.objective ?? undefined,
+            offerSummary: campaign.offerSummary ?? undefined,
+            industry: campaign.client.industry ?? undefined,
+            industries: campaign.client.industry ? [campaign.client.industry] : [],
+            geoTargets: this.extractGeoTargets(campaign.client.scopeJson, campaign.metadataJson),
+            titleKeywords: ['owner', 'founder', 'director', 'manager'],
+            exclusionKeywords: [],
+            employeeRanges: [],
+            seniorities: ['owner', 'director'],
+            maxResults: maxLeadCount,
+          },
+        });
+
+        externalProspectsImported = apollo.importedCount;
+
+        for (const prospect of apollo.prospects) {
+          const dedupeKey = `${prospect.companyName.toLowerCase()}|${(
+            prospect.contactFullName || ''
+          ).toLowerCase()}|${(prospect.domain || '').toLowerCase()}`;
+
+          const entity = await this.prisma.discoveredEntity.upsert({
+            where: { campaignId_dedupeKey: { campaignId: campaign.id, dedupeKey } },
+            update: {
+              companyName: prospect.companyName,
+              personName: prospect.contactFullName,
+              inferredRole: prospect.title ?? null,
+              domain: prospect.domain ?? null,
+              geography: [prospect.city, prospect.region, prospect.countryCode].filter(Boolean).join(', ') || null,
+              sourceEvidenceJson: toPrismaJson({
+                provider: prospect.provider,
+                sourcePayload: prospect.sourcePayload,
+              }),
+              entityConfidence: prospect.priority ?? 75,
+              status: 'DISCOVERED',
+            },
+            create: {
+              organizationId: campaign.organizationId,
+              clientId: campaign.clientId,
+              campaignId: campaign.id,
+              opportunityProfileId: strategyResult.opportunityProfile.id,
+              companyName: prospect.companyName,
+              personName: prospect.contactFullName,
+              inferredRole: prospect.title ?? null,
+              websiteUrl: prospect.domain ? `https://${prospect.domain}` : null,
+              domain: prospect.domain ?? null,
+              geography: [prospect.city, prospect.region, prospect.countryCode].filter(Boolean).join(', ') || null,
+              sourceEvidenceJson: toPrismaJson({
+                provider: prospect.provider,
+                sourcePayload: prospect.sourcePayload,
+              }),
+              entityConfidence: prospect.priority ?? 75,
+              dedupeKey,
+              status: 'DISCOVERED',
+            },
+          });
+
+          discoveredEntities.push(entity);
+        }
+      }
     }
 
-    const [visibleLeadCount, sendableLeadCount, sendableLeadCandidates] = await Promise.all([
-      this.prisma.lead.count({
-        where: {
-          campaignId: campaign.id,
-          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-        },
-      }),
-      this.prisma.lead.count({
-        where: {
-          campaignId: campaign.id,
-          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-          contact: { email: { not: null } },
-        },
-      }),
-      this.prisma.lead.findMany({
-        where: {
-          campaignId: campaign.id,
-          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-          contact: { email: { not: null } },
-        },
-        select: { id: true },
-        take: maxLeadCount,
-        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-      }),
-    ]);
+    const acceptedLeadIds: string[] = [];
 
-    const candidateLeadIds = sendableLeadCandidates.map((item) => item.id).slice(0, maxLeadCount);
+    for (const entity of discoveredEntities.slice(0, maxLeadCount)) {
+      const reachability = await this.reachabilityBuilderService.buildForEntity({
+        entityId: entity.id,
+        organizationId: campaign.organizationId,
+      });
 
-    const queuedMessageGenerationJobIds: string[] = [];
-    for (const leadId of candidateLeadIds) {
+      const evaluation = await this.qualificationService.evaluateEntity({
+        entityId: entity.id,
+        organizationId: campaign.organizationId,
+      });
+
+      if (evaluation.qualification.decision !== 'ACCEPT') {
+        continue;
+      }
+
+      const email = reachability.record.emailCandidate;
+      if (!email) {
+        continue;
+      }
+
+      const account = await this.prisma.account.upsert({
+        where: { id: entity.id },
+        update: {
+          companyName: entity.companyName,
+          domain: entity.domain ?? reachability.record.domain ?? null,
+          city: this.firstToken(entity.geography),
+          websiteUrl: entity.websiteUrl ?? null,
+          qualificationStatus: QualificationStatus.ACCEPTED,
+          score: evaluation.qualification.finalScore,
+          enrichmentJson: toPrismaJson({
+            entityId: entity.id,
+            opportunityProfileId: entity.opportunityProfileId,
+          }),
+        },
+        create: {
+          id: entity.id,
+          organizationId: campaign.organizationId,
+          clientId: campaign.clientId,
+          companyName: entity.companyName,
+          domain: entity.domain ?? reachability.record.domain ?? null,
+          city: this.firstToken(entity.geography),
+          websiteUrl: entity.websiteUrl ?? null,
+          qualificationStatus: QualificationStatus.ACCEPTED,
+          score: evaluation.qualification.finalScore,
+          enrichmentJson: toPrismaJson({
+            entityId: entity.id,
+            opportunityProfileId: entity.opportunityProfileId,
+          }),
+        },
+      });
+
+      const contact = await this.prisma.contact.upsert({
+        where: { id: entity.id },
+        update: {
+          accountId: account.id,
+          fullName: entity.personName ?? entity.companyName,
+          title: entity.inferredRole ?? null,
+          email,
+          emailStatus: ContactEmailStatus.UNVERIFIED,
+          city: this.firstToken(entity.geography),
+          qualificationStatus: QualificationStatus.ACCEPTED,
+          score: evaluation.qualification.finalScore,
+          enrichmentJson: toPrismaJson({
+            reachabilityRecordId: reachability.record.id,
+          }),
+        },
+        create: {
+          id: entity.id,
+          organizationId: campaign.organizationId,
+          clientId: campaign.clientId,
+          accountId: account.id,
+          fullName: entity.personName ?? entity.companyName,
+          title: entity.inferredRole ?? null,
+          email,
+          emailStatus: ContactEmailStatus.UNVERIFIED,
+          city: this.firstToken(entity.geography),
+          qualificationStatus: QualificationStatus.ACCEPTED,
+          score: evaluation.qualification.finalScore,
+          enrichmentJson: toPrismaJson({
+            reachabilityRecordId: reachability.record.id,
+          }),
+        },
+      });
+
+      const lead = await this.prisma.lead.upsert({
+        where: { campaignId_contactId: { campaignId: campaign.id, contactId: contact.id } },
+        update: {
+          accountId: account.id,
+          contactId: contact.id,
+          workflowRunId: context.workflowRunId ?? null,
+          status: LeadStatus.QUALIFIED,
+          source: RecordSource.SYSTEM_GENERATED,
+          qualificationState: LeadQualificationState.QUALIFIED,
+          score: evaluation.qualification.finalScore,
+          priority: Math.round(Number(evaluation.qualification.finalScore ?? 70)),
+          metadataJson: toPrismaJson({
+            opportunityProfileId: strategyResult.opportunityProfile.id,
+            discoveredEntityId: entity.id,
+            reachabilityRecordId: reachability.record.id,
+            qualificationDecisionId: evaluation.qualification.id,
+            signalCount: signals.items.length,
+          }),
+        },
+        create: {
+          organizationId: campaign.organizationId,
+          clientId: campaign.clientId,
+          campaignId: campaign.id,
+          accountId: account.id,
+          contactId: contact.id,
+          workflowRunId: context.workflowRunId ?? null,
+          status: LeadStatus.QUALIFIED,
+          source: RecordSource.SYSTEM_GENERATED,
+          qualificationState: LeadQualificationState.QUALIFIED,
+          score: evaluation.qualification.finalScore,
+          priority: Math.round(Number(evaluation.qualification.finalScore ?? 70)),
+          metadataJson: toPrismaJson({
+            opportunityProfileId: strategyResult.opportunityProfile.id,
+            discoveredEntityId: entity.id,
+            reachabilityRecordId: reachability.record.id,
+            qualificationDecisionId: evaluation.qualification.id,
+            signalCount: signals.items.length,
+          }),
+        },
+      });
+
+      acceptedLeadIds.push(lead.id);
+    }
+
+    const queuedJobIds: string[] = [];
+
+    for (const leadId of acceptedLeadIds.slice(0, maxLeadCount)) {
       const dedupeKey = `first_send:${leadId}`;
+
       const existing = await this.prisma.job.findFirst({
         where: {
           dedupeKey,
@@ -206,9 +313,10 @@ export class LeadImportWorkerService implements JobWorker {
         },
         select: { id: true },
       });
+
       if (existing) continue;
 
-      const firstSendJob = await this.prisma.job.create({
+      const sendJob = await this.prisma.job.create({
         data: {
           organizationId: campaign.organizationId,
           clientId: campaign.clientId,
@@ -222,21 +330,33 @@ export class LeadImportWorkerService implements JobWorker {
           payloadJson: toPrismaJson({
             leadId,
             workflowRunId: context.workflowRunId,
-            note: 'automatic launch from lead import worker',
+            note: 'automatic launch from opportunity discovery pipeline',
           }),
         },
       });
-      queuedMessageGenerationJobIds.push(firstSendJob.id);
+
+      queuedJobIds.push(sendJob.id);
     }
 
-    const queuedFirstSendCount = queuedMessageGenerationJobIds.length;
+    await this.adaptationService.runForCampaign({
+      campaignId: campaign.id,
+      organizationId: campaign.organizationId,
+    });
 
-    const completedAt = sendableLeadCount ? new Date().toISOString() : null;
-    const blockedReason = sendableLeadCount
-      ? null
-      : visibleLeadCount
-        ? 'Leads were discovered, but no contact email was available yet.'
-        : 'No visible leads were available from contacts, seed prospects, Apollo search, or AI bootstrap.';
+    const visibleLeadCount = await this.prisma.lead.count({
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+      },
+    });
+
+    const sendableLeadCount = await this.prisma.lead.count({
+      where: {
+        campaignId: campaign.id,
+        status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
+        contact: { is: { email: { not: null } } },
+      },
+    });
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
@@ -249,47 +369,27 @@ export class LeadImportWorkerService implements JobWorker {
           : 'TARGETING_READY',
         metadataJson: toPrismaJson({
           ...campaignMetadata,
-          ...(refillMode
-            ? {
-                continuity: {
-                  ...continuity,
-                  jobId: job.id,
-                  currentJobId: job.id,
-                  lastRefillAt: new Date().toISOString(),
-                  status: sendableLeadCount
-                    ? 'refill_queued'
-                    : visibleLeadCount
-                      ? 'refill_non_sendable'
-                      : 'refill_blocked',
-                  createdLeadCount: createdLeadIds.length,
-                  visibleLeadCount,
-                  sendableLeadCount,
-                  queuedFirstSendCount,
-                  completedAt,
-                  blockedReason,
-                  targetSendableFloor,
-                  maxLeadCount,
-                },
-              }
-            : {
-                activation: {
-                  ...activation,
-                  jobId: job.id,
-                  currentJobId: job.id,
-                  lastBootstrapAt: new Date().toISOString(),
-                  bootstrapStatus: sendableLeadCount
-                    ? 'launch_queued'
-                    : visibleLeadCount
-                      ? 'leads_ready_non_sendable'
-                      : 'blocked_no_sendable_leads',
-                  createdLeadCount: createdLeadIds.length,
-                  visibleLeadCount,
-                  sendableLeadCount,
-                  queuedFirstSendCount,
-                  completedAt,
-                  blockedReason,
-                },
-              }),
+          activation: {
+            ...activation,
+            jobId: job.id,
+            currentJobId: job.id,
+            bootstrapStatus: sendableLeadCount ? 'activation_completed' : 'blocked_no_sendable_leads',
+            completedAt: sendableLeadCount ? new Date().toISOString() : null,
+            lastError: null,
+            pipeline: {
+              opportunityProfileId: strategyResult.opportunityProfile.id,
+              sourcePlanId: strategyResult.sourcePlan.id,
+              signalCount: signals.items.length,
+              internalEntityCount: discovery.entities.length,
+              providerImportedCount: externalProspectsImported,
+            },
+          },
+          continuity: {
+            ...continuity,
+            status: sendableLeadCount >= targetSendableFloor ? 'inventory_ready' : 'inventory_low',
+            targetSendableFloor,
+            activeLeadImportJobId: null,
+          },
         }),
       },
     });
@@ -297,650 +397,100 @@ export class LeadImportWorkerService implements JobWorker {
     return {
       ok: true,
       campaignId: campaign.id,
-      createdLeadCount: createdLeadIds.length,
+      opportunityProfileId: strategyResult.opportunityProfile.id,
+      signalCount: signals.items.length,
+      discoveredEntityCount: discovery.entities.length,
+      importedFallbackProspectCount: externalProspectsImported,
+      createdLeadCount: acceptedLeadIds.length,
       visibleLeadCount,
       sendableLeadCount,
-      queuedFirstSendCount,
-      queuedJobIds: queuedMessageGenerationJobIds,
-      waitingForLeadSource: visibleLeadCount === 0,
+      queuedFirstSendCount: queuedJobIds.length,
+      queuedJobIds,
+      waitingForLeadSource: !sendableLeadCount,
     };
   }
 
-  private async bootstrapLeadsFromClientAssets(input: {
-    organizationId: string;
-    clientId: string;
-    campaignId: string;
-    workflowRunId?: string;
-    campaignMetadataJson?: Prisma.JsonValue | null;
-    clientMetadataJson?: Prisma.JsonValue | null;
-    clientScopeJson?: Prisma.JsonValue | null;
-    clientIndustry?: string | null;
-    maxLeadCount?: number;
-  }) {
-    const contacts = await this.prisma.contact.findMany({
-      where: {
-        organizationId: input.organizationId,
-        clientId: input.clientId,
-        email: { not: null },
-      },
-      include: {
-        account: true,
-        leads: {
-          where: { campaignId: input.campaignId },
-          select: { id: true },
-        },
-      },
-      orderBy: [{ createdAt: 'asc' }],
-      take: input.maxLeadCount ?? 25,
-    });
-
-    const createdLeadIds: string[] = [];
-
-    for (const contact of contacts) {
-      if (contact.leads.length) continue;
-      const lead = await this.prisma.lead.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          campaignId: input.campaignId,
-          accountId: contact.accountId ?? undefined,
-          contactId: contact.id,
-          workflowRunId: input.workflowRunId,
-          status: LeadStatus.NEW,
-          source: RecordSource.IMPORTED,
-          qualificationState: LeadQualificationState.DISCOVERED,
-          priority: 50,
-          metadataJson: toPrismaJson({ source: 'existing_contact' }),
-        },
-      });
-      createdLeadIds.push(lead.id);
-    }
-
-    if (createdLeadIds.length) {
-      return createdLeadIds;
-    }
-
-    const client = await this.prisma.client.findUnique({
-      where: { id: input.clientId },
-      select: { metadataJson: true, scopeJson: true, industry: true },
-    });
-    const metadata = this.asObject(client?.metadataJson);
-    const setup = this.asObject(metadata.setup);
-    const scope = this.asObject(client?.scopeJson);
-    const seedProspects = this.readSeedProspects(
-      setup.seedProspects ?? metadata.seedProspects ?? scope.seedProspects,
-    );
-
-    for (const prospect of seedProspects.slice(0, input.maxLeadCount ?? 25)) {
-      const existing = await this.prisma.contact.findFirst({
-        where: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          email: prospect.email,
-        },
-        select: { id: true, accountId: true },
-      });
-
-      let accountId = existing?.accountId ?? null;
-      let contactId = existing?.id ?? null;
-
-      if (!accountId && prospect.companyName) {
-        const account = await this.prisma.account.create({
-          data: {
-            organizationId: input.organizationId,
-            clientId: input.clientId,
-            companyName: prospect.companyName,
-            domain: prospect.domain,
-            industry: prospect.industry ?? client?.industry ?? undefined,
-            city: prospect.city,
-            region: prospect.region,
-            countryCode: prospect.countryCode,
-            websiteUrl: prospect.websiteUrl,
-            linkedinUrl: prospect.linkedinUrl,
-          },
-        });
-        accountId = account.id;
-      }
-
-      if (!contactId) {
-        const contact = await this.prisma.contact.create({
-          data: {
-            organizationId: input.organizationId,
-            clientId: input.clientId,
-            accountId: accountId ?? undefined,
-            fullName: prospect.fullName,
-            firstName: prospect.firstName,
-            lastName: prospect.lastName,
-            title: prospect.title,
-            email: prospect.email,
-            phone: prospect.phone,
-            linkedinUrl: prospect.linkedinUrl,
-            timezone: prospect.timezone,
-            city: prospect.city,
-            region: prospect.region,
-            countryCode: prospect.countryCode,
-          },
-        });
-        contactId = contact.id;
-      }
-
-      const lead = await this.prisma.lead.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          campaignId: input.campaignId,
-          accountId: accountId ?? undefined,
-          contactId: contactId ?? undefined,
-          workflowRunId: input.workflowRunId,
-          status: LeadStatus.NEW,
-          source: RecordSource.IMPORTED,
-          qualificationState: LeadQualificationState.DISCOVERED,
-          priority: prospect.priority ?? 60,
-          score: prospect.score == null ? undefined : new Prisma.Decimal(prospect.score),
-          metadataJson: toPrismaJson({
-            source: 'seed_prospect',
-            origin: prospect.origin ?? 'client_metadata',
-          }),
-        },
-      });
-      createdLeadIds.push(lead.id);
-    }
-
-    if (createdLeadIds.length) {
-      return createdLeadIds;
-    }
-
-    const apolloLeadIds = await this.importApolloProspects({
-      organizationId: input.organizationId,
-      clientId: input.clientId,
-      campaignId: input.campaignId,
-      workflowRunId: input.workflowRunId,
-      campaignMetadataJson: input.campaignMetadataJson ?? null,
-      clientMetadataJson: input.clientMetadataJson ?? client?.metadataJson ?? null,
-      clientScopeJson: input.clientScopeJson ?? client?.scopeJson ?? null,
-      clientIndustry: input.clientIndustry ?? client?.industry ?? null,
-    });
-
-    if (apolloLeadIds.length) {
-      return apolloLeadIds;
-    }
-
-    try {
-      const aiBootstrap = await this.aiService.bootstrapCampaignActivation({
-        clientId: input.clientId,
-        campaignId: input.campaignId,
-        workflowRunId: input.workflowRunId,
-        workflowTitle: 'Automatic client launch',
-      });
-      return (aiBootstrap.leadIds && aiBootstrap.leadIds.length > 0)
-        ? aiBootstrap.leadIds
-        : (aiBootstrap.sendableLeadIds ?? []);
-    } catch (error) {
-      this.logger.warn(
-        `AI bootstrap failed for campaign ${input.campaignId}; continuing without AI-generated leads: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return [];
-    }
-  }
-
-  private async importApolloProspects(input: {
-    organizationId: string;
-    clientId: string;
-    campaignId: string;
-    workflowRunId?: string;
-    campaignMetadataJson?: Prisma.JsonValue | null;
-    clientMetadataJson?: Prisma.JsonValue | null;
-    clientScopeJson?: Prisma.JsonValue | null;
-    clientIndustry?: string | null;
-    maxLeadCount?: number;
-  }) {
-    const targeting = this.buildApolloTargeting({
-      campaignMetadataJson: input.campaignMetadataJson ?? null,
-      clientMetadataJson: input.clientMetadataJson ?? null,
-      clientScopeJson: input.clientScopeJson ?? null,
-      clientIndustry: input.clientIndustry ?? null,
-    });
-
-    const searchResult = await this.leadSourcesService.searchApollo({
-      organizationId: input.organizationId,
-      clientId: input.clientId,
-      campaignId: input.campaignId,
-      workflowRunId: input.workflowRunId,
-      targeting,
-    });
-
-    const totalProspects = searchResult.prospects.length;
-    if (!totalProspects) {
-      this.logger.log(`Apollo returned no candidates for campaign ${input.campaignId}.`);
-      return [];
-    }
-
-    const sendableProspects = searchResult.prospects.filter((prospect) => Boolean(this.readString(prospect.email)));
-    const skippedMissingEmailCount = totalProspects - sendableProspects.length;
-
-    const leadSource = await this.prisma.leadSource.create({
+  private async markCampaignInProgress(
+    campaignId: string,
+    metadata: Record<string, unknown>,
+    activation: Record<string, unknown>,
+    continuity: Record<string, unknown>,
+    refillMode: boolean,
+    jobId: string,
+    targetSendableFloor: number,
+    maxLeadCount: number,
+  ) {
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
       data: {
-        organizationId: input.organizationId,
-        clientId: input.clientId,
-        campaignId: input.campaignId,
-        workflowRunId: input.workflowRunId,
-        name: 'Apollo lead sourcing',
-        type: LeadSourceType.API,
-        source: RecordSource.EXTERNAL_SYNC,
-        sourceRef: searchResult.providerRef,
-        importedAt: new Date(),
-        configJson: toPrismaJson({
-          provider: searchResult.provider,
-          querySummary: searchResult.querySummary,
-          totalProspects,
-          sendableProspects: sendableProspects.length,
-          skippedMissingEmailCount,
-        }),
-      },
-      select: { id: true },
-    });
-
-    if (!sendableProspects.length) {
-      this.logger.warn(
-        `Apollo found ${totalProspects} candidates for campaign ${input.campaignId}, but none had usable email addresses after enrichment.`,
-      );
-      return [];
-    }
-
-    const createdLeadIds: string[] = [];
-
-    for (const prospect of sendableProspects) {
-      const leadId = await this.upsertApolloProspect({
-        organizationId: input.organizationId,
-        clientId: input.clientId,
-        campaignId: input.campaignId,
-        workflowRunId: input.workflowRunId,
-        leadSourceId: leadSource.id,
-        prospect,
-      });
-
-      if (leadId) {
-        createdLeadIds.push(leadId);
-      }
-    }
-
-    this.logger.log(
-      `Apollo import for campaign ${input.campaignId}: ${totalProspects} candidates, ${sendableProspects.length} sendable, ${createdLeadIds.length} leads created, ${skippedMissingEmailCount} skipped without email.`,
-    );
-
-    return createdLeadIds;
-  }
-
-  private async upsertApolloProspect(input: {
-    organizationId: string;
-    clientId: string;
-    campaignId: string;
-    workflowRunId?: string;
-    leadSourceId: string;
-    prospect: ExternalLeadCandidate;
-  }) {
-    const email = this.readString(input.prospect.email)?.toLowerCase() ?? null;
-
-    let accountId: string | null = null;
-    const normalizedDomain = this.normalizeDomain(input.prospect.domain);
-    const companyName = this.readString(input.prospect.companyName);
-    const fullName =
-      this.readString(input.prospect.contactFullName) ||
-      [this.readString(input.prospect.firstName), this.readString(input.prospect.lastName)]
-        .filter(Boolean)
-        .join(' ') ||
-      'Apollo Contact';
-
-    if (normalizedDomain || companyName) {
-      const existingAccount = await this.prisma.account.findFirst({
-        where: {
-          clientId: input.clientId,
-          OR: [
-            ...(normalizedDomain ? [{ domain: normalizedDomain }] : []),
-            ...(companyName ? [{ companyName }] : []),
-          ],
-        },
-        select: { id: true },
-      });
-      accountId = existingAccount?.id ?? null;
-    }
-
-    if (!accountId && companyName) {
-      const account = await this.prisma.account.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          domain: normalizedDomain ?? undefined,
-          companyName,
-          industry: this.readString(input.prospect.industry) ?? undefined,
-          employeeCount: input.prospect.employeeCount ?? undefined,
-          city: this.readString(input.prospect.city) ?? undefined,
-          region: this.readString(input.prospect.region) ?? undefined,
-          countryCode: this.readString(input.prospect.countryCode) ?? undefined,
-          websiteUrl: normalizedDomain ? `https://${normalizedDomain}` : undefined,
-          linkedinUrl: undefined,
-          enrichmentJson: toPrismaJson({
-            provider: input.prospect.provider,
-            providerOrganizationId: input.prospect.providerOrganizationId,
-            sourcePayload: input.prospect.sourcePayload ?? null,
-          }),
-        },
-        select: { id: true },
-      });
-      accountId = account.id;
-    }
-
-    const contactWhere: Array<Record<string, unknown>> = [];
-    if (email) {
-      contactWhere.push({ email });
-    }
-    if (fullName) {
-      contactWhere.push({
-        fullName,
-        ...(accountId ? { accountId } : {}),
-      });
-    }
-
-    let contactId: string | null = null;
-    if (contactWhere.length) {
-      const existingContact = await this.prisma.contact.findFirst({
-        where: {
-          clientId: input.clientId,
-          OR: contactWhere as Prisma.ContactWhereInput[],
-        },
-        select: { id: true },
-      });
-      contactId = existingContact?.id ?? null;
-    }
-
-    if (!contactId && (fullName || email)) {
-      const contact = await this.prisma.contact.create({
-        data: {
-          organizationId: input.organizationId,
-          clientId: input.clientId,
-          accountId: accountId ?? undefined,
-          firstName: this.readString(input.prospect.firstName) ?? undefined,
-          lastName: this.readString(input.prospect.lastName) ?? undefined,
-          fullName: fullName,
-          title: this.readString(input.prospect.title) ?? undefined,
-          email: email ?? undefined,
-          emailStatus: this.mapEmailStatus(input.prospect.emailStatus),
-          linkedinUrl: this.readString(input.prospect.linkedinUrl) ?? undefined,
-          timezone: this.readString(input.prospect.timezone) ?? undefined,
-          city: this.readString(input.prospect.city) ?? undefined,
-          region: this.readString(input.prospect.region) ?? undefined,
-          countryCode: this.readString(input.prospect.countryCode) ?? undefined,
-          qualificationStatus: QualificationStatus.UNREVIEWED,
-          enrichmentJson: toPrismaJson({
-            provider: input.prospect.provider,
-            providerPersonId: input.prospect.providerPersonId,
-            providerOrganizationId: input.prospect.providerOrganizationId,
-            qualificationNotes: input.prospect.qualificationNotes ?? null,
-            sourcePayload: input.prospect.sourcePayload ?? null,
-          }),
-        },
-        select: { id: true },
-      });
-      contactId = contact.id;
-    }
-
-    const existingLead = await this.prisma.lead.findFirst({
-      where: {
-        campaignId: input.campaignId,
-        contactId: contactId ?? undefined,
-      },
-      select: { id: true },
-    });
-
-    if (existingLead) {
-      return existingLead.id;
-    }
-
-    const lead = await this.prisma.lead.create({
-      data: {
-        organizationId: input.organizationId,
-        clientId: input.clientId,
-        campaignId: input.campaignId,
-        leadSourceId: input.leadSourceId,
-        accountId: accountId ?? undefined,
-        contactId: contactId ?? undefined,
-        workflowRunId: input.workflowRunId,
-        status: LeadStatus.NEW,
-        source: RecordSource.EXTERNAL_SYNC,
-        qualificationState: LeadQualificationState.DISCOVERED,
-        priority: input.prospect.priority ?? 70,
         metadataJson: toPrismaJson({
-          source: 'apollo',
-          provider: input.prospect.provider,
-          providerPersonId: input.prospect.providerPersonId,
-          providerOrganizationId: input.prospect.providerOrganizationId,
-          reasonForFit: input.prospect.reasonForFit,
-          qualificationNotes: input.prospect.qualificationNotes ?? null,
-          hasEmail: Boolean(email),
+          ...metadata,
+          ...(refillMode
+            ? {
+                continuity: {
+                  ...continuity,
+                  status: 'refill_in_progress',
+                  jobId,
+                  currentJobId: jobId,
+                  targetSendableFloor,
+                  maxLeadCount,
+                  startedAt: new Date().toISOString(),
+                  lastError: null,
+                },
+              }
+            : {
+                activation: {
+                  ...activation,
+                  jobId,
+                  currentJobId: jobId,
+                  bootstrapStatus: 'activation_in_progress',
+                  startedAt: new Date().toISOString(),
+                  lastError: null,
+                },
+              }),
         }),
       },
-      select: { id: true },
     });
-
-    return lead.id;
   }
 
-  private buildApolloTargeting(input: {
-    campaignMetadataJson?: Prisma.JsonValue | null;
-    clientMetadataJson?: Prisma.JsonValue | null;
-    clientScopeJson?: Prisma.JsonValue | null;
-    clientIndustry?: string | null;
-  }): LeadTargetingContext {
-    const campaignMetadata = this.asObject(input.campaignMetadataJson);
-    const strategy = this.asObject(campaignMetadata.strategy);
-    const serviceProfile = this.asObject(campaignMetadata.serviceProfile);
-    const clientScope = this.asObject(input.clientScopeJson);
-    const clientMetadata = this.asObject(input.clientMetadataJson);
-    const setup = this.asObject(clientMetadata.setup);
-
-    const industries = this.uniqueNonEmpty([
-      ...this.readStringArray(strategy.industryTags),
-      ...this.readScopeLabels(clientScope.industries),
-      this.readString(serviceProfile.industry),
-      this.readString(setup.industry),
-      this.readString(input.clientIndustry),
-    ]);
-
-    const geoTargets = this.uniqueNonEmpty([
-      ...this.readStringArray(strategy.geoTargets),
-      ...this.readScopeLabels(clientScope.countries),
-      ...this.readScopeLabels(clientScope.regions),
-      ...this.readStringArray(serviceProfile.countries),
-      ...this.readStringArray(serviceProfile.regions),
-    ]);
-
-    const titleKeywords = this.uniqueNonEmpty([
-      ...this.readStringArray(strategy.titleKeywords),
-      ...this.readStringArray(serviceProfile.buyerRoles),
-      ...this.readStringArray(setup.roles),
-    ]);
-
-    const exclusionKeywords = this.uniqueNonEmpty([
-      ...this.readStringArray(strategy.exclusionKeywords),
-      ...this.readStringArray(setup.excludeKeywords),
-    ]);
-
-    const employeeRanges = this.readEmployeeRanges(
-      clientScope.companySizes ?? setup.companySizes ?? serviceProfile.companySizes,
-    );
-    const seniorities = this.deriveSeniorities(titleKeywords);
-
-    return {
-      campaignName: this.readString(strategy.campaignName) ?? this.readString(campaignMetadata.name) ?? undefined,
-      objective: this.readString(strategy.objective) ?? this.readString(campaignMetadata.objective) ?? undefined,
-      offerSummary: this.readString(strategy.offerSummary) ?? this.readString(serviceProfile.offerSummary) ?? undefined,
-      industry: industries[0],
-      industries,
-      geoTargets,
-      titleKeywords: titleKeywords.length ? titleKeywords : ['Founder', 'Owner', 'Director'],
-      exclusionKeywords,
-      employeeRanges: employeeRanges.length ? employeeRanges : ['1,10', '11,50', '51,200'],
-      seniorities: seniorities.length ? seniorities : ['owner', 'founder', 'director', 'head'],
-      maxResults: 10,
-    };
-  }
-
-  private mapEmailStatus(value?: string) {
-    const normalized = (value ?? '').trim().toLowerCase();
-    switch (normalized) {
-      case 'verified':
-      case 'likely to engage':
-        return ContactEmailStatus.VERIFIED;
-      case 'risky':
-        return ContactEmailStatus.RISKY;
-      case 'bounced':
-        return ContactEmailStatus.BOUNCED;
-      case 'invalid':
-      case 'unavailable':
-        return ContactEmailStatus.INVALID;
-      default:
-        return ContactEmailStatus.UNVERIFIED;
-    }
-  }
-
-  private normalizeDomain(value?: string | null) {
-    const domain = this.readString(value);
-    if (!domain) return null;
-    return domain
-      .replace(/^https?:\/\//i, '')
-      .replace(/^www\./i, '')
-      .replace(/\/$/, '')
-      .toLowerCase();
-  }
-
-  private deriveSeniorities(titles: string[]) {
-    const detected = new Set<string>();
-    for (const title of titles) {
-      const lowered = title.toLowerCase();
-      if (lowered.includes('owner')) detected.add('owner');
-      if (lowered.includes('founder')) detected.add('founder');
-      if (
-        lowered.includes('chief') ||
-        lowered.includes('ceo') ||
-        lowered.includes('cto') ||
-        lowered.includes('cmo')
-      )
-        detected.add('c_suite');
-      if (lowered.includes('vp')) detected.add('vp');
-      if (lowered.includes('head')) detected.add('head');
-      if (lowered.includes('director')) detected.add('director');
-      if (lowered.includes('manager')) detected.add('manager');
-    }
-    return Array.from(detected);
-  }
-
-  private readEmployeeRanges(value: unknown) {
-    const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
-    const mapped = values
-      .map((item) =>
-        this.readString(
-          typeof item === 'string' ? item : this.asObject(item).label ?? this.asObject(item).code,
-        ),
-      )
-      .filter(Boolean)
-      .map((item) => this.mapEmployeeRange(item as string))
-      .filter(Boolean) as string[];
-    return this.uniqueNonEmpty(mapped);
-  }
-
-  private mapEmployeeRange(value: string) {
-    const normalized = value.toLowerCase();
-    if (normalized.includes('1') && normalized.includes('10')) return '1,10';
-    if (normalized.includes('11') && normalized.includes('50')) return '11,50';
-    if (normalized.includes('51') && normalized.includes('200')) return '51,200';
-    if (normalized.includes('201') && normalized.includes('500')) return '201,500';
-    if (normalized.includes('500') && normalized.includes('1000')) return '500,1000';
-    return null;
-  }
-
-  private asObject(value: unknown): Record<string, any> {
+  private asObject(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value)
-      ? { ...(value as Record<string, any>) }
+      ? { ...(value as Record<string, unknown>) }
       : {};
   }
 
-  private readString(value: unknown): string | null {
-    return typeof value === 'string' && value.trim().length ? value.trim() : null;
+  private readString(value: unknown) {
+    return typeof value === 'string' ? value.trim() : null;
   }
 
-  private readPositiveInt(value: unknown): number | null {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      return Math.floor(value);
-    }
-    if (typeof value === 'string') {
-      const parsed = Number.parseInt(value, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        return parsed;
-      }
-    }
-    return null;
+  private readPositiveInt(value: unknown) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
   }
 
-  private readStringArray(value: unknown): string[] {
-    if (!Array.isArray(value)) return [];
+  private extractGeoTargets(scopeJson: unknown, metadataJson: unknown) {
+    const scope = this.asObject(scopeJson);
+    const metadata = this.asObject(metadataJson);
+    const geography = this.asObject(scope.geography);
+
+    const targets = [
+      ...this.readStringArray(geography.countries),
+      ...this.readStringArray(geography.regions),
+      ...this.readStringArray(geography.cities),
+      ...this.readStringArray(this.asObject(metadata.targeting).regions),
+    ];
+
+    return Array.from(new Set(targets)).slice(0, 8);
+  }
+
+  private readStringArray(value: unknown) {
+    if (!Array.isArray(value)) return [] as string[];
     return value
-      .map((item) => this.readString(item))
-      .filter((item): item is string => Boolean(item));
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
   }
 
-  private readScopeLabels(value: unknown): string[] {
-    if (!Array.isArray(value)) return [];
-    return value
-      .map((item) => this.asObject(item))
-      .map(
-        (item) =>
-          this.readString(item.label) ??
-          this.readString(item.code) ??
-          this.readString(item.regionLabel) ??
-          this.readString(item.regionCode),
-      )
-      .filter((item): item is string => Boolean(item));
-  }
-
-  private uniqueNonEmpty(values: Array<string | undefined | null>) {
-    return Array.from(
-      new Set(values.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)),
-    );
-  }
-
-  private readSeedProspects(value: unknown): Array<any> {
-    if (!Array.isArray(value)) return [];
-    return value
-      .map((item) => this.asObject(item))
-      .map((item) => {
-        const email = this.readString(item.email)?.toLowerCase();
-        const fullName =
-          this.readString(item.fullName) ??
-          [this.readString(item.firstName), this.readString(item.lastName)].filter(Boolean).join(' ');
-        if (!email || !fullName) return null;
-        return {
-          companyName: this.readString(item.companyName) ?? undefined,
-          domain: this.readString(item.domain) ?? undefined,
-          industry: this.readString(item.industry) ?? undefined,
-          fullName,
-          firstName: this.readString(item.firstName) ?? undefined,
-          lastName: this.readString(item.lastName) ?? undefined,
-          title: this.readString(item.title) ?? undefined,
-          email,
-          phone: this.readString(item.phone) ?? undefined,
-          websiteUrl: this.readString(item.websiteUrl) ?? undefined,
-          linkedinUrl: this.readString(item.linkedinUrl) ?? undefined,
-          city: this.readString(item.city) ?? undefined,
-          region: this.readString(item.region) ?? undefined,
-          countryCode: this.readString(item.countryCode) ?? undefined,
-          timezone: this.readString(item.timezone) ?? undefined,
-          priority: typeof item.priority === 'number' ? item.priority : undefined,
-          score: typeof item.score === 'number' ? item.score : undefined,
-          origin: this.readString(item.origin) ?? undefined,
-        };
-      })
-      .filter(Boolean) as Array<any>;
+  private firstToken(value?: string | null) {
+    return typeof value === 'string' ? value.split(',')[0].trim() || null : null;
   }
 }

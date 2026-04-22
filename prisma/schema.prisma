@@ -2723,3 +2723,194 @@ model InquiryNote {
   @@index([authorUserId, createdAt])
   @@index([noteType, createdAt])
 }
+
+
+model OpportunityProfile {
+  id              String   @id @default(cuid())
+  organizationId  String
+  clientId        String
+  campaignId      String
+  title           String
+  opportunityType String
+  targetDescription String?
+  geographyScope  Json?
+  serviceContext  String?
+  offerContext    String?
+  exclusions      Json?
+  strategyJson    Json?
+  status          String   @default("ACTIVE")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([campaignId, status])
+  @@index([clientId, status])
+  @@index([organizationId, status])
+}
+
+model SignalEvent {
+  id                 String   @id @default(cuid())
+  organizationId     String
+  clientId           String
+  campaignId         String
+  opportunityProfileId String
+  signalType         String
+  signalSourceType   String
+  sourceUrlOrKey     String?
+  headlineOrLabel    String?
+  detectedAt         DateTime @default(now())
+  recencyScore       Decimal? @db.Decimal(5, 2)
+  confidenceScore    Decimal? @db.Decimal(5, 2)
+  geography          String?
+  payloadJson        Json?
+  normalizedJson     Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([campaignId, signalType, detectedAt])
+  @@index([opportunityProfileId, signalType])
+}
+
+model SourcePlan {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  opportunityProfileId String
+  planVersion       Int      @default(1)
+  sourcePriorityJson Json?
+  fallbackPolicyJson Json?
+  signalRulesJson   Json?
+  executionLimitsJson Json?
+  status            String   @default("ACTIVE")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([campaignId, status])
+  @@index([opportunityProfileId, status])
+}
+
+model SourceRun {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  sourcePlanId      String
+  opportunityProfileId String?
+  sourceType        String
+  startedAt         DateTime @default(now())
+  finishedAt        DateTime?
+  status            String   @default("RUNNING")
+  resultCount       Int      @default(0)
+  acceptedCount     Int      @default(0)
+  costUnits         Int      @default(0)
+  notesJson         Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([campaignId, sourceType, status])
+  @@index([sourcePlanId, status])
+}
+
+model DiscoveredEntity {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  sourceRunId       String?
+  opportunityProfileId String?
+  companyName       String
+  personName        String?
+  inferredRole      String?
+  websiteUrl        String?
+  domain            String?
+  geography         String?
+  sourceEvidenceJson Json?
+  entityConfidence  Decimal? @db.Decimal(5, 2)
+  dedupeKey         String
+  status            String   @default("DISCOVERED")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([campaignId, dedupeKey])
+  @@index([campaignId, status])
+  @@index([sourceRunId])
+}
+
+model ReachabilityRecord {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  discoveredEntityId String
+  domain            String?
+  contactPageUrl    String?
+  emailCandidate    String?
+  emailPattern      String?
+  verificationStatus String   @default("UNVERIFIED")
+  reachabilityScore Decimal? @db.Decimal(5, 2)
+  suppressionStatus String?
+  notesJson         Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([campaignId, verificationStatus])
+  @@index([discoveredEntityId])
+  @@index([emailCandidate])
+}
+
+model QualificationDecision {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  discoveredEntityId String
+  opportunityProfileId String?
+  decision          String
+  relevanceScore    Decimal? @db.Decimal(5, 2)
+  timelinessScore   Decimal? @db.Decimal(5, 2)
+  reachabilityScore Decimal? @db.Decimal(5, 2)
+  valueScore        Decimal? @db.Decimal(5, 2)
+  finalScore        Decimal? @db.Decimal(5, 2)
+  reasonJson        Json?
+  decidedAt         DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([campaignId, decision, decidedAt])
+  @@index([discoveredEntityId])
+}
+
+model ProviderUsageLog {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  opportunityProfileId String?
+  providerName      String
+  reason            String
+  invocationType    String
+  costUnits         Int      @default(0)
+  resultCount       Int      @default(0)
+  outcomeSummary    String?
+  metadataJson      Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([campaignId, providerName, createdAt])
+}
+
+model AdaptationDecision {
+  id                String   @id @default(cuid())
+  organizationId    String
+  clientId          String
+  campaignId        String
+  opportunityProfileId String?
+  triggerType       String
+  previousPathJson  Json?
+  newPathJson       Json?
+  reason            String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([campaignId, triggerType, createdAt])
+}
