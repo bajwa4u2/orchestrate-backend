@@ -16,6 +16,12 @@ export class EmailsController {
     return this.emailsService.listDispatches(context.organizationId!, clientId);
   }
 
+  @Get('dispatches/me')
+  async listClientDispatches(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.emailsService.listDispatches(context.organizationId!, context.clientId!);
+  }
+
   @Post('send-template')
   async sendTemplate(@Headers() headers: Record<string, unknown>, @Body() dto: SendTemplatedEmailDto) {
     const context = await this.accessContextService.requireOperator(headers);

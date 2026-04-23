@@ -1,7 +1,9 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   ActivityVisibility,
+  CommunicationType,
   Job,
+  MessageClass,
   JobStatus,
   JobType,
   LeadQualificationState,
@@ -57,7 +59,15 @@ export class FirstSendWorkerService implements JobWorker {
       where: { id: input.leadId },
       include: {
         account: true,
-        contact: true,
+        contact: {
+          include: {
+            contactChannels: {
+              where: { type: 'EMAIL' },
+              orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'desc' }],
+              take: 1,
+            },
+          },
+        },
         campaign: true,
         client: true,
       },
@@ -76,24 +86,44 @@ export class FirstSendWorkerService implements JobWorker {
       };
     }
 
-    const email = lead.contact?.email?.trim().toLowerCase();
+    const primaryEmailChannel = this.resolvePrimaryEmailChannel(lead.contact);
+    const email = primaryEmailChannel?.value?.trim().toLowerCase() ?? lead.contact?.email?.trim().toLowerCase() ?? null;
     if (!email) {
       throw new BadRequestException(`Lead ${lead.id} has no contact email`);
     }
 
-    const suppression = await this.deliverabilityService.findSuppressionForRecipient({
+    const healedChannel =
+      lead.contactId && !primaryEmailChannel
+        ? await this.deliverabilityService.ensurePrimaryEmailChannel({
+            organizationId: lead.organizationId,
+            clientId: lead.clientId,
+            contactId: lead.contactId,
+            emailAddress: email,
+            isVerified: false,
+            verificationSource: 'first_send_legacy_heal',
+            metadataJson: {
+              leadId: lead.id,
+              campaignId: lead.campaignId,
+            },
+          })
+        : primaryEmailChannel;
+
+    const communicationGuard = await this.deliverabilityService.assertCommunicationAllowed({
       organizationId: lead.organizationId,
       clientId: lead.clientId,
+      contactId: lead.contactId ?? undefined,
+      contactChannelId: healedChannel?.id ?? undefined,
       emailAddress: email,
+      communication: CommunicationType.OUTREACH,
     });
 
-    if (suppression) {
+    if (!communicationGuard.allowed) {
       await this.prisma.lead.update({
         where: { id: lead.id },
         data: {
           status: LeadStatus.SUPPRESSED,
           qualificationState: LeadQualificationState.DISQUALIFIED,
-          suppressionReason: suppression.reason || suppression.type,
+          suppressionReason: communicationGuard.reason,
         },
       });
 
@@ -101,7 +131,8 @@ export class FirstSendWorkerService implements JobWorker {
         ok: false,
         suppressed: true,
         leadId: lead.id,
-        suppressionId: suppression.id,
+        suppressionId: communicationGuard.suppression?.id,
+        reason: communicationGuard.reason,
       };
     }
 
@@ -164,6 +195,8 @@ export class FirstSendWorkerService implements JobWorker {
       `${lead.id}:${generated.sequenceId ?? 'default'}`;
     const parentExternalMessageId = this.readString(existingSequenceState.lastExternalMessageId) ?? undefined;
 
+    const contactChannelId = communicationGuard.channel?.id ?? null;
+
     const transport = input.simulateDeliveryOnly
       ? null
       : await this.emailsService.sendDirectEmail({
@@ -195,6 +228,8 @@ export class FirstSendWorkerService implements JobWorker {
         workflowRunId: input.workflowRunId,
         direction: 'OUTBOUND',
         channel: 'EMAIL',
+        messageClass: MessageClass.OUTREACH,
+        contactChannelId,
         status,
         source: 'SYSTEM_GENERATED',
         lifecycle,
@@ -210,6 +245,7 @@ export class FirstSendWorkerService implements JobWorker {
           representationMode: 'orchestrate_on_behalf_of_client',
           jobType: input.jobType,
           workflowRunId: input.workflowRunId,
+          contactChannelId,
           sequenceId: generated.sequenceId,
           sequenceStepId: generated.sequenceStepId,
           sequenceStepOrder,
@@ -236,6 +272,7 @@ export class FirstSendWorkerService implements JobWorker {
             lastMessageId: message.id,
             lastSentAt: new Date().toISOString(),
             sequenceId: generated.sequenceId,
+            contactChannelId,
             rootThreadKey,
             threadKey: rootThreadKey,
             lastExternalMessageId: transport?.externalMessageId ?? null,
@@ -327,6 +364,15 @@ export class FirstSendWorkerService implements JobWorker {
       simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
       jobId: input.job.id,
     };
+  }
+
+
+  private resolvePrimaryEmailChannel(contact: any) {
+    if (!contact) return null;
+    const channels = Array.isArray(contact.contactChannels) ? contact.contactChannels : [];
+    const explicit = channels.find((channel) => channel && channel.type === 'EMAIL' && channel.status === 'ACTIVE');
+    if (explicit) return explicit;
+    return channels[0] ?? null;
   }
 
   private tightenGeneratedMessage(input: {

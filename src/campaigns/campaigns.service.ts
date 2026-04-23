@@ -3,6 +3,8 @@ import {
   JobStatus,
   JobType,
   LeadStatus,
+  MailboxConnectionState,
+  MailboxHealthStatus,
   Prisma,
   RecordSource,
   WorkflowLane,
@@ -16,6 +18,7 @@ import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowsService } from '../workflows/workflows.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
+import { buildExecutionReadSurface } from '../common/utils/execution-read-surface';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { ListCampaignsDto } from './dto/list-campaigns.dto';
 
@@ -30,12 +33,8 @@ export class CampaignsService {
   ) {}
 
   async create(dto: CreateCampaignDto) {
-    if (!dto.organizationId) {
-      throw new Error('organizationId is required');
-    }
-    if (!dto.clientId) {
-      throw new Error('clientId is required');
-    }
+    if (!dto.organizationId) throw new Error('organizationId is required');
+    if (!dto.clientId) throw new Error('clientId is required');
 
     return this.prisma.$transaction(async (tx) => {
       const workflow = await this.workflowsService.createWorkflowRun(
@@ -64,9 +63,7 @@ export class CampaignsService {
             endAt: dto.endAt?.toISOString() ?? null,
             metadataJson: dto.metadataJson ?? null,
           },
-          contextJson: {
-            stage: 'campaign_create',
-          },
+          contextJson: { stage: 'campaign_create' },
           startedAt: new Date(),
         },
         tx,
@@ -117,30 +114,14 @@ export class CampaignsService {
         },
       });
 
-      await this.workflowsService.attachWorkflowSubjects(
-        workflow.id,
-        {
-          campaignId: campaign.id,
-          title: campaign.name,
-        },
-        tx,
-      );
-
-      await this.workflowsService.completeWorkflowRun(
-        workflow.id,
-        {
-          campaignId: campaign.id,
-        },
-        tx,
-      );
-
+      await this.workflowsService.attachWorkflowSubjects(workflow.id, { campaignId: campaign.id, title: campaign.name }, tx);
+      await this.workflowsService.completeWorkflowRun(workflow.id, { campaignId: campaign.id }, tx);
       return campaign;
     });
   }
 
   async list(query: ListCampaignsDto) {
     const { page, limit, skip, take } = buildPagination(query.page, query.limit);
-
     const where = {
       ...(query.organizationId ? { organizationId: query.organizationId } : {}),
       ...(query.clientId ? { clientId: query.clientId } : {}),
@@ -157,22 +138,26 @@ export class CampaignsService {
       this.prisma.campaign.count({ where }),
     ]);
 
-    return { items, meta: { page, limit, total } };
+    const enriched = await Promise.all(items.map(async (item) => ({
+      ...item,
+      operational: await this.getCampaignOperationalView(item.id, item.organizationId, item.clientId),
+    })));
+
+    return { items: enriched, meta: { page, limit, total } };
+  }
+
+
+  async restartCampaign(input: { campaignId: string; organizationId?: string }) {
+    return this.activateCampaign(input);
   }
 
   async activateCampaign(input: { campaignId: string; organizationId?: string }) {
     const campaign = await this.prisma.campaign.findFirst({
-      where: {
-        id: input.campaignId,
-        ...(input.organizationId ? { organizationId: input.organizationId } : {}),
-      },
+      where: { id: input.campaignId, ...(input.organizationId ? { organizationId: input.organizationId } : {}) },
     });
+    if (!campaign) throw new Error('Campaign not found');
 
-    if (!campaign) {
-      throw new Error('Campaign not found');
-    }
-
-    await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
+    const infra = await this.deliverabilityService.ensureDefaultMailboxInfrastructure({
       organizationId: campaign.organizationId,
       clientId: campaign.clientId,
       timezone: campaign.timezone ?? undefined,
@@ -190,22 +175,13 @@ export class CampaignsService {
           ...activation,
           version: activationVersion,
           bootstrapStatus: 'activation_completed',
-          completedAt:
-            this.readString(activation.completedAt) ??
-            this.readString(activation.lastBootstrapAt) ??
-            new Date().toISOString(),
+          completedAt: this.readString(activation.completedAt) ?? this.readString(activation.lastBootstrapAt) ?? new Date().toISOString(),
+          mailboxId: this.readString(activation.mailboxId) ?? infra.mailbox.id,
         },
       };
-
       if (this.readString(activation.bootstrapStatus) !== 'activation_completed') {
-        await this.prisma.campaign.update({
-          where: { id: campaign.id },
-          data: {
-            metadataJson: toPrismaJson(activeMetadata),
-          },
-        });
+        await this.prisma.campaign.update({ where: { id: campaign.id }, data: { metadataJson: toPrismaJson(activeMetadata) } });
       }
-
       return {
         ok: true,
         status: 'active',
@@ -213,6 +189,8 @@ export class CampaignsService {
         bootstrapStatus: 'activation_completed',
         deduped: true,
         message: 'Campaign is already active.',
+        mailbox: this.toMailboxSurface(infra.mailbox),
+        operational: await this.getCampaignOperationalView(campaign.id, campaign.organizationId, campaign.clientId),
       };
     }
 
@@ -221,19 +199,13 @@ export class CampaignsService {
         campaignId: campaign.id,
         type: JobType.LEAD_IMPORT,
         dedupeKey,
-        status: {
-          in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED],
-        },
+        status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] },
       },
       orderBy: { createdAt: 'desc' },
     });
 
     if (existingActivationJob) {
-      const bootstrapStatus =
-        existingActivationJob.status === JobStatus.RETRY_SCHEDULED
-          ? 'activation_retry_scheduled'
-          : 'activation_in_progress';
-
+      const bootstrapStatus = existingActivationJob.status === JobStatus.RETRY_SCHEDULED ? 'activation_retry_scheduled' : 'activation_in_progress';
       await this.prisma.campaign.update({
         where: { id: campaign.id },
         data: {
@@ -244,15 +216,12 @@ export class CampaignsService {
             activation: {
               ...activation,
               version: activationVersion,
-              requestedAt:
-                this.readString(activation.requestedAt) ?? existingActivationJob.createdAt.toISOString(),
+              requestedAt: this.readString(activation.requestedAt) ?? existingActivationJob.createdAt.toISOString(),
               bootstrapStatus,
               jobId: existingActivationJob.id,
+              mailboxId: infra.mailbox.id,
               dedupeKey,
-              retryAt:
-                existingActivationJob.status === JobStatus.RETRY_SCHEDULED
-                  ? existingActivationJob.scheduledFor?.toISOString() ?? null
-                  : null,
+              retryAt: existingActivationJob.status === JobStatus.RETRY_SCHEDULED ? existingActivationJob.scheduledFor?.toISOString() ?? null : null,
             },
           }),
         },
@@ -260,70 +229,45 @@ export class CampaignsService {
 
       return {
         ok: true,
-        status: 'activating',
+        status: bootstrapStatus,
         generationState: 'TARGETING_READY',
         bootstrapStatus,
         jobId: existingActivationJob.id,
-        deduped: true,
-        message:
-          bootstrapStatus === 'activation_retry_scheduled'
-            ? 'Campaign activation is waiting for its retry window.'
-            : 'Campaign activation is already in progress.',
+        mailbox: this.toMailboxSurface(infra.mailbox),
+        operational: await this.getCampaignOperationalView(campaign.id, campaign.organizationId, campaign.clientId),
       };
     }
 
-    const requestedAt = new Date();
-    const nextMetadata = {
-      ...metadata,
-      activation: {
-        ...activation,
-        version: activationVersion,
-        requestedAt: requestedAt.toISOString(),
-        bootstrapStatus: 'activation_requested',
-        lastError: null,
-        retryAt: null,
-        failedAt: null,
-        completedAt: null,
-        dedupeKey,
-      },
-    };
-
-    const activatedCampaign = await this.prisma.campaign.update({
-      where: { id: campaign.id },
-      data: {
-        status: 'ACTIVE',
-        generationState: 'TARGETING_READY',
-        metadataJson: toPrismaJson(nextMetadata),
-      },
-    });
-
     const job = await this.prisma.job.create({
       data: {
-        organizationId: activatedCampaign.organizationId,
-        clientId: activatedCampaign.clientId,
-        campaignId: activatedCampaign.id,
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        campaignId: campaign.id,
         type: JobType.LEAD_IMPORT,
         status: JobStatus.QUEUED,
-        queueName: 'activation',
+        queueName: 'lead-import',
         dedupeKey,
-        scheduledFor: requestedAt,
-        payloadJson: {
-          campaignId: activatedCampaign.id,
-          workflowRunId: activatedCampaign.workflowRunId ?? null,
-          activationVersion,
-          requestedAt: requestedAt.toISOString(),
-        },
+        scheduledFor: new Date(),
+        maxAttempts: 3,
+        payloadJson: toPrismaJson({ campaignId: campaign.id }),
       },
     });
 
     await this.prisma.campaign.update({
-      where: { id: activatedCampaign.id },
+      where: { id: campaign.id },
       data: {
+        status: 'ACTIVE',
+        generationState: 'TARGETING_READY',
         metadataJson: toPrismaJson({
-          ...nextMetadata,
+          ...metadata,
           activation: {
-            ...this.asObject(nextMetadata.activation),
+            ...activation,
+            version: activationVersion,
+            requestedAt: new Date().toISOString(),
+            bootstrapStatus: 'activation_requested',
             jobId: job.id,
+            mailboxId: infra.mailbox.id,
+            dedupeKey,
           },
         }),
       },
@@ -331,165 +275,88 @@ export class CampaignsService {
 
     return {
       ok: true,
-      status: 'activating',
+      status: 'activation_requested',
       generationState: 'TARGETING_READY',
       bootstrapStatus: 'activation_requested',
       jobId: job.id,
-      deduped: false,
-      message: 'Campaign activation has started. We are preparing the first lead bootstrap now.',
+      mailbox: this.toMailboxSurface(infra.mailbox),
+      operational: await this.getCampaignOperationalView(campaign.id, campaign.organizationId, campaign.clientId),
     };
   }
 
-
-  async restartCampaign(input: { campaignId: string; organizationId: string }) {
-    const campaign = await this.prisma.campaign.findFirst({
-      where: {
-        id: input.campaignId,
-        organizationId: input.organizationId,
-      },
-      select: {
-        id: true,
-        organizationId: true,
-        clientId: true,
-        workflowRunId: true,
-        status: true,
-        metadataJson: true,
-      },
-    });
-
-    if (!campaign) {
-      throw new Error('Campaign not found');
-    }
-
-    const metadata = this.asObject(campaign.metadataJson);
+  async getCampaignOperationalView(campaignId: string, organizationId: string, clientId: string) {
+    const activeJobStatuses = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED];
+    const [campaign, messageGeneration, sendQueue, activeImports, mailbox, sent, failed, replies, meetings, suppressionBlocked, consentBlocked, executionSurface] = await Promise.all([
+      this.prisma.campaign.findUnique({ where: { id: campaignId }, select: { metadataJson: true, generationState: true, status: true, dailySendCap: true } }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId, type: JobType.MESSAGE_GENERATION, status: { in: activeJobStatuses } } }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId, type: { in: [JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] }, status: { in: activeJobStatuses } } }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId, type: JobType.LEAD_IMPORT, status: { in: activeJobStatuses } } }),
+      this.deliverabilityService.pickMailboxForClient({ organizationId, clientId }),
+      this.prisma.outreachMessage.count({ where: { organizationId, clientId, campaignId, status: 'SENT' } }),
+      this.prisma.outreachMessage.count({ where: { organizationId, clientId, campaignId, status: 'FAILED' } }),
+      this.prisma.reply.count({ where: { organizationId, clientId, campaignId } }),
+      this.prisma.meeting.count({ where: { organizationId, clientId, campaignId } }),
+      this.prisma.lead.count({ where: { organizationId, clientId, campaignId, status: LeadStatus.SUPPRESSED } }),
+      this.prisma.contactConsent.count({ where: { organizationId, clientId, communication: 'OUTREACH', status: 'BLOCKED' } }),
+      this.workflowsService.getCampaignExecutionSurface(campaignId),
+    ]);
+    const metadata = this.asObject(campaign?.metadataJson);
     const activation = this.asObject(metadata.activation);
-    const restart = this.asObject(metadata.restart);
-    const currentVersion = this.readPositiveInt(activation.version) ?? 1;
-    const nextVersion = currentVersion + 1;
-    const requestedAt = new Date();
-    const dedupeKey = `campaign_activation:${campaign.id}:${nextVersion}`;
-    const cancelableJobStatuses = [JobStatus.QUEUED, JobStatus.RETRY_SCHEDULED];
-    const nowIso = requestedAt.toISOString();
-
-    const nextMetadata = {
-      ...metadata,
-      activation: {
-        ...activation,
-        version: nextVersion,
-        requestedAt: nowIso,
-        bootstrapStatus: 'activation_requested',
-        lastError: null,
-        retryAt: null,
-        failedAt: null,
-        completedAt: null,
-        dedupeKey,
-      },
-      restart: {
-        ...restart,
-        requestedAt: nowIso,
-        previousVersion: currentVersion,
-        version: nextVersion,
-        source: 'client_campaign_restart',
-      },
-    };
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.job.updateMany({
-        where: {
-          campaignId: campaign.id,
-          type: { in: [JobType.LEAD_IMPORT, JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] },
-          status: { in: cancelableJobStatuses },
-        },
-        data: {
-          status: JobStatus.CANCELED,
-          finishedAt: requestedAt,
-          lastError: 'Canceled by campaign restart with updated targeting.',
-        },
-      });
-
-      await tx.lead.updateMany({
-        where: {
-          campaignId: campaign.id,
-          status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-          firstContactAt: null,
-          lastContactAt: null,
-        },
-        data: {
-          status: LeadStatus.SUPPRESSED,
-          suppressionReason: 'Replaced by campaign restart using updated targeting.',
-        },
-      });
-
-      await tx.campaign.update({
-        where: { id: campaign.id },
-        data: {
-          status: 'ACTIVE',
-          generationState: 'TARGETING_READY',
-          metadataJson: toPrismaJson(nextMetadata),
-        },
-      });
-
-      const job = await tx.job.create({
-        data: {
-          organizationId: campaign.organizationId,
-          clientId: campaign.clientId,
-          campaignId: campaign.id,
-          type: JobType.LEAD_IMPORT,
-          status: JobStatus.QUEUED,
-          queueName: 'activation',
-          dedupeKey,
-          scheduledFor: requestedAt,
-          payloadJson: {
-            campaignId: campaign.id,
-            workflowRunId: campaign.workflowRunId ?? null,
-            activationVersion: nextVersion,
-            requestedAt: nowIso,
-            restartMode: 'targeting_restart',
-          },
-        },
-      });
-
-      await tx.campaign.update({
-        where: { id: campaign.id },
-        data: {
-          metadataJson: toPrismaJson({
-            ...nextMetadata,
-            activation: {
-              ...this.asObject(nextMetadata.activation),
-              jobId: job.id,
-            },
-          }),
-        },
-      });
+    const waitingOnMailbox = !mailbox || mailbox.connectionState === MailboxConnectionState.REQUIRES_REAUTH || mailbox.connectionState === MailboxConnectionState.REVOKED || mailbox.healthStatus === MailboxHealthStatus.CRITICAL;
+    const execution = buildExecutionReadSurface({
+      waitingOnImport: activeImports,
+      waitingOnMessageGeneration: messageGeneration,
+      queuedForSend: sendQueue,
+      waitingOnMailbox,
+      blockedAtConsent: consentBlocked,
+      blockedAtSuppression: suppressionBlocked,
+      sent,
+      failed,
+      replies,
+      meetings,
+      bootstrapStatus: this.readString(activation.bootstrapStatus),
+      workflowStatus: (executionSurface as any)?.workflowStatus ?? null,
+      mailboxReady: !waitingOnMailbox,
     });
-
     return {
-      ok: true,
-      status: 'activating',
-      generationState: 'TARGETING_READY',
-      bootstrapStatus: 'activation_requested',
-      deduped: false,
-      message: 'Campaign restart has started. We are applying your updated targeting now.',
+      campaignStatus: campaign?.status ?? null,
+      generationState: campaign?.generationState ?? null,
+      bootstrapStatus: this.readString(activation.bootstrapStatus),
+      waitingOnMessageGeneration: messageGeneration,
+      queuedForSend: sendQueue,
+      sent,
+      failed,
+      mailbox: mailbox ? this.toMailboxSurface(mailbox) : null,
+      waitingOnMailbox,
+      dailySendCap: campaign?.dailySendCap ?? null,
+      replies,
+      meetings,
+      blockedAtSuppression: suppressionBlocked,
+      blockedAtConsent: consentBlocked,
+      execution,
+      workflow: executionSurface,
     };
   }
 
-  private asObject(value: unknown): Record<string, unknown> {
-    return value && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {};
+  private toMailboxSurface(mailbox: any) {
+    return {
+      id: mailbox.id,
+      emailAddress: mailbox.emailAddress,
+      label: mailbox.label,
+      status: mailbox.status,
+      connectionState: mailbox.connectionState,
+      healthStatus: mailbox.healthStatus,
+      isClientOwned: mailbox.isClientOwned,
+    };
+  }
+
+  private asObject(value: unknown): Record<string, any> {
+    return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, any>) : {};
   }
 
   private readPositiveInt(value: unknown): number | null {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      return Math.floor(value);
-    }
-    if (typeof value === 'string') {
-      const parsed = Number.parseInt(value, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        return parsed;
-      }
-    }
-    return null;
+    const n = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
   }
 
   private readString(value: unknown): string | null {

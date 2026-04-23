@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { DocumentDispatchStatus, Prisma } from '@prisma/client';
+import { CommunicationType, ContactConsentStatus, DocumentDispatchStatus, MessageClass, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RepliesService } from '../replies/replies.service';
@@ -105,6 +105,12 @@ type DirectEmailAttachment = {
 
 type DirectEmailInput = {
   subject: string;
+  organizationId?: string;
+  clientId?: string;
+  campaignId?: string;
+  leadId?: string;
+  messageClass?: MessageClass;
+  communicationType?: CommunicationType;
   bodyText: string;
   bodyHtml?: string;
   toEmail: string;
@@ -353,7 +359,10 @@ export class EmailsService {
       throw new BadRequestException('Missing email body.');
     }
 
-    if (this.isOutreachDirectEmail(input)) {
+    const messageClass = this.inferMessageClass(input);
+    await this.enforceRecipientPermission(input, messageClass);
+
+    if (messageClass === MessageClass.OUTREACH) {
       return this.deliverPreservedDirectEmail({
         subject: input.subject.trim(),
         bodyText: input.bodyText?.trim() || '',
@@ -394,6 +403,60 @@ export class EmailsService {
       templateVariables: input.templateVariables,
       attachments: input.attachments,
     });
+  }
+
+
+  private inferMessageClass(input: DirectEmailInput): MessageClass {
+    if (input.messageClass) return input.messageClass;
+    if (input.communicationType === CommunicationType.NEWSLETTER || input.emailEvent === 'newsletter_confirmation') {
+      return MessageClass.NEWSLETTER;
+    }
+    if (this.isOutreachDirectEmail(input)) return MessageClass.OUTREACH;
+    return MessageClass.TRANSACTIONAL;
+  }
+
+  private async enforceRecipientPermission(input: DirectEmailInput, messageClass: MessageClass) {
+    const organizationId = input.organizationId ?? this.readOptionalString(input.templateVariables?.['organizationId']) ?? this.readOptionalString(input.templateVariables?.['organization_id']);
+    const clientId = input.clientId ?? this.readOptionalString(input.templateVariables?.['clientId']) ?? this.readOptionalString(input.templateVariables?.['client_id']);
+    const email = input.toEmail?.trim().toLowerCase();
+    if (!organizationId || !clientId || !email) return;
+
+    const suppression = await this.deliverabilityService.findSuppressionForRecipient({ organizationId, clientId, emailAddress: email });
+    if (suppression) {
+      throw new BadRequestException(`Recipient ${email} is suppressed from email delivery.`);
+    }
+
+    const communication =
+      messageClass === MessageClass.NEWSLETTER
+        ? CommunicationType.NEWSLETTER
+        : messageClass === MessageClass.OUTREACH
+          ? CommunicationType.OUTREACH
+          : CommunicationType.TRANSACTIONAL;
+
+    const consent = await this.prisma.contactConsent.findFirst({
+      where: {
+        organizationId,
+        clientId,
+        communication,
+        OR: [
+          { contactChannel: { normalizedValue: email } },
+          { contact: { email } },
+        ],
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+    });
+
+    if (communication === CommunicationType.NEWSLETTER && consent?.status === ContactConsentStatus.UNSUBSCRIBED) {
+      throw new BadRequestException(`Recipient ${email} is unsubscribed from newsletter communication.`);
+    }
+
+    if (communication === CommunicationType.OUTREACH && consent?.status === ContactConsentStatus.BLOCKED) {
+      throw new BadRequestException(`Recipient ${email} is blocked from outreach communication.`);
+    }
+  }
+
+  private readOptionalString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim().length ? value.trim() : undefined;
   }
 
   private isOutreachDirectEmail(input: DirectEmailInput): boolean {

@@ -4,7 +4,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { CampaignStatus, JobStatus, JobType, LeadStatus, Prisma, SubscriptionStatus } from '@prisma/client';
+import { CampaignStatus, CommunicationType, ContactConsentStatus, ImportBatchStatus, JobStatus, JobType, LeadStatus, MailboxConnectionState, MailboxHealthStatus, Prisma, SubscriptionStatus } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { AccessContextService } from '../access-context/access-context.service';
@@ -12,6 +12,7 @@ import { PrismaService } from '../database/prisma.service';
 import { StripeService } from '../billing/stripe/stripe.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
+import { buildExecutionReadSurface } from '../common/utils/execution-read-surface';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateClientSetupDto } from './dto/create-client-setup.dto';
 import { ListClientsDto } from './dto/list-clients.dto';
@@ -352,7 +353,15 @@ export class ClientsService {
 
   async getProfile(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
-    return this.buildProfileResponse(client);
+    const [mailbox, imports] = await Promise.all([
+      this.buildMailboxReadinessSnapshot(client.organizationId, client.id),
+      this.buildImportSnapshot(client.organizationId, client.id),
+    ]);
+    return {
+      ...this.buildProfileResponse(client),
+      mailbox,
+      imports,
+    };
   }
 
   async saveProfile(headers: Record<string, unknown>, dto: UpdateClientProfileDto) {
@@ -417,6 +426,10 @@ export class ClientsService {
       health: campaignHealth?.health ?? null,
       metrics: campaignHealth?.metrics ?? null,
       governor: campaignHealth?.governor ?? null,
+      mailbox: campaignHealth?.mailbox ?? null,
+      imports: campaignHealth?.imports ?? null,
+      execution: campaignHealth?.execution ?? null,
+      permissions: campaignHealth?.permissions ?? null,
       campaignProfile: {
         serviceType: scope.lane,
         scopeMode: scope.mode,
@@ -821,6 +834,10 @@ export class ClientsService {
       campaign: refreshedCampaign,
       health: campaignHealth?.health ?? null,
       metrics: campaignHealth?.metrics ?? null,
+      mailbox: campaignHealth?.mailbox ?? null,
+      imports: campaignHealth?.imports ?? null,
+      execution: campaignHealth?.execution ?? null,
+      permissions: campaignHealth?.permissions ?? null,
       campaignProfile: {
         serviceType: effectiveScope.lane,
         scopeMode: effectiveScope.mode,
@@ -998,7 +1015,7 @@ export class ClientsService {
       },
     });
 
-    const activation = await this.campaignsService.restartCampaign({
+    const activation = await this.campaignsService.activateCampaign({
       campaignId: campaign.id,
       organizationId: client.organizationId,
     });
@@ -1051,6 +1068,10 @@ export class ClientsService {
       campaign: refreshedCampaign,
       health: campaignHealth?.health ?? null,
       metrics: campaignHealth?.metrics ?? null,
+      mailbox: campaignHealth?.mailbox ?? null,
+      imports: campaignHealth?.imports ?? null,
+      execution: campaignHealth?.execution ?? null,
+      permissions: campaignHealth?.permissions ?? null,
       campaignProfile: {
         serviceType: effectiveScope.lane,
         scopeMode: effectiveScope.mode,
@@ -1127,62 +1148,31 @@ export class ClientsService {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    const [sendable, queued, sentToday, replies, meetings, campaignRecord, activeLeadImportJobs] = await Promise.all([
+    const [sendable, queued, sentToday, replies, meetings, campaignRecord, activeLeadImportJobs, mailbox, importSummary, newsletterUnsubscribed, outreachBlocked, messageGenerationQueued, suppressed] = await Promise.all([
       this.prisma.lead.count({
         where: {
           organizationId,
           clientId,
           campaignId: campaign.id,
           status: { in: sendableStatuses },
-          contact: { is: { email: { not: null } } },
+          OR: [
+            { contact: { is: { contactChannels: { some: { type: 'EMAIL', status: 'ACTIVE' } } } } },
+            { contact: { is: { email: { not: null } } } },
+          ],
         },
       }),
-      this.prisma.job.count({
-        where: {
-          organizationId,
-          clientId,
-          campaignId: campaign.id,
-          type: JobType.FIRST_SEND,
-          status: { in: activeJobStatuses },
-        },
-      }),
-      this.prisma.job.count({
-        where: {
-          organizationId,
-          clientId,
-          campaignId: campaign.id,
-          type: JobType.FIRST_SEND,
-          status: JobStatus.SUCCEEDED,
-          finishedAt: { gte: startOfToday },
-        },
-      }),
-      this.prisma.reply.count({
-        where: {
-          organizationId,
-          clientId,
-          campaignId: campaign.id,
-        },
-      }),
-      this.prisma.meeting.count({
-        where: {
-          organizationId,
-          clientId,
-          campaignId: campaign.id,
-        },
-      }),
-      this.prisma.campaign.findUnique({
-        where: { id: campaign.id },
-        select: { dailySendCap: true, status: true, metadataJson: true },
-      }),
-      this.prisma.job.count({
-        where: {
-          organizationId,
-          clientId,
-          campaignId: campaign.id,
-          type: JobType.LEAD_IMPORT,
-          status: { in: activeJobStatuses },
-        },
-      }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId: campaign.id, type: JobType.FIRST_SEND, status: { in: activeJobStatuses } } }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId: campaign.id, type: JobType.FIRST_SEND, status: JobStatus.SUCCEEDED, finishedAt: { gte: startOfToday } } }),
+      this.prisma.reply.count({ where: { organizationId, clientId, campaignId: campaign.id } }),
+      this.prisma.meeting.count({ where: { organizationId, clientId, campaignId: campaign.id } }),
+      this.prisma.campaign.findUnique({ where: { id: campaign.id }, select: { dailySendCap: true, status: true, metadataJson: true } }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId: campaign.id, type: JobType.LEAD_IMPORT, status: { in: activeJobStatuses } } }),
+      this.buildMailboxReadinessSnapshot(organizationId, clientId),
+      this.buildImportSnapshot(organizationId, clientId),
+      this.prisma.contactConsent.count({ where: { organizationId, clientId, communication: CommunicationType.NEWSLETTER, status: ContactConsentStatus.UNSUBSCRIBED } }),
+      this.prisma.contactConsent.count({ where: { organizationId, clientId, communication: CommunicationType.OUTREACH, status: ContactConsentStatus.BLOCKED } }),
+      this.prisma.job.count({ where: { organizationId, clientId, campaignId: campaign.id, type: JobType.MESSAGE_GENERATION, status: { in: activeJobStatuses } } }),
+      this.prisma.lead.count({ where: { organizationId, clientId, campaignId: campaign.id, status: LeadStatus.SUPPRESSED } }),
     ]);
 
     const dailySendCap = campaignRecord?.dailySendCap ?? 30;
@@ -1191,14 +1181,11 @@ export class ClientsService {
     const governor = this.asObject(this.asObject(campaignRecord?.metadataJson).governor);
 
     let health = 'ACTIVE';
-
     if (normalizedStatus === CampaignStatus.PAUSED) {
       health = 'PAUSED';
-    } else if (
-      bootstrapStatus == 'activation_requested' ||
-      bootstrapStatus == 'activation_in_progress' ||
-      activeLeadImportJobs > 0
-    ) {
+    } else if (!mailbox.ready) {
+      health = 'WAITING_ON_MAILBOX';
+    } else if (bootstrapStatus == 'activation_requested' || bootstrapStatus == 'activation_in_progress' || activeLeadImportJobs > 0) {
       health = 'REFILLING';
     } else if (sendable == 0 && queued == 0) {
       health = 'REFILLING';
@@ -1210,16 +1197,23 @@ export class ClientsService {
       health = 'REFILLING';
     }
 
+    const execution = buildExecutionReadSurface({
+      waitingOnImport: activeLeadImportJobs,
+      waitingOnMessageGeneration: messageGenerationQueued,
+      queuedForSend: queued,
+      waitingOnMailbox: !mailbox.ready,
+      blockedAtConsent: outreachBlocked,
+      blockedAtSuppression: suppressed,
+      sent: sentToday,
+      replies,
+      meetings,
+      bootstrapStatus: campaign.activation?.bootstrapStatus ?? null,
+      mailboxReady: mailbox.ready,
+    });
+
     return {
       health,
-      metrics: {
-        sendable,
-        queued,
-        sentToday,
-        replies,
-        meetings,
-        dailySendCap,
-      },
+      metrics: { sendable, queued, sentToday, replies, meetings, dailySendCap },
       governor: {
         enabled: typeof governor.enabled === 'boolean' ? governor.enabled : true,
         status: this.readString(governor.status),
@@ -1232,6 +1226,52 @@ export class ClientsService {
         maxLifetimeLeads: this.readPositiveInt(governor.maxLifetimeLeads),
         maxLifetimeSends: this.readPositiveInt(governor.maxLifetimeSends),
         totals: this.asObject(governor.totals),
+      },
+      mailbox,
+      imports: importSummary,
+      permissions: {
+        newsletterUnsubscribed,
+        outreachBlocked,
+      },
+      execution,
+    };
+  }
+
+  private async buildMailboxReadinessSnapshot(organizationId: string, clientId: string) {
+    const mailbox = await this.deliverabilityService.pickMailboxForClient({ organizationId, clientId });
+    if (!mailbox) {
+      return { ready: false, status: 'missing', healthStatus: null, connectionState: null, isClientOwned: false, emailAddress: null };
+    }
+    const ready = mailbox.status === 'ACTIVE' && mailbox.healthStatus !== MailboxHealthStatus.CRITICAL && mailbox.connectionState !== MailboxConnectionState.REQUIRES_REAUTH && mailbox.connectionState !== MailboxConnectionState.REVOKED;
+    return {
+      ready,
+      id: mailbox.id,
+      status: mailbox.status,
+      healthStatus: mailbox.healthStatus,
+      connectionState: mailbox.connectionState,
+      isClientOwned: mailbox.isClientOwned,
+      emailAddress: mailbox.emailAddress,
+      label: mailbox.label,
+    };
+  }
+
+  private async buildImportSnapshot(organizationId: string, clientId: string) {
+    const activeStatuses = [ImportBatchStatus.UPLOADED, ImportBatchStatus.PROCESSING];
+    const [latest, active, totals] = await Promise.all([
+      this.prisma.importBatch.findFirst({ where: { organizationId, clientId }, orderBy: [{ createdAt: 'desc' }] }),
+      this.prisma.importBatch.count({ where: { organizationId, clientId, status: { in: activeStatuses } } }),
+      this.prisma.importBatch.aggregate({ where: { organizationId, clientId }, _sum: { totalRows: true, processedRows: true, duplicateRows: true, invalidRows: true, failedRows: true, createdRows: true } }),
+    ]);
+    return {
+      active,
+      latest: latest ? { id: latest.id, status: latest.status, sourceLabel: (latest as any).sourceLabel ?? null, createdAt: latest.createdAt, completedAt: (latest as any).updatedAt ?? latest.createdAt } : null,
+      totals: {
+        rows: totals._sum.totalRows ?? 0,
+        processed: totals._sum.processedRows ?? 0,
+        created: totals._sum.createdRows ?? 0,
+        duplicates: totals._sum.duplicateRows ?? 0,
+        invalid: totals._sum.invalidRows ?? 0,
+        failed: totals._sum.failedRows ?? 0,
       },
     };
   }

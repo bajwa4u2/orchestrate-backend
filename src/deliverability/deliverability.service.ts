@@ -1,6 +1,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import {
+  CommunicationType,
+  ContactChannelStatus,
+  ContactChannelType,
+  ContactConsentStatus,
   Mailbox,
+  RecordSource,
+  MailboxConnectionState,
   MailboxHealthStatus,
   MailboxProvider,
   MailboxRole,
@@ -99,6 +105,13 @@ export class DeliverabilityService {
           replyToAddress: defaultReplyTo,
           provider: existingByAddress.provider ?? MailboxProvider.OTHER,
           status: MailboxStatus.ACTIVE,
+          connectionState:
+            existingByAddress.connectionState ??
+            (existingByAddress.clientId ? MailboxConnectionState.AUTHORIZED : MailboxConnectionState.BOOTSTRAPPED),
+          isClientOwned: Boolean(existingByAddress.clientId),
+          connectedAt: existingByAddress.connectedAt ?? new Date(),
+          disconnectedAt: null,
+          lastAuthAt: existingByAddress.lastAuthAt ?? new Date(),
           dailySendCap: existingByAddress.dailySendCap || 100,
           hourlySendCap: existingByAddress.hourlySendCap || 20,
           warmupStatus: existingByAddress.warmupStatus ?? WarmupStatus.NOT_STARTED,
@@ -113,6 +126,7 @@ export class DeliverabilityService {
             transport: process.env.RESEND_API_KEY?.trim() ? 'resend' : 'log',
             intendedClientId: input.clientId ?? null,
             recoveredExistingMailbox: true,
+            ownershipMode: existingByAddress.clientId ? 'client_owned' : 'platform_bootstrap',
           } as Prisma.InputJsonValue,
         },
       });
@@ -129,6 +143,10 @@ export class DeliverabilityService {
         replyToAddress: defaultReplyTo,
         provider: MailboxProvider.OTHER,
         status: MailboxStatus.ACTIVE,
+        connectionState: input.clientId ? MailboxConnectionState.AUTHORIZED : MailboxConnectionState.BOOTSTRAPPED,
+        isClientOwned: Boolean(input.clientId),
+        connectedAt: new Date(),
+        lastAuthAt: new Date(),
         dailySendCap: 100,
         hourlySendCap: 20,
         warmupStatus: WarmupStatus.NOT_STARTED,
@@ -138,6 +156,7 @@ export class DeliverabilityService {
           bootstrapSource: 'campaign_activation',
           transport: process.env.RESEND_API_KEY?.trim() ? 'resend' : 'log',
           intendedClientId: input.clientId ?? null,
+          ownershipMode: input.clientId ? 'client_owned' : 'platform_bootstrap',
         } as Prisma.InputJsonValue,
       },
     });
@@ -207,6 +226,7 @@ export class DeliverabilityService {
           bootstrap: true,
           bootstrapSource: 'campaign_activation',
           intendedClientId: input.clientId ?? null,
+          ownershipMode: input.clientId ? 'client_owned' : 'platform_bootstrap',
         } as Prisma.InputJsonValue,
       },
     });
@@ -253,6 +273,10 @@ export class DeliverabilityService {
         emailAddress: dto.emailAddress.toLowerCase(),
         provider: dto.provider,
         status: dto.status,
+        connectionState: dto.status === MailboxStatus.ACTIVE ? MailboxConnectionState.AUTHORIZED : MailboxConnectionState.PENDING_AUTH,
+        isClientOwned: Boolean(dto.clientId),
+        connectedAt: dto.status === MailboxStatus.ACTIVE ? new Date() : null,
+        lastAuthAt: dto.status === MailboxStatus.ACTIVE ? new Date() : null,
         dailySendCap: dto.dailySendCap,
         hourlySendCap: dto.hourlySendCap,
         warmupStatus: dto.warmupStatus,
@@ -433,15 +457,236 @@ export class DeliverabilityService {
     });
   }
 
-  async pickMailboxForClient(input: { organizationId: string; clientId?: string }): Promise<Mailbox | null> {
-    return this.prisma.mailbox.findFirst({
+
+  async ensurePrimaryEmailChannel(input: {
+    organizationId: string;
+    clientId: string;
+    contactId: string;
+    emailAddress: string;
+    isVerified?: boolean;
+    verificationSource?: string;
+    metadataJson?: Record<string, unknown>;
+  }) {
+    const normalizedValue = input.emailAddress.trim().toLowerCase();
+
+    const existingPrimary = await this.prisma.contactChannel.findFirst({
       where: {
+        contactId: input.contactId,
+        type: ContactChannelType.EMAIL,
+        isPrimary: true,
+      },
+      select: { id: true },
+    });
+
+    const channel = await this.prisma.contactChannel.upsert({
+      where: {
+        contactId_type_normalizedValue: {
+          contactId: input.contactId,
+          type: ContactChannelType.EMAIL,
+          normalizedValue,
+        },
+      },
+      update: {
+        value: input.emailAddress.trim(),
+        status: ContactChannelStatus.ACTIVE,
+        isPrimary: existingPrimary ? undefined : true,
+        isVerified: input.isVerified ?? false,
+        verificationSource: input.verificationSource,
+        metadataJson: toPrismaJson(input.metadataJson),
+        lastValidatedAt: new Date(),
+      },
+      create: {
         organizationId: input.organizationId,
+        clientId: input.clientId,
+        contactId: input.contactId,
+        type: ContactChannelType.EMAIL,
+        value: input.emailAddress.trim(),
+        normalizedValue,
+        status: ContactChannelStatus.ACTIVE,
+        isPrimary: true,
+        isVerified: input.isVerified ?? false,
+        verificationSource: input.verificationSource,
+        metadataJson: toPrismaJson(input.metadataJson),
+        lastValidatedAt: new Date(),
+      },
+    });
+
+    if (!channel.isPrimary) {
+      await this.prisma.contactChannel.updateMany({
+        where: {
+          contactId: input.contactId,
+          type: ContactChannelType.EMAIL,
+          id: { not: channel.id },
+        },
+        data: { isPrimary: false },
+      });
+      await this.prisma.contactChannel.update({ where: { id: channel.id }, data: { isPrimary: true } });
+      channel.isPrimary = true;
+    }
+
+    return channel;
+  }
+
+  async ensureCommunicationConsent(input: {
+    organizationId: string;
+    clientId: string;
+    contactId: string;
+    contactChannelId?: string;
+    communication: CommunicationType;
+    status: ContactConsentStatus;
+    source?: RecordSource | undefined;
+    sourceLabel?: string;
+    reason?: string;
+    metadataJson?: Record<string, unknown>;
+  }) {
+    const existing = await this.prisma.contactConsent.findFirst({
+      where: {
+        contactId: input.contactId,
+        contactChannelId: input.contactChannelId ?? null,
+        communication: input.communication,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const grantedStatuses = new Set<ContactConsentStatus>([ContactConsentStatus.ALLOWED, ContactConsentStatus.SUBSCRIBED]);
+    const now = new Date();
+
+    if (existing) {
+      return this.prisma.contactConsent.update({
+        where: { id: existing.id },
+        data: {
+          status: input.status,
+          source: input.source,
+          sourceLabel: input.sourceLabel,
+          reason: input.reason,
+          metadataJson: toPrismaJson(input.metadataJson),
+          grantedAt: grantedStatuses.has(input.status) ? existing.grantedAt ?? now : existing.grantedAt,
+          revokedAt: grantedStatuses.has(input.status) ? null : now,
+        },
+      });
+    }
+
+    return this.prisma.contactConsent.create({
+      data: {
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        contactId: input.contactId,
+        contactChannelId: input.contactChannelId,
+        communication: input.communication,
+        status: input.status,
+        source: input.source,
+        sourceLabel: input.sourceLabel,
+        reason: input.reason,
+        metadataJson: toPrismaJson(input.metadataJson),
+        grantedAt: grantedStatuses.has(input.status) ? now : null,
+        revokedAt: grantedStatuses.has(input.status) ? null : now,
+      },
+    });
+  }
+
+  async assertCommunicationAllowed(input: {
+    organizationId: string;
+    clientId?: string;
+    contactId?: string;
+    contactChannelId?: string;
+    emailAddress: string;
+    communication: CommunicationType;
+  }) {
+    const normalizedEmail = input.emailAddress.trim().toLowerCase();
+    const suppression = await this.findSuppressionForRecipient({
+      organizationId: input.organizationId,
+      clientId: input.clientId,
+      emailAddress: normalizedEmail,
+    });
+    if (suppression) {
+      return { allowed: false, reason: suppression.reason || suppression.type, suppression };
+    }
+
+    const channel =
+      (input.contactChannelId
+        ? await this.prisma.contactChannel.findUnique({ where: { id: input.contactChannelId } })
+        : input.contactId
+          ? await this.prisma.contactChannel.findFirst({
+              where: {
+                contactId: input.contactId,
+                type: ContactChannelType.EMAIL,
+                normalizedValue: normalizedEmail,
+              },
+              orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'desc' }],
+            })
+          : null) ?? null;
+
+    const consent = input.contactId
+      ? await this.prisma.contactConsent.findFirst({
+          where: {
+            contactId: input.contactId,
+            communication: input.communication,
+            OR: [{ contactChannelId: channel?.id ?? undefined }, { contactChannelId: null }],
+          },
+          orderBy: [{ contactChannelId: 'desc' }, { updatedAt: 'desc' }],
+        })
+      : null;
+
+    if (consent && ([ContactConsentStatus.BLOCKED, ContactConsentStatus.UNSUBSCRIBED] as ContactConsentStatus[]).includes(consent.status as ContactConsentStatus)) {
+      return { allowed: false, reason: consent.reason || consent.status, consent, channel };
+    }
+
+    if (input.communication === CommunicationType.NEWSLETTER) {
+      if (!consent || !([ContactConsentStatus.ALLOWED, ContactConsentStatus.SUBSCRIBED] as ContactConsentStatus[]).includes(consent.status as ContactConsentStatus)) {
+        return { allowed: false, reason: 'newsletter_not_subscribed', consent, channel };
+      }
+    }
+
+    return { allowed: true, consent, channel };
+  }
+
+  async connectClientMailbox(input: {
+    mailboxId: string;
+    clientId: string;
+    fromName?: string | null;
+    replyToAddress?: string | null;
+    metadataJson?: Record<string, unknown>;
+  }) {
+    return this.prisma.mailbox.update({
+      where: { id: input.mailboxId },
+      data: {
+        clientId: input.clientId,
+        isClientOwned: true,
+        connectionState: MailboxConnectionState.AUTHORIZED,
         status: MailboxStatus.ACTIVE,
-        ...(input.clientId ? { OR: [{ clientId: input.clientId }, { clientId: null }] } : {}),
+        connectedAt: new Date(),
+        disconnectedAt: null,
+        lastAuthAt: new Date(),
+        fromName: input.fromName ?? undefined,
+        replyToAddress: input.replyToAddress ?? undefined,
+        metadataJson: toPrismaJson(input.metadataJson),
+      },
+    });
+  }
+
+  async pickMailboxForClient(input: { organizationId: string; clientId?: string }): Promise<Mailbox | null> {
+    const whereBase: Prisma.MailboxWhereInput = {
+      organizationId: input.organizationId,
+      status: MailboxStatus.ACTIVE,
+      ...(input.clientId ? { OR: [{ clientId: input.clientId }, { clientId: null }] } : {}),
+    };
+
+    const preferred = await this.prisma.mailbox.findFirst({
+      where: {
+        ...whereBase,
+        clientId: input.clientId ?? undefined,
+        connectionState: MailboxConnectionState.AUTHORIZED,
+        isClientOwned: true,
       },
       orderBy: [{ healthStatus: 'asc' }, { updatedAt: 'desc' }],
     });
+    if (preferred) return preferred;
+
+    const fallback = await this.prisma.mailbox.findFirst({
+      where: whereBase,
+      orderBy: [{ isClientOwned: 'desc' }, { healthStatus: 'asc' }, { updatedAt: 'desc' }],
+    });
+    return fallback;
   }
 
   async assertCanSendNow(input: { organizationId: string; clientId?: string; campaignId?: string; mailbox: Mailbox }) {
@@ -492,6 +737,12 @@ export class DeliverabilityService {
     }
     if (policy?.activeToHour != null && hour > policy.activeToHour) {
       return { allowed: false, reason: 'Current time is after allowed send window' };
+    }
+    if (
+      input.mailbox.connectionState === MailboxConnectionState.REQUIRES_REAUTH ||
+      input.mailbox.connectionState === MailboxConnectionState.REVOKED
+    ) {
+      return { allowed: false, reason: `Mailbox ${input.mailbox.emailAddress} requires reconnection` };
     }
     if (
       input.mailbox.healthStatus === MailboxHealthStatus.DEGRADED ||

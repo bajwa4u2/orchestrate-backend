@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
+  JobStatus,
+  JobType,
   Prisma,
   RecordSource,
   WorkflowLane,
@@ -9,6 +11,7 @@ import {
 } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
+import { buildExecutionReadSurface } from '../common/utils/execution-read-surface';
 
 type DbClient = PrismaService | Prisma.TransactionClient;
 
@@ -144,6 +147,62 @@ export class WorkflowsService {
         ...(input.resultJson !== undefined ? { resultJson: toPrismaJson(input.resultJson) } : {}),
       },
     });
+  }
+
+  async getCampaignExecutionSurface(campaignId: string, db?: DbClient) {
+    const activeJobStatuses = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED];
+    const root = this.getDb(db);
+    const campaign = await root.campaign.findUnique({
+      where: { id: campaignId },
+      select: { clientId: true, metadataJson: true },
+    });
+
+    const [workflow, queuedMessages, queuedSends, activeImports, waitingOnMailbox, sent, failed, replies, meetings, suppressionBlocked, consentBlocked] = await Promise.all([
+      root.workflowRun.findFirst({ where: { campaignId }, orderBy: [{ createdAt: 'desc' }] }),
+      root.job.count({ where: { campaignId, type: JobType.MESSAGE_GENERATION, status: { in: activeJobStatuses } } }),
+      root.job.count({ where: { campaignId, type: { in: [JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] }, status: { in: activeJobStatuses } } }),
+      root.job.count({ where: { campaignId, type: JobType.LEAD_IMPORT, status: { in: activeJobStatuses } } }),
+      root.outreachMessage.count({ where: { campaignId, status: 'QUEUED', OR: [{ mailboxId: null }, { sentAt: null }] } }),
+      root.outreachMessage.count({ where: { campaignId, status: 'SENT' } }),
+      root.job.count({ where: { campaignId, status: JobStatus.FAILED } }),
+      root.reply.count({ where: { campaignId } }),
+      root.meeting.count({ where: { campaignId } }),
+      root.lead.count({ where: { campaignId, status: 'SUPPRESSED' } }),
+      campaign?.clientId
+        ? root.contactConsent.count({ where: { clientId: campaign.clientId, communication: 'OUTREACH', status: 'BLOCKED' } })
+        : Promise.resolve(0),
+    ]);
+
+    const metadata = campaign && campaign.metadataJson && typeof campaign.metadataJson === 'object' && !Array.isArray(campaign.metadataJson)
+      ? (campaign.metadataJson as Record<string, unknown>)
+      : {};
+    const activation = metadata.activation && typeof metadata.activation === 'object' && !Array.isArray(metadata.activation)
+      ? (metadata.activation as Record<string, unknown>)
+      : {};
+    const bootstrapStatus = typeof activation.bootstrapStatus === 'string' ? activation.bootstrapStatus : null;
+
+    const execution = buildExecutionReadSurface({
+      waitingOnImport: activeImports,
+      waitingOnMessageGeneration: queuedMessages,
+      queuedForSend: queuedSends,
+      waitingOnMailbox,
+      blockedAtConsent: consentBlocked,
+      blockedAtSuppression: suppressionBlocked,
+      sent,
+      failed,
+      replies,
+      meetings,
+      bootstrapStatus,
+    });
+
+    return {
+      workflowRunId: workflow?.id ?? null,
+      workflowType: workflow?.type ?? null,
+      startedAt: workflow?.startedAt ?? null,
+      completedAt: workflow?.completedAt ?? null,
+      failedAt: workflow?.failedAt ?? null,
+      ...execution,
+    };
   }
 
   private getDb(db?: DbClient): DbClient {

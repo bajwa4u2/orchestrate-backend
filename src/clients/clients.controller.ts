@@ -58,6 +58,12 @@ export class ClientsController {
     return this.clientsService.getProfile(headers);
   }
 
+  @Get('me/campaign-overview')
+  async getCampaignOverview(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
+    return this.clientsService.getCampaignProfile(headers);
+  }
+
   @Post('me/profile')
   async saveProfile(
     @Headers() headers: Record<string, unknown>,
@@ -72,5 +78,4 @@ export class ClientsController {
     await this.accessContextService.requireClient(headers);
     return this.clientsService.acceptRepresentationAuth(headers);
   }
-
 }

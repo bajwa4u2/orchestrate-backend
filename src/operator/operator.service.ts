@@ -20,6 +20,7 @@ import { ClientsService } from '../clients/clients.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { EmailsService } from '../emails/emails.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
+import { buildExecutionReadSurface } from '../common/utils/execution-read-surface';
 import { AssignInquiryDto } from './dto/assign-inquiry.dto';
 import { CreateInquiryNoteDto } from './dto/create-inquiry-note.dto';
 import { CreateInquiryReplyDto } from './dto/create-inquiry-reply.dto';
@@ -42,7 +43,75 @@ export class OperatorService {
 
   async commandOverview(organizationId: string) {
     const scopeOrganizationId = await this.resolveOperatorScope(organizationId);
-    return this.controlService.overview(scopeOrganizationId);
+    const [overview, deliverability, imports, consent, activeJobs, messageStatuses, replies, meetings, suppressed] = await Promise.all([
+      this.controlService.overview(scopeOrganizationId),
+      this.deliverabilityService.overview(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
+      this.prisma.importBatch.aggregate({
+        where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
+        _count: { _all: true },
+        _sum: { totalRows: true, processedRows: true, createdRows: true, duplicateRows: true, invalidRows: true, failedRows: true },
+      }),
+      this.prisma.contactConsent.groupBy({
+        by: ['communication', 'status'],
+        where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
+        _count: { _all: true },
+      }),
+      this.prisma.job.groupBy({
+        by: ['type'],
+        where: {
+          ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
+          status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] },
+        },
+        _count: { _all: true },
+      }),
+      this.prisma.outreachMessage.groupBy({
+        by: ['status'],
+        where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
+        _count: { _all: true },
+      }),
+      this.prisma.reply.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }),
+      this.prisma.meeting.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }),
+      this.prisma.lead.count({ where: { ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), status: 'SUPPRESSED' } }),
+    ]);
+
+    const mailboxes = Array.isArray((deliverability as any)?.mailboxes) ? (deliverability as any).mailboxes : [];
+    const connected = mailboxes.filter((item: any) => item.connectionState === 'AUTHORIZED' || item.connectionState === 'BOOTSTRAPPED').length;
+    const needsAttention = mailboxes.filter((item: any) => item.connectionState === 'REQUIRES_REAUTH' || item.connectionState === 'REVOKED' || item.healthStatus === MailboxHealthStatus.CRITICAL).length;
+    const findJobCount = (type: string) => activeJobs.find((item: any) => item.type === type)?._count?._all ?? 0;
+    const findMessageCount = (status: string) => messageStatuses.find((item: any) => item.status === status)?._count?._all ?? 0;
+    const outreachBlocked = consent.find((item: any) => item.communication === 'OUTREACH' && item.status === 'BLOCKED')?._count?._all ?? 0;
+
+    return {
+      ...overview,
+      imports: {
+        batches: imports._count._all,
+        rows: imports._sum.totalRows ?? 0,
+        processed: imports._sum.processedRows ?? 0,
+        created: imports._sum.createdRows ?? 0,
+        duplicates: imports._sum.duplicateRows ?? 0,
+        invalid: imports._sum.invalidRows ?? 0,
+        failed: imports._sum.failedRows ?? 0,
+      },
+      permissions: consent.map((item) => ({ communication: item.communication, status: item.status, total: item._count._all })),
+      mailboxes: {
+        total: mailboxes.length,
+        connected,
+        needsAttention,
+      },
+      execution: buildExecutionReadSurface({
+        waitingOnImport: findJobCount('LEAD_IMPORT'),
+        waitingOnMessageGeneration: findJobCount('MESSAGE_GENERATION'),
+        queuedForSend: findJobCount('FIRST_SEND') + findJobCount('FOLLOWUP_SEND'),
+        waitingOnMailbox: needsAttention,
+        blockedAtConsent: outreachBlocked,
+        blockedAtSuppression: suppressed,
+        sent: findMessageCount('SENT'),
+        failed: findMessageCount('FAILED'),
+        replies,
+        meetings,
+        mailboxReady: needsAttention === 0,
+      }),
+    };
   }
 
   async commandWorkspace(organizationId: string) {
@@ -182,6 +251,18 @@ export class OperatorService {
       })
       .slice(0, 10);
 
+    const executionSurface = buildExecutionReadSurface({
+      waitingOnImport: failedJobItems.filter((job) => job.type === 'LEAD_IMPORT').length,
+      waitingOnMessageGeneration: emailDispatches.filter((message) => message.status === 'QUEUED').length,
+      queuedForSend: emailDispatches.filter((message) => message.status === 'QUEUED' || message.status === 'SCHEDULED').length,
+      waitingOnMailbox: degradedMailboxes,
+      sent: emailDispatches.filter((message) => message.status === 'SENT').length,
+      failed: failedJobItems.length + emailDispatches.filter((message) => message.status === 'FAILED').length,
+      replies: replyItems.length,
+      meetings: replyItems.filter((item) => Boolean(item.meetingStatus)).length,
+      mailboxReady: degradedMailboxes === 0,
+    });
+
     return {
       title: 'Operator command',
       subtitle:
@@ -203,6 +284,7 @@ export class OperatorService {
         inquiries: conversationItems as Array<Record<string, unknown>>,
       }),
       execution: {
+        ...executionSurface,
         queuedJobs: overview?.execution?.queuedJobs ?? 0,
         failedJobs: failedJobItems.map((job) => ({
           id: job.id,

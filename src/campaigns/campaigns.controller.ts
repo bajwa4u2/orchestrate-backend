@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Headers, Post, Query, Param } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  Post,
+  Query,
+  BadRequestException,
+} from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { CampaignsService } from './campaigns.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
@@ -30,15 +39,34 @@ export class CampaignsController {
     });
   }
 
+  @Get(':id/operational-view')
+  async operationalView(
+    @Headers() headers: Record<string, unknown>,
+    @Param('id') campaignId: string,
+    @Query('clientId') clientId?: string,
+  ) {
+    const context = await this.accessContextService.requireOperator(headers);
+    if (!clientId?.trim()) {
+      throw new BadRequestException('clientId is required');
+    }
+
+    return this.campaignsService.getCampaignOperationalView(
+      campaignId,
+      context.organizationId!,
+      clientId.trim(),
+    );
+  }
+
   @Post(':id/activate')
   async activate(
     @Headers() headers: Record<string, unknown>,
     @Param('id') campaignId: string,
   ) {
-    await this.accessContextService.requireOperator(headers);
+    const context = await this.accessContextService.requireOperator(headers);
 
     return this.campaignsService.activateCampaign({
       campaignId,
+      organizationId: context.organizationId!,
     });
   }
 }

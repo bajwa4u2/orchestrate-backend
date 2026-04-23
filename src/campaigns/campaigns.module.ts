@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AccessContextModule } from '../access-context/access-context.module';
 import { DatabaseModule } from '../database/database.module';
 import { DeliverabilityModule } from '../deliverability/deliverability.module';
@@ -12,8 +12,8 @@ import { CampaignsService } from './campaigns.service';
     DatabaseModule,
     WorkflowsModule,
     AccessContextModule,
-    WorkersModule,
-    DeliverabilityModule,
+    forwardRef(() => WorkersModule),
+    forwardRef(() => DeliverabilityModule),
   ],
   controllers: [CampaignsController],
   providers: [CampaignsService],

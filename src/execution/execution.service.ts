@@ -1,6 +1,9 @@
 import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import {
   ActivityVisibility,
+  CommunicationType,
+  ContactConsentStatus,
+  ContactEmailStatus,
   JobStatus,
   JobType,
   LeadQualificationState,
@@ -1294,6 +1297,7 @@ export class ExecutionService implements OnModuleInit {
     };
   }
 
+
   private async bootstrapLeadsFromClientAssets(input: {
     organizationId: string;
     clientId: string;
@@ -1304,10 +1308,18 @@ export class ExecutionService implements OnModuleInit {
       where: {
         organizationId: input.organizationId,
         clientId: input.clientId,
-        email: { not: null },
+        OR: [
+          { email: { not: null } },
+          { contactChannels: { some: { type: 'EMAIL', status: 'ACTIVE' } } },
+        ],
       },
       include: {
         account: true,
+        contactChannels: {
+          where: { type: 'EMAIL' },
+          orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'desc' }],
+          take: 1,
+        },
         leads: {
           where: { campaignId: input.campaignId },
           select: { id: true },
@@ -1321,8 +1333,63 @@ export class ExecutionService implements OnModuleInit {
 
     for (const contact of contacts) {
       if (contact.leads.length) continue;
-      const lead = await this.prisma.lead.create({
-        data: {
+
+      const primaryEmail =
+        Array.isArray((contact as any).contactChannels) && (contact as any).contactChannels[0]
+          ? String((contact as any).contactChannels[0].value || '').trim().toLowerCase()
+          : contact.email?.trim().toLowerCase() ?? null;
+
+      if (!primaryEmail) continue;
+
+      const channel = await this.deliverabilityService.ensurePrimaryEmailChannel({
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        contactId: contact.id,
+        emailAddress: primaryEmail,
+        isVerified: contact.emailStatus === ContactEmailStatus.VERIFIED,
+        verificationSource: 'existing_contact_bootstrap',
+        metadataJson: {
+          source: 'subscription-activation-existing-contact',
+        },
+      });
+
+      await this.deliverabilityService.ensureCommunicationConsent({
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        contactId: contact.id,
+        contactChannelId: channel.id,
+        communication: CommunicationType.OUTREACH,
+        status: ContactConsentStatus.ALLOWED,
+        source: RecordSource.IMPORTED,
+        sourceLabel: 'execution.bootstrapLeadsFromClientAssets',
+        reason: 'existing contact promoted into campaign execution',
+        metadataJson: {
+          campaignId: input.campaignId,
+          workflowRunId: input.workflowRunId ?? null,
+        },
+      });
+
+      const lead = await this.prisma.lead.upsert({
+        where: {
+          campaignId_contactId: {
+            campaignId: input.campaignId,
+            contactId: contact.id,
+          },
+        },
+        update: {
+          accountId: contact.accountId ?? undefined,
+          workflowRunId: input.workflowRunId,
+          status: LeadStatus.NEW,
+          source: RecordSource.IMPORTED,
+          qualificationState: LeadQualificationState.DISCOVERED,
+          priority: 50,
+          metadataJson: toPrismaJson({
+            ...(this.asObject((contact as any).metadataJson)),
+            source: 'subscription-activation-existing-contact',
+            primaryContactChannelId: channel.id,
+          }),
+        },
+        create: {
           organizationId: input.organizationId,
           clientId: input.clientId,
           campaignId: input.campaignId,
@@ -1335,6 +1402,7 @@ export class ExecutionService implements OnModuleInit {
           priority: 50,
           metadataJson: toPrismaJson({
             source: 'subscription-activation-existing-contact',
+            primaryContactChannelId: channel.id,
           }),
         },
       });
@@ -1361,34 +1429,65 @@ export class ExecutionService implements OnModuleInit {
     );
 
     for (const prospect of seedProspects.slice(0, 25)) {
+      const normalizedEmail = (prospect.email || '').trim().toLowerCase();
+      if (!normalizedEmail) continue;
+
       const existing = await this.prisma.contact.findFirst({
         where: {
           organizationId: input.organizationId,
           clientId: input.clientId,
-          email: prospect.email,
+          OR: [
+            { email: normalizedEmail },
+            {
+              contactChannels: {
+                some: {
+                  type: 'EMAIL',
+                  normalizedValue: normalizedEmail,
+                },
+              },
+            },
+          ],
         },
-        select: { id: true, accountId: true },
+        select: { id: true, accountId: true, emailStatus: true },
       });
 
       let accountId = existing?.accountId ?? null;
       let contactId = existing?.id ?? null;
+      let emailStatus = existing?.emailStatus ?? ContactEmailStatus.UNVERIFIED;
 
       if (!accountId && prospect.companyName) {
-        const account = await this.prisma.account.create({
-          data: {
-            organizationId: input.organizationId,
-            clientId: input.clientId,
-            companyName: prospect.companyName,
-            domain: prospect.domain,
-            industry: prospect.industry ?? client?.industry ?? undefined,
-            city: prospect.city,
-            region: prospect.region,
-            countryCode: prospect.countryCode,
-            websiteUrl: prospect.websiteUrl,
-            linkedinUrl: prospect.linkedinUrl,
-          },
-        });
-        accountId = account.id;
+        const existingAccount = prospect.companyName
+          ? await this.prisma.account.findFirst({
+              where: {
+                organizationId: input.organizationId,
+                clientId: input.clientId,
+                OR: [
+                  prospect.domain ? { domain: prospect.domain } : undefined,
+                  { companyName: prospect.companyName },
+                ].filter(Boolean) as Prisma.AccountWhereInput[],
+              },
+            })
+          : null;
+
+        if (existingAccount) {
+          accountId = existingAccount.id;
+        } else {
+          const account = await this.prisma.account.create({
+            data: {
+              organizationId: input.organizationId,
+              clientId: input.clientId,
+              companyName: prospect.companyName,
+              domain: prospect.domain,
+              industry: prospect.industry ?? client?.industry ?? undefined,
+              city: prospect.city,
+              region: prospect.region,
+              countryCode: prospect.countryCode,
+              websiteUrl: prospect.websiteUrl,
+              linkedinUrl: prospect.linkedinUrl,
+            },
+          });
+          accountId = account.id;
+        }
       }
 
       if (!contactId) {
@@ -1401,20 +1500,94 @@ export class ExecutionService implements OnModuleInit {
             firstName: prospect.firstName,
             lastName: prospect.lastName,
             title: prospect.title,
-            email: prospect.email,
+            email: normalizedEmail,
+            emailStatus,
             phone: prospect.phone,
             linkedinUrl: prospect.linkedinUrl,
             timezone: prospect.timezone,
             city: prospect.city,
             region: prospect.region,
             countryCode: prospect.countryCode,
+            enrichmentJson: toPrismaJson({
+              source: 'seed_prospect',
+              origin: prospect.origin ?? 'client_metadata',
+            }),
           },
         });
         contactId = contact.id;
+      } else {
+        await this.prisma.contact.update({
+          where: { id: contactId },
+          data: {
+            accountId: accountId ?? undefined,
+            fullName: prospect.fullName || undefined,
+            firstName: prospect.firstName || undefined,
+            lastName: prospect.lastName || undefined,
+            title: prospect.title || undefined,
+            email: normalizedEmail,
+            phone: prospect.phone || undefined,
+            linkedinUrl: prospect.linkedinUrl || undefined,
+            timezone: prospect.timezone || undefined,
+            city: prospect.city || undefined,
+            region: prospect.region || undefined,
+            countryCode: prospect.countryCode || undefined,
+          },
+        });
       }
 
-      const lead = await this.prisma.lead.create({
-        data: {
+      const channel = await this.deliverabilityService.ensurePrimaryEmailChannel({
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        contactId: contactId,
+        emailAddress: normalizedEmail,
+        isVerified: emailStatus === ContactEmailStatus.VERIFIED,
+        verificationSource: 'seed_prospect',
+        metadataJson: {
+          source: 'subscription-activation-seed-prospect',
+          origin: prospect.origin ?? 'client_metadata',
+        },
+      });
+
+      await this.deliverabilityService.ensureCommunicationConsent({
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        contactId,
+        contactChannelId: channel.id,
+        communication: CommunicationType.OUTREACH,
+        status: ContactConsentStatus.ALLOWED,
+        source: RecordSource.AI_GENERATED,
+        sourceLabel: 'execution.bootstrapLeadsFromClientAssets',
+        reason: 'seed prospect staged for outreach execution',
+        metadataJson: {
+          campaignId: input.campaignId,
+          workflowRunId: input.workflowRunId ?? null,
+          origin: prospect.origin ?? 'client_metadata',
+        },
+      });
+
+      const lead = await this.prisma.lead.upsert({
+        where: {
+          campaignId_contactId: {
+            campaignId: input.campaignId,
+            contactId,
+          },
+        },
+        update: {
+          accountId: accountId ?? undefined,
+          contactId: contactId ?? undefined,
+          workflowRunId: input.workflowRunId,
+          status: LeadStatus.NEW,
+          source: RecordSource.AI_GENERATED,
+          qualificationState: LeadQualificationState.DISCOVERED,
+          priority: prospect.priority ?? 60,
+          score: prospect.score == null ? undefined : new Prisma.Decimal(prospect.score),
+          metadataJson: toPrismaJson({
+            source: 'subscription-activation-seed-prospect',
+            origin: prospect.origin ?? 'client_metadata',
+            primaryContactChannelId: channel.id,
+          }),
+        },
+        create: {
           organizationId: input.organizationId,
           clientId: input.clientId,
           campaignId: input.campaignId,
@@ -1429,6 +1602,7 @@ export class ExecutionService implements OnModuleInit {
           metadataJson: toPrismaJson({
             source: 'subscription-activation-seed-prospect',
             origin: prospect.origin ?? 'client_metadata',
+            primaryContactChannelId: channel.id,
           }),
         },
       });

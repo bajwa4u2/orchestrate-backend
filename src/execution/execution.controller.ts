@@ -1,4 +1,5 @@
 import { Body, Controller, Headers, Param, Post } from '@nestjs/common';
+import { JobType } from '@prisma/client';
 import { AccessContextService } from '../access-context/access-context.service';
 import { DispatchDueJobsDto } from './dto/dispatch-due-jobs.dto';
 import { QueueLeadSendDto } from './dto/queue-lead-send.dto';
@@ -51,5 +52,23 @@ export class ExecutionController {
   async runJob(@Headers() headers: Record<string, unknown>, @Param('jobId') jobId: string, @Body() dto: RunJobDto) {
     await this.accessContextService.requireOperator(headers);
     return this.executionService.runJob(jobId, dto);
+  }
+
+  @Post('leads/:leadId/run-first-send-now')
+  async runImmediateFirstSend(
+    @Headers() headers: Record<string, unknown>,
+    @Param('leadId') leadId: string,
+  ) {
+    await this.accessContextService.requireOperator(headers);
+    return this.executionService.runImmediateSendForLead(leadId, { jobType: JobType.FIRST_SEND });
+  }
+
+  @Post('leads/:leadId/run-follow-up-now')
+  async runImmediateFollowUp(
+    @Headers() headers: Record<string, unknown>,
+    @Param('leadId') leadId: string,
+  ) {
+    await this.accessContextService.requireOperator(headers);
+    return this.executionService.runImmediateSendForLead(leadId, { jobType: JobType.FOLLOWUP_SEND });
   }
 }

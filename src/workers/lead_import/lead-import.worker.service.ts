@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  CommunicationType,
+  ContactConsentStatus,
   ContactEmailStatus,
   Job,
   JobStatus,
@@ -8,6 +10,7 @@ import {
   LeadStatus,
   QualificationStatus,
   RecordSource,
+  Prisma,
 } from '@prisma/client';
 import { toPrismaJson } from '../../common/utils/prisma-json';
 import { policyService } from '../../common/policy/data-policy';
@@ -20,6 +23,7 @@ import { ReachabilityBuilderService } from '../../reachability/reachability-buil
 import { SignalDetectionService } from '../../signals/signal-detection.service';
 import { SourcePlannerService } from '../../sources/source-planner.service';
 import { StrategyService } from '../../strategy/strategy.service';
+import { DeliverabilityService } from '../../deliverability/deliverability.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
 @Injectable()
@@ -37,6 +41,7 @@ export class LeadImportWorkerService implements JobWorker {
     private readonly adaptationService: AdaptationService,
     private readonly leadSourcesService: LeadSourcesService,
     private readonly providerFallbackService: ProviderFallbackService,
+    private readonly deliverabilityService: DeliverabilityService,
   ) {}
 
   async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
@@ -250,38 +255,49 @@ export class LeadImportWorkerService implements JobWorker {
         },
       });
 
-      const contact = await this.prisma.contact.upsert({
-        where: { id: entity.id },
-        update: {
-          accountId: account.id,
-          fullName: entity.personName ?? entity.companyName,
-          title: entity.inferredRole ?? null,
-          email,
-          emailStatus: ContactEmailStatus.UNVERIFIED,
-          city: this.firstToken(entity.geography),
-          qualificationStatus: QualificationStatus.ACCEPTED,
-          score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({
-            reachabilityRecordId: reachability.record.id,
-            executionPolicy,
-          }),
+      const contact = await this.resolveOrCreateContact({
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        accountId: account.id,
+        fullName: entity.personName ?? entity.companyName,
+        title: entity.inferredRole ?? null,
+        emailAddress: email,
+        city: this.firstToken(entity.geography),
+        qualificationStatus: QualificationStatus.ACCEPTED,
+        score: evaluation.qualification.finalScore,
+        enrichmentJson: {
+          reachabilityRecordId: reachability.record.id,
+          executionPolicy,
+          discoveredEntityId: entity.id,
         },
-        create: {
-          id: entity.id,
-          organizationId: campaign.organizationId,
-          clientId: campaign.clientId,
-          accountId: account.id,
-          fullName: entity.personName ?? entity.companyName,
-          title: entity.inferredRole ?? null,
-          email,
-          emailStatus: ContactEmailStatus.UNVERIFIED,
-          city: this.firstToken(entity.geography),
-          qualificationStatus: QualificationStatus.ACCEPTED,
-          score: evaluation.qualification.finalScore,
-          enrichmentJson: toPrismaJson({
-            reachabilityRecordId: reachability.record.id,
-            executionPolicy,
-          }),
+      });
+
+      const primaryEmailChannel = await this.deliverabilityService.ensurePrimaryEmailChannel({
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        contactId: contact.id,
+        emailAddress: email,
+        isVerified: contact.emailStatus === ContactEmailStatus.VERIFIED,
+        verificationSource: 'reachability_builder',
+        metadataJson: {
+          discoveredEntityId: entity.id,
+          reachabilityRecordId: reachability.record.id,
+        },
+      });
+
+      await this.deliverabilityService.ensureCommunicationConsent({
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        contactId: contact.id,
+        contactChannelId: primaryEmailChannel.id,
+        communication: CommunicationType.OUTREACH,
+        status: ContactConsentStatus.ALLOWED,
+        source: RecordSource.SYSTEM_GENERATED,
+        sourceLabel: 'lead_import_worker',
+        reason: 'system-qualified outbound outreach contact',
+        metadataJson: {
+          discoveredEntityId: entity.id,
+          reachabilityRecordId: reachability.record.id,
         },
       });
 
@@ -302,6 +318,7 @@ export class LeadImportWorkerService implements JobWorker {
             reachabilityRecordId: reachability.record.id,
             qualificationDecisionId: evaluation.qualification.id,
             signalCount: signals.items.length,
+            primaryContactChannelId: primaryEmailChannel.id,
             executionPolicy,
           }),
         },
@@ -323,6 +340,7 @@ export class LeadImportWorkerService implements JobWorker {
             reachabilityRecordId: reachability.record.id,
             qualificationDecisionId: evaluation.qualification.id,
             signalCount: signals.items.length,
+            primaryContactChannelId: primaryEmailChannel.id,
             executionPolicy,
           }),
         },
@@ -375,7 +393,14 @@ export class LeadImportWorkerService implements JobWorker {
       where: {
         campaignId: campaign.id,
         status: { in: [LeadStatus.NEW, LeadStatus.ENRICHED, LeadStatus.QUALIFIED] },
-        contact: { is: { email: { not: null } } },
+        contact: {
+          is: {
+            OR: [
+              { contactChannels: { some: { type: 'EMAIL', status: 'ACTIVE' } } },
+              { email: { not: null } },
+            ],
+          },
+        },
       },
     });
 
@@ -468,6 +493,102 @@ export class LeadImportWorkerService implements JobWorker {
         }),
       },
     });
+  }
+
+
+  private async resolveOrCreateContact(input: {
+    organizationId: string;
+    clientId: string;
+    accountId?: string | null;
+    fullName: string;
+    title?: string | null;
+    emailAddress: string;
+    city?: string | null;
+    qualificationStatus: QualificationStatus;
+    score?: Prisma.Decimal | number | null;
+    enrichmentJson?: Record<string, unknown>;
+  }) {
+    const normalizedEmail = input.emailAddress.trim().toLowerCase();
+    const existing = await this.prisma.contact.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        OR: [
+          { email: normalizedEmail },
+          {
+            contactChannels: {
+              some: {
+                type: 'EMAIL',
+                normalizedValue: normalizedEmail,
+              },
+            },
+          },
+        ],
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+    });
+
+    const decimalScore =
+      typeof input.score === 'number'
+        ? new Prisma.Decimal(input.score)
+        : input.score instanceof Prisma.Decimal
+          ? input.score
+          : input.score == null
+            ? undefined
+            : new Prisma.Decimal(input.score as any);
+
+    if (existing) {
+      return this.prisma.contact.update({
+        where: { id: existing.id },
+        data: {
+          accountId: input.accountId ?? existing.accountId ?? undefined,
+          fullName: existing.fullName || input.fullName,
+          title: input.title ?? existing.title ?? undefined,
+          email: existing.email ?? normalizedEmail,
+          emailStatus: existing.emailStatus ?? ContactEmailStatus.UNVERIFIED,
+          city: input.city ?? existing.city ?? undefined,
+          qualificationStatus:
+            existing.qualificationStatus === QualificationStatus.ACCEPTED
+              ? existing.qualificationStatus
+              : input.qualificationStatus,
+          score: decimalScore ?? existing.score ?? undefined,
+          enrichmentJson: toPrismaJson({
+            ...(this.asObject(existing.enrichmentJson)),
+            ...(input.enrichmentJson ?? {}),
+          }),
+        },
+      });
+    }
+
+    const { firstName, lastName } = this.splitName(input.fullName);
+
+    return this.prisma.contact.create({
+      data: {
+        organizationId: input.organizationId,
+        clientId: input.clientId,
+        accountId: input.accountId ?? undefined,
+        firstName,
+        lastName,
+        fullName: input.fullName,
+        title: input.title ?? undefined,
+        email: normalizedEmail,
+        emailStatus: ContactEmailStatus.UNVERIFIED,
+        city: input.city ?? undefined,
+        qualificationStatus: input.qualificationStatus,
+        score: decimalScore,
+        enrichmentJson: toPrismaJson(input.enrichmentJson),
+      },
+    });
+  }
+
+  private splitName(fullName: string) {
+    const normalized = fullName.trim().replace(/\s+/g, ' ');
+    if (!normalized) return { firstName: null as string | null, lastName: null as string | null };
+    const parts = normalized.split(' ');
+    return {
+      firstName: parts[0] ?? null,
+      lastName: parts.length > 1 ? parts.slice(1).join(' ') : null,
+    };
   }
 
   private asObject(value: unknown): Record<string, unknown> {

@@ -19,6 +19,7 @@ export class RepliesController {
       subjectLine?: string;
       bodyText?: string;
       externalMessageId?: string;
+      providerThreadId?: string;
       threadKey?: string;
       receivedAt?: string;
     },
@@ -45,7 +46,7 @@ export class RepliesController {
       const clientContext = await this.accessContextService.requireClient(headers);
       return this.repliesService.listForClient(clientContext.clientId!);
     } catch {
-      const operatorContext = await this.accessContextService.requireOperator(headers);
+      await this.accessContextService.requireOperator(headers);
       if (!clientId) {
         throw new BadRequestException('clientId is required for operator reply listing');
       }

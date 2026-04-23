@@ -9,6 +9,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
+import { WorkflowsService } from '../workflows/workflows.service';
 import { AssignInquiryDto } from './dto/assign-inquiry.dto';
 import { CreateInquiryNoteDto } from './dto/create-inquiry-note.dto';
 import { CreateInquiryReplyDto } from './dto/create-inquiry-reply.dto';
@@ -20,6 +21,7 @@ export class OperatorController {
   constructor(
     private readonly operatorService: OperatorService,
     private readonly accessContextService: AccessContextService,
+    private readonly workflowsService: WorkflowsService,
   ) {}
 
   @Get('command/overview')
@@ -32,6 +34,15 @@ export class OperatorController {
   async commandWorkspace(@Headers() headers: Record<string, unknown>) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.operatorService.commandWorkspace(context.organizationId!);
+  }
+
+  @Get('command/campaigns/:campaignId/execution-surface')
+  async campaignExecutionSurface(
+    @Headers() headers: Record<string, unknown>,
+    @Param('campaignId') campaignId: string,
+  ) {
+    await this.accessContextService.requireOperator(headers);
+    return this.workflowsService.getCampaignExecutionSurface(campaignId);
   }
 
   @Get('revenue/overview')
@@ -51,21 +62,15 @@ export class OperatorController {
     @Headers() headers: Record<string, unknown>,
     @Query('limit') limit?: string,
     @Query('status') status?: string,
+    @Query('channel') channel?: string,
     @Query('q') q?: string,
   ) {
     const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.listPublicInquiries(context.organizationId!, {
-      limit,
-      status,
-      q,
-    });
+    return this.operatorService.listPublicInquiries(context.organizationId!, { limit, status, q });
   }
 
   @Get('inquiries/:id')
-  async inquiryDetail(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') inquiryId: string,
-  ) {
+  async inquiryDetail(@Headers() headers: Record<string, unknown>, @Param('id') inquiryId: string) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.operatorService.getInquiryDetail(context.organizationId!, inquiryId);
   }
@@ -77,28 +82,7 @@ export class OperatorController {
     @Body() dto: UpdateInquiryStatusDto,
   ) {
     const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.updateInquiryStatus(
-      context.organizationId!,
-      inquiryId,
-      dto,
-      context.userId!,
-    );
-  }
-
-  // Temporary compatibility path for the current frontend call shape.
-  @Post('inquiries/:id/status')
-  async updateInquiryStatusCompat(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') inquiryId: string,
-    @Body() dto: UpdateInquiryStatusDto,
-  ) {
-    const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.updateInquiryStatus(
-      context.organizationId!,
-      inquiryId,
-      dto,
-      context.userId!,
-    );
+    return this.operatorService.updateInquiryStatus(context.organizationId!, inquiryId, dto, context.userId!);
   }
 
   @Patch('inquiries/:id/assign')
@@ -108,43 +92,17 @@ export class OperatorController {
     @Body() dto: AssignInquiryDto,
   ) {
     const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.assignInquiry(
-      context.organizationId!,
-      inquiryId,
-      dto,
-      context.userId!,
-    );
-  }
-
-  @Post('inquiries/:id/assign')
-  async assignInquiryCompat(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') inquiryId: string,
-    @Body() dto: AssignInquiryDto,
-  ) {
-    const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.assignInquiry(
-      context.organizationId!,
-      inquiryId,
-      dto,
-      context.userId!,
-    );
+    return this.operatorService.assignInquiry(context.organizationId!, inquiryId, dto, context.userId!);
   }
 
   @Get('inquiries/:id/thread')
-  async inquiryThread(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') inquiryId: string,
-  ) {
+  async inquiryThread(@Headers() headers: Record<string, unknown>, @Param('id') inquiryId: string) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.operatorService.getInquiryThread(context.organizationId!, inquiryId);
   }
 
   @Get('inquiries/:id/notes')
-  async inquiryNotes(
-    @Headers() headers: Record<string, unknown>,
-    @Param('id') inquiryId: string,
-  ) {
+  async inquiryNotes(@Headers() headers: Record<string, unknown>, @Param('id') inquiryId: string) {
     const context = await this.accessContextService.requireOperator(headers);
     return this.operatorService.listInquiryNotes(context.organizationId!, inquiryId);
   }
@@ -156,12 +114,7 @@ export class OperatorController {
     @Body() dto: CreateInquiryNoteDto,
   ) {
     const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.createInquiryNote(
-      context.organizationId!,
-      inquiryId,
-      dto,
-      context.userId!,
-    );
+    return this.operatorService.createInquiryNote(context.organizationId!, inquiryId, dto, context.userId!);
   }
 
   @Post('inquiries/:id/reply')
@@ -171,11 +124,6 @@ export class OperatorController {
     @Body() dto: CreateInquiryReplyDto,
   ) {
     const context = await this.accessContextService.requireOperator(headers);
-    return this.operatorService.replyToInquiry(
-      context.organizationId!,
-      inquiryId,
-      dto,
-      context.userId!,
-    );
+    return this.operatorService.replyToInquiry(context.organizationId!, inquiryId, dto, context.userId!);
   }
 }

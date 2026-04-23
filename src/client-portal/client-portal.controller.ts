@@ -21,6 +21,19 @@ export class ClientPortalController {
     return this.clientPortalService.overview(context.organizationId!, context.clientId!);
   }
 
+  @Get('campaign/overview')
+  async campaignOverview(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    const overview = await this.clientPortalService.overview(context.organizationId!, context.clientId!);
+    return {
+      campaign: overview?.client?.campaigns?.[0] ?? null,
+      execution: overview?.execution ?? null,
+      mailbox: overview?.mailbox ?? null,
+      imports: overview?.imports ?? null,
+      permissions: overview?.permissions ?? null,
+    };
+  }
+
   @Get('leads')
   async leads(@Headers() headers: Record<string, unknown>) {
     const context = await this.accessContextService.requireClient(headers);

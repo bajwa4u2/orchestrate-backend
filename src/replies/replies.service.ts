@@ -7,9 +7,12 @@ import {
 } from '@nestjs/common';
 import {
   ActivityVisibility,
+  CommunicationType,
+  ContactConsentStatus,
   JobStatus,
   JobType,
   RecordSource,
+  SuppressionType,
   WorkflowLane,
   WorkflowStatus,
   WorkflowTrigger,
@@ -170,6 +173,10 @@ export class RepliesService {
     const classification = await this.executionService.runReplyClassification(replyId);
     let handoff: Awaited<ReturnType<ExecutionService['runMeetingHandoff']>> | null = null;
 
+    if (classification.intent === 'UNSUBSCRIBE') {
+      await this.applyUnsubscribeForReply(replyId);
+    }
+
     if (!classification.requiresHumanReview && classification.handoffJobId) {
       handoff = await this.executionService.runMeetingHandoff(replyId);
     }
@@ -192,6 +199,121 @@ export class RepliesService {
       },
       orderBy: [{ receivedAt: 'desc' }, { createdAt: 'desc' }],
     });
+  }
+
+  private async applyUnsubscribeForReply(replyId: string) {
+    const reply = await this.prisma.reply.findUnique({
+      where: { id: replyId },
+      include: {
+        lead: {
+          include: {
+            contact: { include: { contactChannels: { where: { type: 'EMAIL' }, orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }] } } },
+          },
+        },
+      },
+    });
+
+    if (!reply?.lead?.contact) return;
+
+    const contact = reply.lead.contact as any;
+    const channels = Array.isArray((contact as any).contactChannels) ? (contact as any).contactChannels : [];
+    const emailChannel = channels.find((item: any) => item.value?.toLowerCase() === reply.fromEmail?.toLowerCase()) ?? channels[0] ?? null;
+
+    await this.prisma.contactConsent.upsert({
+      where: {
+        contactId_contactChannelId_communication: {
+          contactId: contact.id,
+          contactChannelId: emailChannel?.id ?? null,
+          communication: CommunicationType.NEWSLETTER,
+        },
+      },
+      update: {
+        status: ContactConsentStatus.UNSUBSCRIBED,
+        revokedAt: new Date(),
+        reason: 'reply_unsubscribe',
+        metadataJson: toPrismaJson({ replyId }),
+      },
+      create: {
+        organizationId: reply.organizationId,
+        clientId: reply.clientId,
+        contactId: contact.id,
+        contactChannelId: emailChannel?.id ?? undefined,
+        communication: CommunicationType.NEWSLETTER,
+        status: ContactConsentStatus.UNSUBSCRIBED,
+        source: RecordSource.SYSTEM_GENERATED,
+        sourceLabel: 'reply_unsubscribe',
+        reason: 'reply_unsubscribe',
+        revokedAt: new Date(),
+        metadataJson: toPrismaJson({ replyId }),
+      },
+    });
+
+    if (emailChannel) {
+      await this.prisma.contactConsent.upsert({
+        where: {
+          contactId_contactChannelId_communication: {
+            contactId: contact.id,
+            contactChannelId: emailChannel.id,
+            communication: CommunicationType.OUTREACH,
+          },
+        },
+        update: {
+          status: ContactConsentStatus.BLOCKED,
+          revokedAt: new Date(),
+          reason: 'reply_unsubscribe',
+          metadataJson: toPrismaJson({ replyId }),
+        },
+        create: {
+          organizationId: reply.organizationId,
+          clientId: reply.clientId,
+          contactId: contact.id,
+          contactChannelId: emailChannel.id,
+          communication: CommunicationType.OUTREACH,
+          status: ContactConsentStatus.BLOCKED,
+          source: RecordSource.SYSTEM_GENERATED,
+          sourceLabel: 'reply_unsubscribe',
+          reason: 'reply_unsubscribe',
+          revokedAt: new Date(),
+          metadataJson: toPrismaJson({ replyId }),
+        },
+      });
+    }
+
+    if (reply.fromEmail?.trim()) {
+      const normalized = reply.fromEmail.trim().toLowerCase();
+      const existingSuppression = await this.prisma.suppressionEntry.findFirst({
+        where: {
+          organizationId: reply.organizationId,
+          type: SuppressionType.UNSUBSCRIBE,
+          emailAddress: normalized,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (existingSuppression) {
+        await this.prisma.suppressionEntry.update({
+          where: { id: existingSuppression.id },
+          data: {
+            clientId: reply.clientId,
+            contactId: contact?.id ?? existingSuppression.contactId,
+            reason: 'reply_unsubscribe',
+            source: 'reply_classification',
+          },
+        });
+      } else {
+        await this.prisma.suppressionEntry.create({
+          data: {
+            organizationId: reply.organizationId,
+            clientId: reply.clientId,
+            contactId: contact?.id ?? null,
+            type: SuppressionType.UNSUBSCRIBE,
+            emailAddress: normalized,
+            reason: 'reply_unsubscribe',
+            source: 'reply_classification',
+          },
+        });
+      }
+    }
   }
 
   private async resolveMatchedOutboundMessage(input: InboundReplyInput, fromEmail: string) {
@@ -219,17 +341,13 @@ export class RepliesService {
     }
 
     if (threadKey) {
-      const byThread = await this.prisma.outreachMessage.findFirst({
+      const byThreadKey = await this.prisma.outreachMessage.findFirst({
         where: {
-          threadKey,
           direction: 'OUTBOUND',
-          lead: {
-            contact: {
-              email: fromEmail,
-            },
-          },
+          threadKey,
+          lead: { contact: { email: fromEmail } },
         },
-        orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
+        orderBy: [{ createdAt: 'desc' }],
         select: {
           id: true,
           organizationId: true,
@@ -239,15 +357,17 @@ export class RepliesService {
           mailboxId: true,
         },
       });
-      if (byThread) return byThread;
+      if (byThreadKey) return byThreadKey;
     }
 
     if (externalMessageId) {
-      const byExternal = await this.prisma.outreachMessage.findFirst({
+      const byExternalMessageId = await this.prisma.outreachMessage.findFirst({
         where: {
-          externalMessageId,
           direction: 'OUTBOUND',
+          externalMessageId,
+          lead: { contact: { email: fromEmail } },
         },
+        orderBy: [{ createdAt: 'desc' }],
         select: {
           id: true,
           organizationId: true,
@@ -257,24 +377,21 @@ export class RepliesService {
           mailboxId: true,
         },
       });
-      if (byExternal) return byExternal;
+      if (byExternalMessageId) return byExternalMessageId;
+    }
+
+    const conditions: any[] = [
+      { lead: { contact: { email: fromEmail } } },
+      { lead: { contact: { is: { contactChannels: { some: { normalizedValue: fromEmail } } } } } },
+    ];
+    if (mailboxEmail) {
+      conditions.push({ mailbox: { emailAddress: mailboxEmail } });
     }
 
     return this.prisma.outreachMessage.findFirst({
       where: {
         direction: 'OUTBOUND',
-        ...(mailboxEmail
-          ? {
-              mailbox: {
-                emailAddress: mailboxEmail,
-              },
-            }
-          : {}),
-        lead: {
-          contact: {
-            email: fromEmail,
-          },
-        },
+        OR: conditions,
       },
       orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
       select: {
@@ -289,11 +406,8 @@ export class RepliesService {
   }
 
   private resolveReceivedAt(value?: string | Date) {
-    if (value instanceof Date) return value;
-    if (typeof value === 'string' && value.trim()) {
-      const parsed = new Date(value);
-      if (!Number.isNaN(parsed.getTime())) return parsed;
-    }
-    return new Date();
+    if (!value) return new Date();
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(date.getTime()) ? new Date() : date;
   }
 }

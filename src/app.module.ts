@@ -38,6 +38,7 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { TemplatesModule } from './templates/templates.module';
 import { UsersModule } from './users/users.module';
 import { WorkersModule } from './workers/workers.module';
+import { WorkflowsModule } from './workflows/workflows.module';
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import { WorkersModule } from './workers/workers.module';
     RepliesModule,
     MeetingsModule,
     NotificationsModule,
+    WorkflowsModule,
     ExecutionModule,
     ControlModule,
     BillingModule,
