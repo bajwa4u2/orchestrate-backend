@@ -5,11 +5,11 @@
   "description": "Orchestrate backend operator, revenue, email, and notification foundation",
   "license": "UNLICENSED",
   "scripts": {
-    "build": "npm run prisma:generate && npx prisma migrate deploy --config ./prisma.config.ts && nest build && find dist -maxdepth 3 -type f | sort",
+    "build": "npm run prisma:generate && nest build && find dist -maxdepth 3 -type f | sort",
     "start": "node dist/src/main.js",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/src/main.js",
+    "start:prod": "npx prisma migrate deploy --config ./prisma.config.ts && node dist/src/main.js",
     "prisma:generate": "npx prisma generate --config ./prisma.config.ts",
     "prisma:migrate:dev": "prisma migrate dev --config ./prisma.config.ts",
     "prisma:migrate:deploy": "prisma migrate deploy --config ./prisma.config.ts",
