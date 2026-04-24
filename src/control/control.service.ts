@@ -27,42 +27,42 @@ export class ControlService {
       repliedToday,
       bookedToday,
     ] = await Promise.all([
-      this.prisma.organization.count({ where: organizationWhere }),
-      this.prisma.client.count({ where: scopedWhere }),
-      this.prisma.campaign.count({ where: scopedWhere }),
-      this.prisma.lead.count({ where: scopedWhere }),
-      this.prisma.outreachMessage.count({ where: scopedWhere }),
-      this.prisma.reply.count({ where: scopedWhere }),
-      this.prisma.meeting.count({ where: scopedWhere }),
-      this.prisma.job.count({ where: { ...(scopedWhere ?? {}), status: JobStatus.QUEUED } }),
-      this.prisma.job.count({ where: { ...(scopedWhere ?? {}), status: JobStatus.FAILED } }),
-      this.prisma.alert.count({ where: { ...(scopedWhere ?? {}), status: AlertStatus.OPEN } }),
-      this.prisma.mailbox.count({ where: { ...(scopedWhere ?? {}), status: MailboxStatus.ACTIVE } }),
-      this.prisma.mailbox.count({
+      this.safeCount(() => this.prisma.organization.count({ where: organizationWhere })),
+      this.safeCount(() => this.prisma.client.count({ where: scopedWhere })),
+      this.safeCount(() => this.prisma.campaign.count({ where: scopedWhere })),
+      this.safeCount(() => this.prisma.lead.count({ where: scopedWhere })),
+      this.safeCount(() => this.prisma.outreachMessage.count({ where: scopedWhere })),
+      this.safeCount(() => this.prisma.reply.count({ where: scopedWhere })),
+      this.safeCount(() => this.prisma.meeting.count({ where: scopedWhere })),
+      this.safeCount(() => this.prisma.job.count({ where: { ...(scopedWhere ?? {}), status: JobStatus.QUEUED } })),
+      this.safeCount(() => this.prisma.job.count({ where: { ...(scopedWhere ?? {}), status: JobStatus.FAILED } })),
+      this.safeCount(() => this.prisma.alert.count({ where: { ...(scopedWhere ?? {}), status: AlertStatus.OPEN } })),
+      this.safeCount(() => this.prisma.mailbox.count({ where: { ...(scopedWhere ?? {}), status: MailboxStatus.ACTIVE } })),
+      this.safeCount(() => this.prisma.mailbox.count({
         where: {
           ...(scopedWhere ?? {}),
           healthStatus: { in: [MailboxHealthStatus.DEGRADED, MailboxHealthStatus.CRITICAL] },
         },
-      }),
-      this.prisma.outreachMessage.count({
+      })),
+      this.safeCount(() => this.prisma.outreachMessage.count({
         where: {
           ...(scopedWhere ?? {}),
           sentAt: { gte: startOfDay() },
         },
-      }),
-      this.prisma.reply.count({
+      })),
+      this.safeCount(() => this.prisma.reply.count({
         where: {
           ...(scopedWhere ?? {}),
           receivedAt: { gte: startOfDay() },
         },
-      }),
-      this.prisma.meeting.count({
+      })),
+      this.safeCount(() => this.prisma.meeting.count({
         where: {
           ...(scopedWhere ?? {}),
           status: MeetingStatus.BOOKED,
           updatedAt: { gte: startOfDay() },
         },
-      }),
+      })),
     ]);
 
     return {
@@ -96,6 +96,15 @@ export class ControlService {
         open: alertsOpen,
       },
     };
+  }
+
+  private async safeCount(loader: () => Promise<number>) {
+    try {
+      return await loader();
+    } catch (error) {
+      console.warn('[ControlService] overview count failed', error);
+      return 0;
+    }
   }
 }
 

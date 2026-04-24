@@ -44,34 +44,34 @@ export class OperatorService {
   async commandOverview(organizationId: string) {
     const scopeOrganizationId = await this.resolveOperatorScope(organizationId);
     const [overview, deliverability, imports, consent, activeJobs, messageStatuses, replies, meetings, suppressed] = await Promise.all([
-      this.controlService.overview(scopeOrganizationId),
-      this.deliverabilityService.overview(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
-      this.prisma.importBatch.aggregate({
+      this.safeValue(() => this.controlService.overview(scopeOrganizationId), this.emptyControlOverview()),
+      this.safeValue(() => this.deliverabilityService.overview(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), this.emptyDeliverabilityOverview()),
+      this.safeValue(() => this.prisma.importBatch.aggregate({
         where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
         _count: { _all: true },
         _sum: { totalRows: true, processedRows: true, createdRows: true, duplicateRows: true, invalidRows: true, failedRows: true },
-      }),
-      this.prisma.contactConsent.groupBy({
+      }), { _count: { _all: 0 }, _sum: { totalRows: 0, processedRows: 0, createdRows: 0, duplicateRows: 0, invalidRows: 0, failedRows: 0 } }),
+      this.safeValue(() => this.prisma.contactConsent.groupBy({
         by: ['communication', 'status'],
         where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
         _count: { _all: true },
-      }),
-      this.prisma.job.groupBy({
+      }), []),
+      this.safeValue(() => this.prisma.job.groupBy({
         by: ['type'],
         where: {
           ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
           status: { in: [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED] },
         },
         _count: { _all: true },
-      }),
-      this.prisma.outreachMessage.groupBy({
+      }), []),
+      this.safeValue(() => this.prisma.outreachMessage.groupBy({
         by: ['status'],
         where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
         _count: { _all: true },
-      }),
-      this.prisma.reply.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }),
-      this.prisma.meeting.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }),
-      this.prisma.lead.count({ where: { ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), status: 'SUPPRESSED' } }),
+      }), []),
+      this.safeValue(() => this.prisma.reply.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }), 0),
+      this.safeValue(() => this.prisma.meeting.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }), 0),
+      this.safeValue(() => this.prisma.lead.count({ where: { ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), status: 'SUPPRESSED' } }), 0),
     ]);
 
     const mailboxes = Array.isArray((deliverability as any)?.mailboxes) ? (deliverability as any).mailboxes : [];
@@ -128,30 +128,30 @@ export class OperatorService {
       outreachMessages,
       replies,
     ] = await Promise.all([
-      this.controlService.overview(scopeOrganizationId),
-      this.deliverabilityService.overview(
+      this.safeValue(() => this.controlService.overview(scopeOrganizationId), this.emptyControlOverview()),
+      this.safeValue(() => this.deliverabilityService.overview(
         scopeOrganizationId ? { organizationId: scopeOrganizationId } : {},
-      ),
-      this.campaignsService.list(
+      ), this.emptyDeliverabilityOverview()),
+      this.safeValue(() => this.campaignsService.list(
         (scopeOrganizationId
           ? { organizationId: scopeOrganizationId, page: '1', limit: '10' }
           : { page: '1', limit: '10' }) as any,
-      ),
-      this.clientsService.list(
+      ), { items: [], meta: { page: 1, limit: 10, total: 0 } }),
+      this.safeValue(() => this.clientsService.list(
         (scopeOrganizationId
           ? { organizationId: scopeOrganizationId, page: '1', limit: '10' }
           : { page: '1', limit: '10' }) as any,
-      ),
-      this.listPublicInquiries(scopeOrganizationId, { limit: '10' }),
-      this.prisma.alert.findMany({
+      ), { items: [], meta: { page: 1, limit: 10, total: 0 } }),
+      this.safeValue(() => this.listPublicInquiries(scopeOrganizationId, { limit: '10' }), { items: [], summary: this.emptyInquirySummary() }),
+      this.safeValue(() => this.prisma.alert.findMany({
         where: {
           ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
           status: AlertStatus.OPEN,
         },
         orderBy: [{ createdAt: 'desc' }],
         take: 10,
-      }),
-      this.prisma.job.findMany({
+      }), []),
+      this.safeValue(() => this.prisma.job.findMany({
         where: {
           ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
           status: JobStatus.FAILED,
@@ -162,7 +162,7 @@ export class OperatorService {
           client: { select: { id: true, displayName: true, legalName: true } },
           campaign: { select: { id: true, name: true, status: true } },
         },
-      }),
+      }), []),
       this.prisma.outreachMessage.findMany({
         where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : {},
         orderBy: [{ updatedAt: 'desc' }],
@@ -954,6 +954,72 @@ export class OperatorService {
     }
 
     return inquiry;
+  }
+
+  private async safeValue<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await loader();
+    } catch (error) {
+      console.warn('[OperatorService] operator truth query failed', error);
+      return fallback;
+    }
+  }
+
+  private emptyControlOverview() {
+    return {
+      system: {
+        phase: 'execution-core',
+        posture: 'control unavailable',
+      },
+      totals: {
+        organizations: 0,
+        clients: 0,
+        campaigns: 0,
+        leads: 0,
+        messages: 0,
+        replies: 0,
+        meetings: 0,
+      },
+      today: {
+        sent: 0,
+        replies: 0,
+        booked: 0,
+      },
+      execution: {
+        queuedJobs: 0,
+        failedJobs: 0,
+      },
+      deliverability: {
+        activeMailboxes: 0,
+        degradedMailboxes: 0,
+      },
+      alerts: {
+        open: 0,
+      },
+    };
+  }
+
+  private emptyInquirySummary() {
+    return {
+      totalOpen: 0,
+      new: 0,
+      acknowledged: 0,
+      inProgress: 0,
+      closed: 0,
+      spam: 0,
+      escalated: 0,
+    };
+  }
+
+  private emptyDeliverabilityOverview() {
+    return {
+      domains: [],
+      mailboxes: [],
+      policies: [],
+      suppressions: [],
+      bounces: [],
+      complaints: [],
+    };
   }
 
   private async resolveOperatorScope(organizationId: string) {

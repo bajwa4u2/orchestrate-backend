@@ -354,8 +354,8 @@ export class ClientsService {
   async getProfile(headers: Record<string, unknown>) {
     const client = await this.resolveClientForRequest(headers);
     const [mailbox, imports] = await Promise.all([
-      this.buildMailboxReadinessSnapshot(client.organizationId, client.id),
-      this.buildImportSnapshot(client.organizationId, client.id),
+      this.safeValue(() => this.buildMailboxReadinessSnapshot(client.organizationId, client.id), this.emptyMailboxReadinessSnapshot()),
+      this.safeValue(() => this.buildImportSnapshot(client.organizationId, client.id), this.emptyImportSnapshot()),
     ]);
     return {
       ...this.buildProfileResponse(client),
@@ -409,9 +409,9 @@ export class ClientsService {
     const scope = this.readStructuredScope(setup.scope ?? client.scopeJson);
     const commercial = await this.resolveCommercialState(client.id);
     const subscriptionAlignment = this.buildSubscriptionAlignment(commercial, scope);
-    const campaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);
+    const campaign = await this.safeValue(() => this.findPrimaryCampaignSnapshot(client.organizationId, client.id), null);
     const campaignHealth = campaign
-      ? await this.buildCampaignHealthSnapshot(client.organizationId, client.id, campaign)
+      ? await this.safeValue(() => this.buildCampaignHealthSnapshot(client.organizationId, client.id, campaign), null)
       : null;
 
     return {
@@ -1155,10 +1155,6 @@ export class ClientsService {
           clientId,
           campaignId: campaign.id,
           status: { in: sendableStatuses },
-          OR: [
-            { contact: { is: { contactChannels: { some: { type: 'EMAIL', status: 'ACTIVE' } } } } },
-            { contact: { is: { email: { not: null } } } },
-          ],
         },
       }),
       this.prisma.job.count({ where: { organizationId, clientId, campaignId: campaign.id, type: JobType.FIRST_SEND, status: { in: activeJobStatuses } } }),
@@ -1354,29 +1350,50 @@ export class ClientsService {
     };
   }
 
+  private async safeValue<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await loader();
+    } catch (error) {
+      console.warn('[ClientsService] client truth query failed', error);
+      return fallback;
+    }
+  }
+
+  private emptyMailboxReadinessSnapshot() {
+    return {
+      ready: false,
+      status: 'missing',
+      healthStatus: null,
+      connectionState: null,
+      isClientOwned: false,
+      emailAddress: null,
+    };
+  }
+
+  private emptyImportSnapshot() {
+    return {
+      active: 0,
+      latest: null,
+      totals: {
+        rows: 0,
+        processed: 0,
+        created: 0,
+        duplicates: 0,
+        invalid: 0,
+        failed: 0,
+      },
+    };
+  }
+
   private async resolveClientForRequest(headers: Record<string, unknown>) {
-    const context = await this.accessContextService.buildFromHeaders(headers);
+    const context = await this.accessContextService.requireClient(headers);
 
-    if (!context.userId) {
-      throw new UnauthorizedException('No active session');
-    }
-
-    if (context.surface !== 'client') {
-      throw new UnauthorizedException('Client access is required');
-    }
-
-    let client: any = null;
-
-    if (context.clientId) {
-      client = await this.prisma.client.findUnique({ where: { id: context.clientId } });
-    }
-
-    if (!client && context.organizationId) {
-      client = await this.prisma.client.findFirst({
-        where: { organizationId: context.organizationId },
-        orderBy: { createdAt: 'asc' },
-      });
-    }
+    const client = await this.prisma.client.findFirst({
+      where: {
+        id: context.clientId!,
+        organizationId: context.organizationId!,
+      },
+    });
 
     if (!client) {
       throw new NotFoundException('Client account not found');

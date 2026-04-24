@@ -44,37 +44,33 @@ export class ClientPortalService {
       executionSummary,
       consentSummary,
     ] = await Promise.all([
-      this.billingService.overview(organizationId, clientId),
-      this.prisma.reply.count({ where: { organizationId, clientId } }),
-      this.prisma.meeting.count({ where: { organizationId, clientId } }),
-      this.prisma.alert.count({
+      this.safeValue(() => this.billingService.overview(organizationId, clientId), null),
+      this.safeValue(() => this.prisma.reply.count({ where: { organizationId, clientId } }), 0),
+      this.safeValue(() => this.prisma.meeting.count({ where: { organizationId, clientId } }), 0),
+      this.safeValue(() => this.prisma.alert.count({
         where: { organizationId, clientId, status: 'OPEN' },
-      }),
-      this.prisma.documentDispatch.count({
+      }), 0),
+      this.safeValue(() => this.prisma.documentDispatch.count({
         where: {
           organizationId,
           clientId,
           deliveryChannel: 'EMAIL',
         },
-      }),
-      this.prisma.lead.count({ where: { organizationId, clientId } }),
-      this.prisma.contact.count({ where: { organizationId, clientId } }),
-      this.prisma.contactChannel.count({ where: { organizationId, clientId } }),
-      this.prisma.lead.count({
+      }), 0),
+      this.safeValue(() => this.prisma.lead.count({ where: { organizationId, clientId } }), 0),
+      this.safeValue(() => this.prisma.contact.count({ where: { organizationId, clientId } }), 0),
+      this.safeValue(() => this.prisma.contactChannel.count({ where: { organizationId, clientId } }), 0),
+      this.safeValue(() => this.prisma.lead.count({
         where: {
           organizationId,
           clientId,
           status: { not: 'SUPPRESSED' },
-          OR: [
-            { contact: { is: { contactChannels: { some: { type: 'EMAIL', status: 'ACTIVE' } } } } },
-            { contact: { is: { email: { not: null } } } },
-          ],
         },
-      }),
-      this.getMailboxSummary(organizationId, clientId),
-      this.getImportSummary(organizationId, clientId),
-      this.getExecutionSummary(organizationId, clientId),
-      this.getConsentSummary(organizationId, clientId),
+      }), 0),
+      this.safeValue(() => this.getMailboxSummary(organizationId, clientId), this.emptyMailboxSummary()),
+      this.safeValue(() => this.getImportSummary(organizationId, clientId), this.emptyImportSummary()),
+      this.safeValue(() => this.getExecutionSummary(organizationId, clientId), null),
+      this.safeValue(() => this.getConsentSummary(organizationId, clientId), null),
     ]);
 
     return {
@@ -102,26 +98,73 @@ export class ClientPortalService {
 
   async leads(organizationId: string, clientId: string) {
     const leads = await this.prisma.lead.findMany({
-      where: {
-        organizationId,
-        clientId,
-      },
-      include: {
-        contact: { include: { contactChannels: { where: { type: 'EMAIL' }, orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }], take: 1 } } },
-        account: true,
-        campaign: true,
-        leadSource: true,
+      where: { organizationId, clientId },
+      select: {
+        id: true,
+        status: true,
+        qualificationState: true,
+        source: true,
+        accountId: true,
+        contactId: true,
+        campaignId: true,
+        leadSourceId: true,
+        createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
 
+    const contactIds = Array.from(new Set(leads.map((lead) => lead.contactId).filter(Boolean))) as string[];
+    const accountIds = Array.from(new Set(leads.map((lead) => lead.accountId).filter(Boolean))) as string[];
+    const campaignIds = Array.from(new Set(leads.map((lead) => lead.campaignId).filter(Boolean))) as string[];
+    const leadSourceIds = Array.from(new Set(leads.map((lead) => lead.leadSourceId).filter(Boolean))) as string[];
+
+    const [contacts, accounts, campaigns, leadSources] = await Promise.all([
+      contactIds.length
+        ? this.safeValue(() => this.prisma.contact.findMany({
+            where: { organizationId, clientId, id: { in: contactIds } },
+            select: {
+              id: true,
+              fullName: true,
+              title: true,
+              email: true,
+              phone: true,
+              city: true,
+              region: true,
+              countryCode: true,
+            },
+          }), [])
+        : [],
+      accountIds.length
+        ? this.safeValue(() => this.prisma.account.findMany({
+            where: { organizationId, clientId, id: { in: accountIds } },
+            select: { id: true, companyName: true },
+          }), [])
+        : [],
+      campaignIds.length
+        ? this.safeValue(() => this.prisma.campaign.findMany({
+            where: { organizationId, clientId, id: { in: campaignIds } },
+            select: { id: true, name: true },
+          }), [])
+        : [],
+      leadSourceIds.length
+        ? this.safeValue(() => this.prisma.leadSource.findMany({
+            where: { organizationId, clientId, id: { in: leadSourceIds } },
+            select: { id: true, name: true },
+          }), [])
+        : [],
+    ]);
+
+    const contactsById = new Map((contacts as any[]).map((item) => [item.id, item]));
+    const accountsById = new Map((accounts as any[]).map((item) => [item.id, item]));
+    const campaignsById = new Map((campaigns as any[]).map((item) => [item.id, item]));
+    const leadSourcesById = new Map((leadSources as any[]).map((item) => [item.id, item]));
+
     return leads.map((lead) => {
-      const contact = lead.contact;
-      const account = lead.account;
-      const campaign = lead.campaign;
-      const leadSource = lead.leadSource;
-      const primaryChannel = Array.isArray((contact as any)?.contactChannels) ? (contact as any).contactChannels[0] : null;
+      const contact = lead.contactId ? contactsById.get(lead.contactId) : null;
+      const account = lead.accountId ? accountsById.get(lead.accountId) : null;
+      const campaign = lead.campaignId ? campaignsById.get(lead.campaignId) : null;
+      const leadSource = lead.leadSourceId ? leadSourcesById.get(lead.leadSourceId) : null;
 
       const location = [contact?.city, contact?.region, contact?.countryCode]
         .filter((value): value is string => Boolean(value && value.trim()))
@@ -132,7 +175,7 @@ export class ClientPortalService {
         name: contact?.fullName ?? '',
         company: account?.companyName ?? '',
         title: contact?.title ?? '',
-        email: primaryChannel?.value ?? contact?.email ?? '',
+        email: contact?.email ?? '',
         phone: contact?.phone ?? '',
         location,
         campaign: campaign?.name ?? '',
@@ -203,6 +246,41 @@ export class ClientPortalService {
       },
       orderBy: [{ createdAt: 'desc' }],
     });
+  }
+
+  private async safeValue<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await loader();
+    } catch (error) {
+      console.warn('[ClientPortalService] client truth query failed', error);
+      return fallback;
+    }
+  }
+
+  private emptyMailboxSummary() {
+    return {
+      total: 0,
+      clientOwned: 0,
+      ready: false,
+      primary: null,
+    };
+  }
+
+  private emptyImportSummary() {
+    return {
+      batches: 0,
+      active: 0,
+      latest: null,
+      totals: {
+        rows: 0,
+        processed: 0,
+        created: 0,
+        matched: 0,
+        duplicates: 0,
+        invalid: 0,
+        failed: 0,
+      },
+    };
   }
 
   private async getMailboxSummary(organizationId: string, clientId: string) {

@@ -761,20 +761,20 @@ export class DeliverabilityService {
     };
 
     const [domains, mailboxes, policies, suppressions, bounces, complaints] = await Promise.all([
-      this.prisma.sendingDomain.findMany({ where, orderBy: { createdAt: 'desc' } }),
-      this.prisma.mailbox.findMany({ where, orderBy: { createdAt: 'desc' } }),
-      this.prisma.sendPolicy.findMany({ where, orderBy: { createdAt: 'desc' } }),
-      this.prisma.suppressionEntry.findMany({ where, orderBy: { createdAt: 'desc' }, take: 50 }),
-      this.prisma.bounceEvent.findMany({
+      this.safeValue(() => this.prisma.sendingDomain.findMany({ where, orderBy: { createdAt: 'desc' } }), []),
+      this.safeValue(() => this.prisma.mailbox.findMany({ where, orderBy: { createdAt: 'desc' } }), []),
+      this.safeValue(() => this.prisma.sendPolicy.findMany({ where, orderBy: { createdAt: 'desc' } }), []),
+      this.safeValue(() => this.prisma.suppressionEntry.findMany({ where, orderBy: { createdAt: 'desc' }, take: 50 }), []),
+      this.safeValue(() => this.prisma.bounceEvent.findMany({
         where: filters.clientId ? { mailbox: { clientId: filters.clientId } } : undefined,
         orderBy: { occurredAt: 'desc' },
         take: 25,
-      }),
-      this.prisma.complaintEvent.findMany({
+      }), []),
+      this.safeValue(() => this.prisma.complaintEvent.findMany({
         where: filters.clientId ? { mailbox: { clientId: filters.clientId } } : undefined,
         orderBy: { occurredAt: 'desc' },
         take: 25,
-      }),
+      }), []),
     ]);
 
     return {
@@ -785,6 +785,15 @@ export class DeliverabilityService {
       bounces,
       complaints,
     };
+  }
+
+  private async safeValue<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await loader();
+    } catch (error) {
+      console.warn('[DeliverabilityService] deliverability query failed', error);
+      return fallback;
+    }
   }
 
   private asObject(value: unknown): Record<string, unknown> {

@@ -189,16 +189,91 @@ export class RepliesService {
   }
 
   async listForClient(clientId: string) {
-    return this.prisma.reply.findMany({
+    const replies = await this.prisma.reply.findMany({
       where: { clientId },
-      include: {
-        lead: true,
-        campaign: true,
-        message: true,
-        meeting: true,
+      select: {
+        id: true,
+        organizationId: true,
+        clientId: true,
+        campaignId: true,
+        leadId: true,
+        messageId: true,
+        mailboxId: true,
+        intent: true,
+        source: true,
+        confidence: true,
+        fromEmail: true,
+        subjectLine: true,
+        bodyText: true,
+        receivedAt: true,
+        requiresHumanReview: true,
+        handledAt: true,
+        metadataJson: true,
+        createdAt: true,
+        updatedAt: true,
       },
       orderBy: [{ receivedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 100,
     });
+
+    const organizationId = replies[0]?.organizationId;
+    const leadIds = Array.from(new Set(replies.map((reply) => reply.leadId).filter(Boolean))) as string[];
+    const campaignIds = Array.from(new Set(replies.map((reply) => reply.campaignId).filter(Boolean))) as string[];
+    const messageIds = Array.from(new Set(replies.map((reply) => reply.messageId).filter(Boolean))) as string[];
+    const replyIds = replies.map((reply) => reply.id);
+
+    const [leads, campaigns, messages, meetings] = await Promise.all([
+      organizationId && leadIds.length
+        ? this.safeValue(() => this.prisma.lead.findMany({
+            where: { organizationId, clientId, id: { in: leadIds } },
+            select: {
+              id: true,
+              status: true,
+              contact: { select: { id: true, fullName: true, email: true } },
+            },
+          }), [])
+        : [],
+      organizationId && campaignIds.length
+        ? this.safeValue(() => this.prisma.campaign.findMany({
+            where: { organizationId, clientId, id: { in: campaignIds } },
+            select: { id: true, name: true, status: true },
+          }), [])
+        : [],
+      organizationId && messageIds.length
+        ? this.safeValue(() => this.prisma.outreachMessage.findMany({
+            where: { organizationId, clientId, id: { in: messageIds } },
+            select: { id: true, subjectLine: true, status: true, sentAt: true },
+          }), [])
+        : [],
+      organizationId && replyIds.length
+        ? this.safeValue(() => this.prisma.meeting.findMany({
+            where: { organizationId, clientId, replyId: { in: replyIds } },
+            select: { id: true, replyId: true, status: true, scheduledAt: true, title: true, bookingUrl: true },
+          }), [])
+        : [],
+    ]);
+
+    const leadsById = new Map((leads as any[]).map((item) => [item.id, item]));
+    const campaignsById = new Map((campaigns as any[]).map((item) => [item.id, item]));
+    const messagesById = new Map((messages as any[]).map((item) => [item.id, item]));
+    const meetingsByReplyId = new Map((meetings as any[]).map((item) => [item.replyId, item]));
+
+    return replies.map((reply) => ({
+      ...reply,
+      lead: leadsById.get(reply.leadId) ?? null,
+      campaign: campaignsById.get(reply.campaignId) ?? null,
+      message: reply.messageId ? messagesById.get(reply.messageId) ?? null : null,
+      meeting: meetingsByReplyId.get(reply.id) ?? null,
+    }));
+  }
+
+  private async safeValue<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await loader();
+    } catch (error) {
+      console.warn('[RepliesService] client reply relation query failed', error);
+      return fallback;
+    }
   }
 
   private async applyUnsubscribeForReply(replyId: string) {
