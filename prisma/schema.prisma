@@ -3065,3 +3065,192 @@ model AdaptationDecision {
 
   @@index([campaignId, triggerType, createdAt])
 }
+
+enum AiDecisionRecordStatus {
+  RECORDED
+  ENFORCED
+  EXPIRED
+  SUPERSEDED
+  CANCELED
+}
+
+enum AiDecisionLinkRole {
+  PRIMARY_SUBJECT
+  CONTEXT
+  TARGET
+  RELATED
+  OUTCOME_SUBJECT
+}
+
+enum AiEnforcementStatus {
+  ALLOWED
+  BLOCKED
+  EXPIRED
+  NOT_FOUND
+  ENTITY_MISMATCH
+  POLICY_BLOCKED
+  HUMAN_REVIEW_REQUIRED
+  TRUST_BLOCKED
+  AUDIT_ONLY
+}
+
+enum AiDecisionOutcomeStatus {
+  OBSERVED
+  SUCCEEDED
+  FAILED
+  PARTIAL
+  CANCELED
+}
+
+enum AiPolicyBindingStatus {
+  ACTIVE
+  SUPERSEDED
+  EXPIRED
+}
+
+model AiDecisionRecord {
+  id                  String                 @id @default(cuid())
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  workflowRunId       String?
+  scope               String
+  action              String
+  effectiveAction     String?
+  actor               String
+  jobType             String?
+  allowedToProceed    Boolean                @default(false)
+  requiresHumanReview Boolean                @default(false)
+  confidence          Decimal?               @db.Decimal(5, 4)
+  risk                String
+  reason              String
+  evidenceJson        Json?
+  blockersJson        Json?
+  notesJson           Json?
+  metadataJson        Json?
+  policyMetadataJson  Json?
+  snapshotVersion     String?
+  snapshotGeneratedAt DateTime?
+  trustMode           String?
+  source              String                 @default("ai_governance_gateway")
+  status              AiDecisionRecordStatus @default(RECORDED)
+  expiresAt           DateTime?
+  enforcedAt          DateTime?
+  supersededById      String?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  supersededBy AiDecisionRecord?         @relation("AiDecisionSupersession", fields: [supersededById], references: [id], onDelete: SetNull)
+  supersedes   AiDecisionRecord[]        @relation("AiDecisionSupersession")
+  links        AiDecisionEntityLink[]
+  enforcements AiEnforcementRecord[]
+  outcomes     AiDecisionOutcome[]
+  bindings     AiDecisionPolicyBinding[]
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, scope, action, createdAt])
+  @@index([clientId, createdAt])
+  @@index([campaignId, createdAt])
+  @@index([workflowRunId, createdAt])
+  @@index([status, expiresAt])
+}
+
+model AiDecisionEntityLink {
+  id             String             @id @default(cuid())
+  decisionId     String
+  organizationId String
+  entityType     String
+  entityId       String
+  role           AiDecisionLinkRole @default(CONTEXT)
+  metadataJson   Json?
+  createdAt      DateTime           @default(now())
+
+  decision AiDecisionRecord @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@unique([decisionId, entityType, entityId, role])
+  @@index([decisionId, role])
+  @@index([organizationId, entityType, entityId, createdAt])
+}
+
+model AiEnforcementRecord {
+  id             String              @id @default(cuid())
+  decisionId     String?
+  organizationId String
+  clientId       String?
+  campaignId     String?
+  workflowRunId  String?
+  jobId          String?
+  serviceName    String
+  methodName     String
+  entityType     String
+  entityId       String
+  operation      String
+  status         AiEnforcementStatus
+  allowed        Boolean             @default(false)
+  reason         String
+  metadataJson   Json?
+  checkedAt      DateTime            @default(now())
+  createdAt      DateTime            @default(now())
+
+  decision AiDecisionRecord? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, checkedAt])
+  @@index([decisionId, checkedAt])
+  @@index([entityType, entityId, checkedAt])
+  @@index([workflowRunId, checkedAt])
+  @@index([jobId, checkedAt])
+}
+
+model AiDecisionOutcome {
+  id             String                  @id @default(cuid())
+  decisionId     String
+  organizationId String
+  clientId       String?
+  campaignId     String?
+  workflowRunId  String?
+  jobId          String?
+  entityType     String
+  entityId       String
+  outcomeType    String
+  status         AiDecisionOutcomeStatus @default(OBSERVED)
+  score          Decimal?                @db.Decimal(5, 4)
+  summary        String?
+  metadataJson   Json?
+  observedAt     DateTime                @default(now())
+  createdAt      DateTime                @default(now())
+
+  decision AiDecisionRecord @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@index([decisionId, observedAt])
+  @@index([organizationId, observedAt])
+  @@index([entityType, entityId, observedAt])
+}
+
+model AiDecisionPolicyBinding {
+  id                  String                @id @default(cuid())
+  decisionId          String?
+  organizationId      String
+  clientId            String?
+  campaignId          String?
+  scope               String
+  action              String?
+  bindingKey          String
+  bindingValueJson    Json?
+  trustMode           String?
+  requiredConfidence  Decimal?              @db.Decimal(5, 4)
+  requiresHumanReview Boolean               @default(false)
+  automationAllowed   Boolean               @default(false)
+  status              AiPolicyBindingStatus @default(ACTIVE)
+  metadataJson        Json?
+  effectiveFrom       DateTime              @default(now())
+  effectiveUntil      DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  decision AiDecisionRecord? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+
+  @@index([decisionId])
+  @@index([organizationId, scope, bindingKey, status])
+  @@index([clientId, scope, status])
+  @@index([campaignId, scope, status])
+}

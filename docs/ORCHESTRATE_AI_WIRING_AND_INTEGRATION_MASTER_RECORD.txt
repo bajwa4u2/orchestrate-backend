@@ -1,0 +1,355 @@
+ORCHESTRATE AI WIRING & INTEGRATION MASTER RECORD
+=================================================
+
+STATUS: AI CORE COMPLETE | INTEGRATION NOT STARTED
+DATE: LOCKED BASELINE
+
+-------------------------------------------------
+0. CORE SYSTEM PRINCIPLE (NON-NEGOTIABLE)
+-------------------------------------------------
+
+DB = Authority of Reality
+AI = Authority of Decision
+Backend = Authority of Enforcement
+Workers = Authority of Execution
+Frontend = Authority of Representation
+
+Violation of this model will cause drift, inconsistency, and system breakdown.
+
+-------------------------------------------------
+1. CURRENT SYSTEM POSITION
+-------------------------------------------------
+
+AI Layer Status:
+- Architecturally complete
+- Capability complete
+- Provider-agnostic
+- Structured and layered
+- Supports decision, diagnosis, code governance, and evaluation
+
+AI is currently:
+- Capable
+- Callable
+- Structured
+- Measurable
+
+AI is NOT yet:
+- Governing execution
+- Self-triggering in production
+- Enforced in system flows
+
+Conclusion:
+AI backbone is complete.
+System is not yet governed by AI.
+
+-------------------------------------------------
+2. INTEGRATION PHILOSOPHY
+-------------------------------------------------
+
+We are NOT:
+- Rewriting workers
+- Replacing execution services
+- Adding parallel decision systems
+- Introducing shortcuts or assumptions
+
+We ARE:
+- Injecting AI into decision choke points
+- Preserving existing system behavior
+- Gradually shifting control to AI
+- Recording all decisions
+
+-------------------------------------------------
+3. SYSTEM FLOW MAP (FULL REVENUE ENGINE)
+-------------------------------------------------
+
+Public / Intake
+    ↓
+Client Setup
+    ↓
+Agreements
+    ↓
+Billing / Subscription
+    ↓
+Campaign Activation
+    ↓
+Lead Sourcing
+    ↓
+Outreach
+    ↓
+Replies
+    ↓
+Meetings
+    ↓
+Invoices / Statements
+    ↓
+Support / Operator
+    ↓
+Retention / Adaptation
+
+AI must eventually govern each stage.
+
+-------------------------------------------------
+4. INTEGRATION CONTROL LAYERS
+-------------------------------------------------
+
+Layer A — Advisory Mode
+- AI suggests actions
+- System logs decisions
+- No blocking except hard rules
+
+Layer B — Guarded Mode
+- AI suggests actions
+- Backend enforces critical rules
+- Some actions blocked
+
+Layer C — Authoritative Mode (future)
+- AI decides actions
+- Backend validates
+- System executes
+
+Current target: Layer A + selective Layer B
+
+-------------------------------------------------
+5. PHASED WIRING PLAN (STRICT ORDER)
+-------------------------------------------------
+
+PHASE 1 — LEAD → FIRST OUTREACH
+
+Hook Location:
+ExecutionService before FIRST_SEND job enqueue
+
+Flow:
+- Build reality snapshot
+- Call AI decision authority
+- Apply policy guard
+- Enqueue or skip job
+- Record decision
+
+AI Decisions:
+- SEND_FIRST_OUTREACH
+- WAIT
+- STOP
+- ESCALATE_OPERATOR
+
+Blocking Rules:
+- Missing email
+- Suppressed contact
+- Invalid campaign state
+
+-------------------------------------------------
+
+PHASE 2 — FOLLOW-UP LOGIC
+
+Hook Location:
+FollowUpWorker or scheduling layer
+
+AI Decisions:
+- SEND_FOLLOW_UP
+- WAIT
+- STOP
+- ESCALATE_OPERATOR
+
+Critical Rule:
+- No follow-up if reply exists
+
+-------------------------------------------------
+
+PHASE 3 — REPLY HANDLING
+
+Hook Location:
+ReplyClassificationWorker
+
+AI Decisions:
+- INTERESTED → meeting
+- NEGATIVE → stop
+- NEUTRAL → follow-up
+- OUT_OF_OFFICE → delay
+
+Mandatory Logging:
+- intent
+- confidence
+- reasoning
+
+-------------------------------------------------
+
+PHASE 4 — MEETING HANDOFF
+
+Hook Location:
+MeetingWorker
+
+AI Decisions:
+- Send booking link
+- Escalate to operator
+- Request clarification
+
+Blocking Rule:
+- No booking URL → no auto-send
+
+-------------------------------------------------
+
+PHASE 5 — CAMPAIGN ACTIVATION
+
+Hook Location:
+Campaign bootstrap / activation flow
+
+AI Decisions:
+- ACTIVATE
+- BLOCK
+- REQUEST_SETUP_COMPLETION
+- REQUEST_BILLING
+
+Hard Blocks:
+- No active subscription
+- Incomplete setup
+
+-------------------------------------------------
+
+PHASE 6 — LEAD SOURCING INTELLIGENCE
+
+Hook Location:
+LeadImportWorker / SourcePlanner
+
+AI Decisions:
+- Choose provider
+- Approve or reject leads
+- Adjust targeting
+
+-------------------------------------------------
+
+PHASE 7 — BILLING & AGREEMENTS
+
+Hook Location:
+ExecutionService + campaign state
+
+AI Decisions:
+- BLOCK_CAMPAIGN
+- SEND_REMINDER
+- PROCEED
+
+-------------------------------------------------
+
+PHASE 8 — SYSTEM DOCTOR (ALWAYS-ON)
+
+Trigger Events:
+- Job failure
+- Worker error
+- Provider error
+- System inconsistency
+
+AI Output:
+- Root cause
+- Affected layer
+- Fix plan
+- Risk level
+
+-------------------------------------------------
+
+PHASE 9 — OPERATOR INTELLIGENCE
+
+Operator View Must Include:
+- AI decisions
+- Blocked actions
+- Failed jobs
+- System doctor output
+- Override options
+
+-------------------------------------------------
+6. DECISION RECORDING (MANDATORY)
+-------------------------------------------------
+
+Every AI decision must persist:
+
+- entityType (lead, campaign, client, system)
+- entityId
+- decision
+- reason
+- confidence score
+- allowed or blocked
+- timestamp
+- outcome (filled later)
+
+No decision may remain unrecorded.
+
+-------------------------------------------------
+7. TRUST ENFORCEMENT RULES
+-------------------------------------------------
+
+Before execution:
+
+- If confidence < threshold → do not auto-act
+- If repeated failure → escalate
+- If unsafe → block
+- If uncertain → log and suggest only
+
+Trust must be enforced, not assumed.
+
+-------------------------------------------------
+8. FRONTEND REPRESENTATION (LATER PHASE)
+-------------------------------------------------
+
+Client Interface Must Show:
+- Campaign readiness
+- AI decisions
+- Next actions
+- Lead lifecycle
+
+Operator Interface Must Show:
+- System health
+- AI decision logs
+- Failures and diagnosis
+- Override controls
+
+Frontend must reflect DB truth only.
+
+-------------------------------------------------
+9. ANTI-DRIFT RULES (LOCKED)
+-------------------------------------------------
+
+1. No worker may decide lifecycle independently
+2. No job may be enqueued without AI check (once integrated)
+3. No UI may show non-DB truth
+4. No AI decision may exist without recording
+5. No blocking without policy validation
+6. No silent failure allowed
+
+-------------------------------------------------
+10. EXECUTION STRATEGY
+-------------------------------------------------
+
+Implementation approach:
+
+- One phase at a time
+- One integration point at a time
+- Deploy → observe → expand
+
+No bulk wiring
+No parallel uncontrolled changes
+
+-------------------------------------------------
+11. SUCCESS CRITERIA
+-------------------------------------------------
+
+System must reach:
+
+- Every lead has a next action
+- Every action has a reason
+- Every failure has a diagnosis
+- Every decision is traceable
+- No blind execution
+- No duplicate or mistimed actions
+
+-------------------------------------------------
+12. FINAL POSITION
+-------------------------------------------------
+
+AI Backbone: COMPLETE
+AI Capability: COMPLETE
+AI Trust: ESTABLISHED (not yet proven in production)
+AI Governance: NOT YET ACTIVE
+Integration: NOT STARTED
+
+System is ready to be governed by AI.
+
+-------------------------------------------------
+END OF DOCUMENT
+-------------------------------------------------

@@ -1,0 +1,91 @@
+ORCHESTRATE BACKEND PROTECTED BOUNDARIES FOR CODEX
+====================================================
+
+Core rule
+---------
+Codex may inspect the whole backend, but modifications must respect ownership boundaries. Protected means high-risk, not forbidden.
+
+Authority boundaries
+--------------------
+DB reality:
+- prisma/schema.prisma
+- prisma/migrations
+- src/database/prisma.service.ts
+
+Enforcement:
+- src/auth
+- src/access-context
+- src/organizations
+- src/users
+- src/clients
+- src/client-portal
+- src/billing
+- src/subscriptions
+- src/agreements
+- src/invoices
+- src/statements
+- src/financial-documents
+- src/deliverability
+- src/providers
+- src/campaigns
+- src/execution
+
+Execution:
+- src/workers
+- src/emails
+- src/replies
+- src/meetings
+- src/reminders
+- src/notifications
+- src/workflows
+
+Decision/intelligence:
+- src/ai
+- src/strategy
+- src/signals
+- src/sources
+- src/reachability
+- src/qualification
+- src/adaptation
+- src/analytics
+- src/control
+- src/operator
+- src/support
+
+Public/intake surfaces:
+- src/public
+- src/intake
+- src/templates
+
+Do-not-break rules
+------------------
+1. Do not let any worker independently decide lifecycle if a backend enforcement/service layer owns that decision.
+2. Do not enqueue jobs from new places when existing queue methods already exist.
+3. Do not silently skip jobs without writing a reason into DB-backed state.
+4. Do not send email unless suppression, deliverability, permission, and campaign state checks remain intact.
+5. Do not make provider usage the first resort when internal discovery or policy says otherwise.
+6. Do not remove cost guards or provider policy checks.
+7. Do not treat AI output as trustworthy unless confidence, rule validation, and recording are present.
+8. Do not expose client/operator UI truth from computed guesses if DB truth exists.
+9. Do not alter Stripe, billing, invoice, agreement, or statement flows without explicit task scope.
+10. Do not change Prisma schema or migrations casually.
+
+Migration rule
+--------------
+If a task requires schema changes, Codex must:
+- inspect existing models first
+- propose exact schema additions
+- explain migration impact
+- wait for explicit migration approval unless the user already asked for migration generation
+
+Email/outreach rule
+-------------------
+Outreach must represent the client and prospect context intelligently. Do not regress to generic template language. Preserve client-facing sender identity, reply-to behavior, preserved email delivery, inbound webhook handling, and event tracking.
+
+Provider rule
+-------------
+Providers are tools, not the system's identity. Orchestrate should be provider-agnostic and able to add providers by configuration/env where possible. Do not hardwire Apollo or any other provider as the only path.
+
+Codex output rule
+-----------------
+Whenever Codex changes backend code, final output must include reviewed files, changed files, validation run, and remaining risk.

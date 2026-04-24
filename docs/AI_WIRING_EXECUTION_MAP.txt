@@ -1,0 +1,192 @@
+ORCHESTRATE AI WIRING EXECUTION MAP FOR CODEX
+=============================================
+
+Status
+------
+Backend AI control layer is not yet fully wired into production execution. The current backend already contains AI, execution, worker, provider, source, reply, meeting, email, workflow, and policy zones. Codex must wire into these existing zones instead of creating duplicate systems.
+
+Primary runtime ownership
+-------------------------
+- src/execution/execution.service.ts
+  Owns dispatch loop, campaign continuity, queueing, runJob, immediate send, bootstrap/refill logic, reply classification, and meeting handoff paths.
+
+- src/workers/workers.service.ts
+  Owns registry of concrete workers and maps JobType to worker services.
+
+- src/ai/ai.service.ts
+  Existing AI-capable service. Contains campaign activation bootstrap, outbound draft generation, growth message/sequence generation, reminders, agreements, and statement summaries.
+
+- src/workflows/workflows.service.ts
+  Workflow run creation and lifecycle tracking.
+
+- prisma/schema.prisma
+  Authority for persisted reality. Must be checked before adding any new decision or evaluation records.
+
+Phase 1: Lead to first outreach
+-------------------------------
+Approved choke points:
+- src/campaigns/campaigns.service.ts activation/restart creates LEAD_IMPORT jobs.
+- src/execution/execution.service.ts queueLeadSend, runImmediateSendForLead, runLeadImportBootstrap, maintainCampaignContinuity.
+- src/workers/lead_import/lead-import.worker.service.ts imports/discovers/upserts leads and creates FIRST_SEND jobs.
+- src/workers/message_generation/message-generation.worker.service.ts generates message content using AiService.
+- src/workers/first_send/first-send.worker.service.ts performs actual first-send execution and follow-up queueing.
+
+Decision to introduce:
+- SEND_FIRST_OUTREACH
+- WAIT
+- STOP
+- ESCALATE_OPERATOR
+
+Hard blocks:
+- missing email
+- suppressed contact
+- invalid campaign state
+- deliverability/policy denial
+- no active billing/subscription where campaign execution requires it
+- missing agreement/representation authorization where required
+
+Phase 2: Follow-up logic
+------------------------
+Approved choke points:
+- src/execution/execution.service.ts ensureFollowUpQueued/runImmediateSendForLead
+- src/workers/follow_up/follow-up.worker.service.ts
+- src/replies/replies.service.ts
+
+Decision to introduce:
+- SEND_FOLLOW_UP
+- WAIT
+- STOP
+- ESCALATE_OPERATOR
+
+Hard block:
+- no follow-up if reply exists.
+
+Phase 3: Reply handling
+-----------------------
+Approved choke points:
+- src/replies/replies.service.ts ingestInboundReply/processReply
+- src/workers/reply_classification/reply-classification.worker.service.ts
+- src/execution/execution.service.ts runReplyClassification
+
+Decision outputs:
+- INTERESTED -> meeting handoff
+- NEGATIVE -> stop/suppress/finalize lead path
+- NEUTRAL -> later follow-up or operator review
+- OUT_OF_OFFICE -> delay
+
+Required persistence:
+- intent
+- confidence
+- reasoning
+- chosen next action
+- outcome later
+
+Phase 4: Meeting handoff
+------------------------
+Approved choke points:
+- src/workers/meeting_handoff/meeting-handoff.worker.service.ts
+- src/execution/execution.service.ts runMeetingHandoff
+- src/meetings/meetings.service.ts
+
+Decisions:
+- SEND_BOOKING_LINK
+- ESCALATE_OPERATOR
+- REQUEST_CLARIFICATION
+
+Hard block:
+- no booking URL means no auto-send.
+
+Phase 5: Campaign activation
+----------------------------
+Approved choke points:
+- src/campaigns/campaigns.service.ts activateCampaign/restartCampaign
+- src/execution/execution.service.ts maintainCampaignContinuity/evaluateCampaignContinuity/runLeadImportBootstrap
+- src/ai/ai.service.ts bootstrapCampaignActivation
+
+Decisions:
+- ACTIVATE
+- BLOCK
+- REQUEST_SETUP_COMPLETION
+- REQUEST_BILLING
+
+Hard blocks:
+- no active subscription
+- incomplete setup
+- missing legal/representation authorization where applicable
+- blocked provider policy
+
+Phase 6: Lead sourcing intelligence
+-----------------------------------
+Approved choke points:
+- src/sources/source-planner.service.ts
+- src/sources/internal-discovery.orchestrator.ts
+- src/lead-sources/lead-sources.service.ts
+- src/providers/provider-registry.service.ts
+- src/providers/provider-policy.service.ts
+- src/providers/provider-cost-guard.service.ts
+- src/providers/provider-fallback.service.ts
+- src/workers/lead_import/lead-import.worker.service.ts
+
+Decisions:
+- choose provider
+- use internal discovery
+- reject provider usage due to cost/policy
+- accept/reject lead
+- adjust targeting
+
+Phase 7: Billing and agreements
+-------------------------------
+Approved choke points:
+- src/billing/billing.service.ts
+- src/subscriptions/subscriptions.service.ts
+- src/agreements/agreements.service.ts
+- src/campaigns/campaigns.service.ts
+- src/execution/execution.service.ts
+
+Decisions:
+- PROCEED
+- BLOCK_CAMPAIGN
+- SEND_REMINDER
+- ESCALATE_OPERATOR
+
+Rule:
+AI can recommend, but backend enforcement remains the final gate.
+
+Phase 8: System doctor
+----------------------
+Approved choke points:
+- src/workers/alert_generation/alert-generation.worker.service.ts
+- src/health/health.service.ts
+- src/control/control.service.ts
+- src/operator/operator.service.ts
+- src/execution/execution.service.ts job failure paths
+- src/providers/* provider failures
+- src/emails/emails.service.ts email delivery/webhook failure paths
+
+Output:
+- root cause
+- affected layer
+- fix plan
+- risk level
+- recommended operator action
+
+Phase 9: Operator intelligence
+------------------------------
+Approved choke points:
+- src/operator/operator.service.ts
+- src/control/control.service.ts
+- src/analytics/analytics.service.ts
+- src/client-portal/client-portal.service.ts where client-facing truth is exposed
+
+Operator must eventually see:
+- AI decisions
+- blocked actions
+- failed jobs
+- system doctor output
+- override options
+
+Decision record requirement
+---------------------------
+Before any authoritative AI action is executed, the system must persist a decision record or equivalent DB-backed record. Existing models should be inspected first, especially ActivityEvent, AuditLog, Alert, PolicySetting, WorkflowRun, AdaptationDecision, QualificationDecision, ProviderUsageLog, SourceRun, Job, JobRun, OutreachMessage, Reply, and Meeting.
+
+Do not add a new Prisma model until existing models are assessed and the user explicitly approves schema/migration work.

@@ -1,0 +1,561 @@
+ORCHESTRATE BACKEND ACTUAL MAP FOR CODEX
+========================================
+
+Source of this map
+------------------
+Generated from the uploaded backend zip. This is not an assumed folder list.
+
+Root files and build context
+----------------------------
+- package.json defines NestJS backend scripts:
+  - npm run build = npm run prisma:generate && nest build && find dist -maxdepth 3 -type f | sort
+  - npm run start = node dist/src/main.js
+  - npm run start:prod = npx prisma migrate deploy --config ./prisma.config.ts && node dist/src/main.js
+  - npm run prisma:generate = npx prisma generate --config ./prisma.config.ts
+- Prisma config is used through ./prisma.config.ts.
+- Prisma schema path: prisma/schema.prisma.
+
+Top-level src zones
+-------------------
+- src/access-context
+- src/adaptation
+- src/agreements
+- src/ai
+- src/analytics
+- src/auth
+- src/billing
+- src/campaigns
+- src/client-portal
+- src/clients
+- src/common
+- src/control
+- src/core
+- src/database
+- src/deliverability
+- src/emails
+- src/execution
+- src/financial-documents
+- src/health
+- src/intake
+- src/invoices
+- src/lead-sources
+- src/leads
+- src/meetings
+- src/modules
+- src/notifications
+- src/operator
+- src/organizations
+- src/providers
+- src/public
+- src/qualification
+- src/reachability
+- src/reminders
+- src/replies
+- src/signals
+- src/sources
+- src/statements
+- src/strategy
+- src/subscriptions
+- src/support
+- src/templates
+- src/users
+- src/workers
+- src/workflows
+
+Worker registry and concrete worker files
+-----------------------------------------
+- src/workers/alert_generation/alert-generation.worker.module.ts
+- src/workers/alert_generation/alert-generation.worker.service.ts
+- src/workers/enrichment/enrichment.worker.module.ts
+- src/workers/enrichment/enrichment.worker.service.ts
+- src/workers/first_send/first-send.worker.module.ts
+- src/workers/first_send/first-send.worker.service.ts
+- src/workers/follow_up/follow-up.worker.module.ts
+- src/workers/follow_up/follow-up.worker.service.ts
+- src/workers/inbox_sync/inbox-sync.worker.module.ts
+- src/workers/inbox_sync/inbox-sync.worker.service.ts
+- src/workers/invoice_generation/invoice-generation.worker.module.ts
+- src/workers/invoice_generation/invoice-generation.worker.service.ts
+- src/workers/lead_import/lead-import.worker.module.ts
+- src/workers/lead_import/lead-import.worker.service.ts
+- src/workers/meeting_handoff/meeting-handoff.worker.module.ts
+- src/workers/meeting_handoff/meeting-handoff.worker.service.ts
+- src/workers/message_generation/message-generation.worker.module.ts
+- src/workers/message_generation/message-generation.worker.service.ts
+- src/workers/reply_classification/reply-classification.worker.module.ts
+- src/workers/reply_classification/reply-classification.worker.service.ts
+- src/workers/scoring/scoring.worker.module.ts
+- src/workers/scoring/scoring.worker.service.ts
+- src/workers/worker.types.ts
+- src/workers/workers.module.ts
+- src/workers/workers.service.ts
+
+All TypeScript source files detected
+------------------------------------
+- src/access-context/access-context.module.ts
+- src/access-context/access-context.service.ts
+- src/adaptation/adaptation.controller.ts
+- src/adaptation/adaptation.module.ts
+- src/adaptation/adaptation.service.ts
+- src/agreements/agreement-delivery.service.ts
+- src/agreements/agreements.controller.ts
+- src/agreements/agreements.module.ts
+- src/agreements/agreements.service.ts
+- src/agreements/dto/agreement-document.builder.ts
+- src/agreements/dto/agreement-html.renderer.ts
+- src/agreements/dto/create-service-agreement.dto.ts
+- src/ai/agents/lead.agent.ts
+- src/ai/agents/sequence.agent.ts
+- src/ai/agents/strategy.agent.ts
+- src/ai/agents/writer.agent.ts
+- src/ai/ai.controller.ts
+- src/ai/ai.module.ts
+- src/ai/ai.service.ts
+- src/ai/contracts/ai.controller.contract.ts
+- src/ai/contracts/lead.contract.ts
+- src/ai/contracts/message.contract.ts
+- src/ai/contracts/sequence.contract.ts
+- src/ai/contracts/service-profile.contract.ts
+- src/ai/contracts/strategy.contract.ts
+- src/ai/intake-ai.service.ts
+- src/ai/prompts/intake.system.prompt.ts
+- src/ai/prompts/lead.prompt.ts
+- src/ai/prompts/sequence.prompt.ts
+- src/ai/prompts/strategy.prompt.ts
+- src/ai/prompts/writer.prompt.ts
+- src/ai/providers/openai.provider.ts
+- src/analytics/analytics.controller.ts
+- src/analytics/analytics.module.ts
+- src/analytics/analytics.service.ts
+- src/app.module.ts
+- src/auth/auth.controller.ts
+- src/auth/auth.module.ts
+- src/auth/auth.service.ts
+- src/auth/dto/client-register.dto.ts
+- src/auth/dto/login.dto.ts
+- src/auth/dto/oauth-login.dto.ts
+- src/auth/dto/operator-bootstrap.dto.ts
+- src/auth/dto/request-email-verification.dto.ts
+- src/auth/dto/request-password-reset.dto.ts
+- src/auth/dto/reset-password.dto.ts
+- src/auth/dto/verify-email.dto.ts
+- src/billing/billing.controller.ts
+- src/billing/billing.module.ts
+- src/billing/billing.service.ts
+- src/billing/dto/create-invoice.dto.ts
+- src/billing/dto/receipt-document.builder.ts
+- src/billing/dto/receipt-html.renderer.ts
+- src/billing/dto/record-payment.dto.ts
+- src/billing/pricing/plan-catalog.service.ts
+- src/billing/pricing/plan-catalog.ts
+- src/billing/receipt-delivery.service.ts
+- src/billing/stripe/stripe.service.ts
+- src/billing/stripe/webhook.controller.ts
+- src/campaigns/campaigns.controller.ts
+- src/campaigns/campaigns.module.ts
+- src/campaigns/campaigns.service.ts
+- src/campaigns/dto/create-campaign.dto.ts
+- src/campaigns/dto/list-campaigns.dto.ts
+- src/client-portal/client-portal.controller.ts
+- src/client-portal/client-portal.module.ts
+- src/client-portal/client-portal.service.ts
+- src/clients/client-campaign.controller.ts
+- src/clients/clients.controller.ts
+- src/clients/clients.module.ts
+- src/clients/clients.service.ts
+- src/clients/dto/create-client-setup.dto.ts
+- src/clients/dto/create-client.dto.ts
+- src/clients/dto/deactivate-client-account.dto.ts
+- src/clients/dto/list-clients.dto.ts
+- src/clients/dto/update-campaign-profile.dto.ts
+- src/clients/dto/update-client-profile.dto.ts
+- src/common/decorators/request-context.decorator.ts
+- src/common/dto/pagination-query.dto.ts
+- src/common/policy/data-policy.ts
+- src/common/policy/policy.service.ts
+- src/common/policy/policy.types.ts
+- src/common/policy/self-exclusion.service.ts
+- src/common/types/request-context.type.ts
+- src/common/utils/execution-read-surface.ts
+- src/common/utils/pagination.ts
+- src/common/utils/prisma-json.ts
+- src/control/control.controller.ts
+- src/control/control.module.ts
+- src/control/control.service.ts
+- src/database/database.module.ts
+- src/database/prisma.service.ts
+- src/deliverability/deliverability.controller.ts
+- src/deliverability/deliverability.module.ts
+- src/deliverability/deliverability.service.ts
+- src/deliverability/dto/create-mailbox.dto.ts
+- src/deliverability/dto/create-send-policy.dto.ts
+- src/deliverability/dto/create-sending-domain.dto.ts
+- src/deliverability/dto/create-suppression-entry.dto.ts
+- src/deliverability/dto/register-bounce.dto.ts
+- src/deliverability/dto/register-complaint.dto.ts
+- src/emails/dto/send-templated-email.dto.ts
+- src/emails/emails.controller.ts
+- src/emails/emails.module.ts
+- src/emails/emails.service.ts
+- src/emails/templates/account-approved.template.ts
+- src/emails/templates/account-email-verification.template.ts
+- src/emails/templates/account-on-hold.template.ts
+- src/emails/templates/account-password-reset.template.ts
+- src/emails/templates/account-security-alert.template.ts
+- src/emails/templates/account-welcome.template.ts
+- src/emails/templates/agreement-revision-sent.template.ts
+- src/emails/templates/agreement-sent.template.ts
+- src/emails/templates/agreement-signed.template.ts
+- src/emails/templates/base.template.ts
+- src/emails/templates/campaign-started.template.ts
+- src/emails/templates/client-onboarding-completed.template.ts
+- src/emails/templates/client-onboarding-started.template.ts
+- src/emails/templates/compliance-request-sent.template.ts
+- src/emails/templates/contact-acknowledgement.template.ts
+- src/emails/templates/contact-inquiry-notification.template.ts
+- src/emails/templates/formal-notice-sent.template.ts
+- src/emails/templates/invoice-issued.template.ts
+- src/emails/templates/invoice-reminder-due.template.ts
+- src/emails/templates/invoice-reminder-overdue.template.ts
+- src/emails/templates/lead-delivery-available.template.ts
+- src/emails/templates/meeting-booked-notice.template.ts
+- src/emails/templates/payment-failed.template.ts
+- src/emails/templates/payment-received.template.ts
+- src/emails/templates/privacy-updated.template.ts
+- src/emails/templates/refund-issued.template.ts
+- src/emails/templates/service-issue-notice.template.ts
+- src/emails/templates/setup-completion-reminder.template.ts
+- src/emails/templates/statement-issued.template.ts
+- src/emails/templates/subscription-canceled.template.ts
+- src/emails/templates/subscription-created.template.ts
+- src/emails/templates/subscription-renewed.template.ts
+- src/emails/templates/terms-updated.template.ts
+- src/execution/dto/dispatch-due-jobs.dto.ts
+- src/execution/dto/queue-lead-send.dto.ts
+- src/execution/dto/run-job.dto.ts
+- src/execution/execution.controller.ts
+- src/execution/execution.module.ts
+- src/execution/execution.service.ts
+- src/financial-documents/document-formatting.ts
+- src/financial-documents/legal-identity.ts
+- src/health/health.controller.ts
+- src/health/health.module.ts
+- src/health/health.service.ts
+- src/intake/dto/create-client-intake.dto.ts
+- src/intake/dto/create-public-intake.dto.ts
+- src/intake/dto/reply-intake.dto.ts
+- src/intake/intake.constants.ts
+- src/intake/intake.controller.ts
+- src/intake/intake.module.ts
+- src/intake/intake.service.ts
+- src/intake/intake.types.ts
+- src/invoices/dto/create-draft-invoice.dto.ts
+- src/invoices/dto/invoice-document.builder.ts
+- src/invoices/dto/invoice-email.renderer.ts
+- src/invoices/dto/invoice-html.renderer.ts
+- src/invoices/dto/record-invoice-payment.dto.ts
+- src/invoices/dto/send-invoice-email.dto.ts
+- src/invoices/invoice-delivery.service.ts
+- src/invoices/invoice-pdf.service.ts
+- src/invoices/invoices.controller.ts
+- src/invoices/invoices.module.ts
+- src/invoices/invoices.service.ts
+- src/lead-sources/lead-sources.module.ts
+- src/lead-sources/lead-sources.service.ts
+- src/lead-sources/lead-sources.types.ts
+- src/lead-sources/providers/apollo.provider.ts
+- src/leads/dto/create-lead.dto.ts
+- src/leads/dto/list-leads.dto.ts
+- src/leads/leads.controller.ts
+- src/leads/leads.module.ts
+- src/leads/leads.service.ts
+- src/main.ts
+- src/meetings/dto/list-meetings.dto.ts
+- src/meetings/meetings.controller.ts
+- src/meetings/meetings.module.ts
+- src/meetings/meetings.service.ts
+- src/notifications/dto/create-alert.dto.ts
+- src/notifications/dto/list-alerts.dto.ts
+- src/notifications/notifications.controller.ts
+- src/notifications/notifications.module.ts
+- src/notifications/notifications.service.ts
+- src/operator/dto/assign-inquiry.dto.ts
+- src/operator/dto/create-inquiry-note.dto.ts
+- src/operator/dto/create-inquiry-reply.dto.ts
+- src/operator/dto/update-inquiry-status.dto.ts
+- src/operator/operator.controller.ts
+- src/operator/operator.module.ts
+- src/operator/operator.service.ts
+- src/organizations/dto/create-organization.dto.ts
+- src/organizations/dto/list-organizations.dto.ts
+- src/organizations/organizations.controller.ts
+- src/organizations/organizations.module.ts
+- src/organizations/organizations.service.ts
+- src/providers/provider-cost-guard.service.ts
+- src/providers/provider-fallback.service.ts
+- src/providers/provider-policy.service.ts
+- src/providers/provider-registry.service.ts
+- src/providers/providers.controller.ts
+- src/providers/providers.module.ts
+- src/providers/types/provider.types.ts
+- src/public/dto/create-public-contact.dto.ts
+- src/public/public.controller.ts
+- src/public/public.module.ts
+- src/public/public.service.ts
+- src/qualification/qualification.controller.ts
+- src/qualification/qualification.module.ts
+- src/qualification/qualification.service.ts
+- src/reachability/reachability-builder.service.ts
+- src/reachability/reachability.controller.ts
+- src/reachability/reachability.module.ts
+- src/reminders/dto/create-reminder.dto.ts
+- src/reminders/reminders.controller.ts
+- src/reminders/reminders.module.ts
+- src/reminders/reminders.service.ts
+- src/replies/dto/intake-reply.dto.ts
+- src/replies/dto/list-replies.dto.ts
+- src/replies/replies.controller.ts
+- src/replies/replies.module.ts
+- src/replies/replies.service.ts
+- src/signals/signal-detection.service.ts
+- src/signals/signals.controller.ts
+- src/signals/signals.module.ts
+- src/signals/signals.types.ts
+- src/sources/internal-discovery.orchestrator.ts
+- src/sources/providers/internal/directory.discovery-provider.ts
+- src/sources/providers/internal/search.discovery-provider.ts
+- src/sources/providers/internal/website.discovery-provider.ts
+- src/sources/source-planner.service.ts
+- src/sources/sources.controller.ts
+- src/sources/sources.module.ts
+- src/sources/types/discovery.types.ts
+- src/statements/dto/create-statement.dto.ts
+- src/statements/dto/statement-document.builder.ts
+- src/statements/dto/statement-html.renderer.ts
+- src/statements/statement-delivery.service.ts
+- src/statements/statements.controller.ts
+- src/statements/statements.module.ts
+- src/statements/statements.service.ts
+- src/strategy/dto/generate-strategy.dto.ts
+- src/strategy/strategy.controller.ts
+- src/strategy/strategy.module.ts
+- src/strategy/strategy.service.ts
+- src/strategy/strategy.types.ts
+- src/subscriptions/subscriptions.controller.ts
+- src/subscriptions/subscriptions.module.ts
+- src/subscriptions/subscriptions.service.ts
+- src/support/client-support.controller.ts
+- src/support/support-case.repository.ts
+- src/support/support-case.service.ts
+- src/templates/dto/create-template.dto.ts
+- src/templates/templates.controller.ts
+- src/templates/templates.module.ts
+- src/templates/templates.service.ts
+- src/users/dto/add-membership.dto.ts
+- src/users/dto/create-user.dto.ts
+- src/users/users.controller.ts
+- src/users/users.module.ts
+- src/users/users.service.ts
+- src/workers/alert_generation/alert-generation.worker.module.ts
+- src/workers/alert_generation/alert-generation.worker.service.ts
+- src/workers/enrichment/enrichment.worker.module.ts
+- src/workers/enrichment/enrichment.worker.service.ts
+- src/workers/first_send/first-send.worker.module.ts
+- src/workers/first_send/first-send.worker.service.ts
+- src/workers/follow_up/follow-up.worker.module.ts
+- src/workers/follow_up/follow-up.worker.service.ts
+- src/workers/inbox_sync/inbox-sync.worker.module.ts
+- src/workers/inbox_sync/inbox-sync.worker.service.ts
+- src/workers/invoice_generation/invoice-generation.worker.module.ts
+- src/workers/invoice_generation/invoice-generation.worker.service.ts
+- src/workers/lead_import/lead-import.worker.module.ts
+- src/workers/lead_import/lead-import.worker.service.ts
+- src/workers/meeting_handoff/meeting-handoff.worker.module.ts
+- src/workers/meeting_handoff/meeting-handoff.worker.service.ts
+- src/workers/message_generation/message-generation.worker.module.ts
+- src/workers/message_generation/message-generation.worker.service.ts
+- src/workers/reply_classification/reply-classification.worker.module.ts
+- src/workers/reply_classification/reply-classification.worker.service.ts
+- src/workers/scoring/scoring.worker.module.ts
+- src/workers/scoring/scoring.worker.service.ts
+- src/workers/worker.types.ts
+- src/workers/workers.module.ts
+- src/workers/workers.service.ts
+- src/workflows/workflows.controller.ts
+- src/workflows/workflows.module.ts
+- src/workflows/workflows.service.ts
+
+Prisma enums and models detected
+--------------------------------
+9:enum OrganizationType {
+15:enum MemberRole {
+24:enum ClientStatus {
+32:enum PlanInterval {
+39:enum SubscriptionStatus {
+49:enum InvoiceStatus {
+61:enum InvoiceLineType {
+71:enum InvoiceAccessEventType {
+81:enum InvoiceActorType {
+87:enum PaymentStatus {
+95:enum PaymentMethodType {
+105:enum ICPStatus {
+111:enum SegmentStatus {
+118:enum CampaignStatus {
+127:enum SequenceStatus {
+134:enum SequenceStepType {
+141:enum SequenceStepStatus {
+147:enum LeadSourceType {
+158:enum LeadStatus {
+172:enum QualificationStatus {
+179:enum ContactEmailStatus {
+187:enum ContactChannelType {
+194:enum ContactChannelStatus {
+202:enum CommunicationType {
+208:enum ContactConsentStatus {
+215:enum ImportBatchStatus {
+223:enum MailboxConnectionState {
+231:enum MessageClass {
+238:enum PublicInquiryType {
+247:enum PublicInquiryStatus {
+255:enum InquiryDirection {
+261:enum InquiryChannel {
+266:enum InquiryMessageType {
+276:enum InquirySource {
+281:enum InquiryAccountType {
+286:enum InquiryCategory {
+298:enum InquiryIntent {
+305:enum InquiryPriority {
+311:enum InquiryMessageAuthorType {
+318:enum InquiryMessageVisibility {
+323:enum InquiryNoteType {
+330:enum EnrollmentStatus {
+339:enum MessageDirection {
+344:enum MessageChannel {
+348:enum MessageStatus {
+361:enum ReplyIntent {
+373:enum MeetingStatus {
+381:enum DomainStatus {
+388:enum MailboxProvider {
+396:enum MailboxStatus {
+405:enum MailboxHealthStatus {
+412:enum WarmupStatus {
+419:enum SuppressionType {
+426:enum JobType {
+441:enum JobStatus {
+450:enum AlertSeverity {
+456:enum AlertStatus {
+463:enum ActivityKind {
+477:enum TemplateType {
+491:enum AgreementStatus {
+500:enum StatementStatus {
+506:enum CollectionActionKind {
+514:enum CollectionActionStatus {
+520:enum ReminderArtifactKind {
+528:enum ReminderArtifactStatus {
+535:enum DocumentDispatchStatus {
+542:enum EmailCategory {
+550:enum EmailEventType {
+590:enum DeliveryChannel {
+598:enum EmailDeliveryProvider {
+605:enum EmailDeliveryMode {
+612:enum MailboxRole {
+622:enum PolicyScope {
+630:enum WorkflowLane {
+638:enum WorkflowType {
+654:enum WorkflowStatus {
+664:enum WorkflowTrigger {
+674:enum RecordSource {
+683:enum GenerationState {
+694:enum LeadQualificationState {
+705:enum MessageLifecycle {
+716:enum ArtifactLifecycle {
+726:enum DispatchLifecycle {
+735:enum ActivityVisibility {
+741:model WorkflowRun {
+798:enum AuthProvider {
+805:model Organization {
+874:model User {
+903:model AuthIdentity {
+921:model WorkspaceMember {
+937:model Client {
+1029:model Plan {
+1049:model Subscription {
+1076:model Invoice {
+1133:model Payment {
+1160:model PaymentAttempt {
+1177:model IdealCustomerProfile {
+1201:model Segment {
+1221:model Campaign {
+1273:model Sequence {
+1297:model SequenceStep {
+1317:model LeadSource {
+1342:model Account {
+1370:model Contact {
+1405:model ContactChannel {
+1433:model ContactConsent {
+1459:model ImportBatch {
+1486:model Lead {
+1529:model LeadEnrollment {
+1552:model OutreachMessage {
+1601:model Reply {
+1637:model Meeting {
+1668:model SendingDomain {
+1687:model Mailbox {
+1736:model MailboxHealthEvent {
+1753:model SendPolicy {
+1782:model SuppressionEntry {
+1804:model BounceEvent {
+1819:model ComplaintEvent {
+1833:model Job {
+1863:model JobRun {
+1881:model WebhookEventReceipt {
+1898:model ActivityEvent {
+1925:model AuditLog {
+1944:model Alert {
+1968:model Note {
+1990:model Template {
+2023:model PolicySetting {
+2045:enum CoreObjectType {
+2057:enum ExtensionRecordStatus {
+2063:enum CustomFieldDataType {
+2076:enum PipelineStageType {
+2086:enum WorkflowTriggerType {
+2101:enum WorkflowActionType {
+2115:model IndustryPack {
+2134:model ClientIndustryProfile {
+2155:model ExtensionObjectDefinition {
+2174:model ExtensionRecord {
+2200:model CustomFieldDefinition {
+2225:model CustomFieldValue {
+2247:model PipelineDefinition {
+2271:model PipelineStage {
+2291:model ObjectStageState {
+2313:model WorkflowPolicy {
+2335:model AutomationRule {
+2356:model TagDefinition {
+2378:model TagAssignment {
+2393:model BillingProfile {
+2416:model InvoiceLine {
+2438:model InvoiceAccessEvent {
+2463:model Receipt {
+2492:model CreditNote {
+2519:model Statement {
+2553:model StatementInvoiceLink {
+2564:model StatementPaymentLink {
+2575:model CollectionAction {
+2600:model ClientRepresentationAuth {
+2621:model ServiceAgreement {
+2656:model ReminderArtifact {
+2691:model DocumentDispatch {
+2745:model PublicInquiry {
+2825:model InquiryMessage {
+2862:model InquiryNote {
+2879:model OpportunityProfile {
+2901:model SignalEvent {
+2924:model SourcePlan {
+2943:model SourceRun {
+2965:model DiscoveredEntity {
+2990:model ReachabilityRecord {
+3012:model QualificationDecision {
+3034:model ProviderUsageLog {
+3053:model AdaptationDecision {

@@ -1,0 +1,100 @@
+ORCHESTRATE CODEX SYSTEM CONSTITUTION
+======================================
+
+Purpose
+-------
+This document defines how Codex is allowed to operate inside the Orchestrate backend.
+
+Codex is a controlled engineering layer. It assists with reading, editing, testing, debugging, and validating code. It is not the production AI decision brain of Orchestrate.
+
+Non-Negotiable Authority Model
+------------------------------
+DB = Authority of Reality
+AI = Authority of Decision
+Backend = Authority of Enforcement
+Workers = Authority of Execution
+Frontend = Authority of Representation
+
+Codex must never break this model.
+
+Backend First
+-------------
+The current backend is the correct place to lock Codex behavior first. Frontend is intentionally excluded from this package because the frontend design and alignment are still moving.
+
+Full Backend Scope
+------------------
+Codex must treat the whole backend as one connected system. It must not assume Orchestrate is only campaigns, leads, or workers.
+
+Actual backend src zones detected:
+- src/access-context
+- src/adaptation
+- src/agreements
+- src/ai
+- src/analytics
+- src/auth
+- src/billing
+- src/campaigns
+- src/client-portal
+- src/clients
+- src/common
+- src/control
+- src/core
+- src/database
+- src/deliverability
+- src/emails
+- src/execution
+- src/financial-documents
+- src/health
+- src/intake
+- src/invoices
+- src/lead-sources
+- src/leads
+- src/meetings
+- src/modules
+- src/notifications
+- src/operator
+- src/organizations
+- src/providers
+- src/public
+- src/qualification
+- src/reachability
+- src/reminders
+- src/replies
+- src/signals
+- src/sources
+- src/statements
+- src/strategy
+- src/subscriptions
+- src/support
+- src/templates
+- src/users
+- src/workers
+- src/workflows
+
+Codex May
+---------
+- Inspect the full backend.
+- Map existing services, modules, workers, DTOs, Prisma models, and routes.
+- Implement requested backend changes using whole replacement files.
+- Add AI wiring at approved choke points.
+- Add decision-recording infrastructure when requested.
+- Strengthen validation, guards, tests, and build safety.
+- Improve consistency where backend truth and execution state diverges.
+
+Codex Must Not
+--------------
+- Rewrite architecture without explicit instruction.
+- Replace existing workers with a new parallel execution system.
+- Create duplicate lifecycle logic outside existing services.
+- Bypass billing, agreement, subscription, auth, provider policy, suppression, deliverability, or campaign-state enforcement.
+- Add migrations without explicit migration instruction.
+- Guess missing context.
+- Shorten existing files during edits.
+- Return stitched patches.
+- Modify secret values.
+
+Production Decision Boundary
+----------------------------
+Runtime production decisions must be made by Orchestrate backend services and recorded in the database.
+
+Codex may build the mechanism. Codex must not become the mechanism.

@@ -1,0 +1,64 @@
+ORCHESTRATE CODEX EXECUTION PROTOCOL
+===================================
+
+Purpose
+-------
+This protocol controls how Codex should perform backend work.
+
+Default operating sequence
+--------------------------
+1. Inspect current files before editing.
+2. Map ownership: controller, service, worker, Prisma model, DTO, module.
+3. Identify the smallest safe change that preserves architecture.
+4. Produce whole replacement files only.
+5. Run relevant validation when possible.
+6. Report exactly what changed.
+
+Required validations by task type
+---------------------------------
+General backend TypeScript change:
+- npm run build
+
+Prisma-related change:
+- npx prisma validate --config ./prisma.config.ts
+- npm run prisma:generate
+- npm run build
+
+Module/provider injection change:
+- npm run build
+- inspect imports/exports/providers in affected modules
+
+Worker/job change:
+- npm run build
+- inspect JobType mapping in src/workers/workers.service.ts
+- inspect related Prisma Job status/lifecycle fields
+
+Email/send change:
+- npm run build
+- inspect src/emails/emails.service.ts
+- preserve webhook, event, suppression, and reply-to behavior
+
+AI wiring change:
+- npm run build
+- verify decision is recorded or explicitly marked advisory-only
+- verify backend hard blocks still enforce policy
+
+Forbidden execution behavior
+----------------------------
+- Do not run destructive database commands.
+- Do not run prisma migrate deploy/dev unless explicitly requested.
+- Do not use real external provider calls during local validation unless the user explicitly asks.
+- Do not print secrets.
+- Do not edit .env secret values.
+
+Whole-file output requirement
+-----------------------------
+For code edits, Codex must provide complete files, not snippets. If multiple files are changed, package them together or clearly list each full replacement file.
+
+No frontend assumption
+----------------------
+Frontend is intentionally not locked in this Codex backend package. Do not design backend around temporary frontend screens. Backend truth comes first.
+
+No drift rule
+-------------
+If Codex sees a better architecture, it may propose it. It must not implement the new architecture unless the user approves it.
