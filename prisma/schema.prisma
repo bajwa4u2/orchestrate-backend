@@ -742,6 +742,7 @@ model WorkflowRun {
   id                 String          @id @default(cuid())
   organizationId     String
   clientId           String
+  aiDecisionId       String?
   subscriptionId     String?
   campaignId         String?
   invoiceId          String?
@@ -765,6 +766,7 @@ model WorkflowRun {
 
   organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  aiDecision         AiDecisionRecord?  @relation("WorkflowAiDecision", fields: [aiDecisionId], references: [id], onDelete: SetNull)
   campaigns          Campaign[]
   leadSources        LeadSource[]
   leads              Lead[]
@@ -787,6 +789,7 @@ model WorkflowRun {
 
   @@index([organizationId, lane, type, status])
   @@index([clientId, lane, type, status])
+  @@index([aiDecisionId])
   @@index([subscriptionId])
   @@index([campaignId])
   @@index([invoiceId])
@@ -1835,6 +1838,7 @@ model Job {
   organizationId String
   clientId       String?
   campaignId     String?
+  aiDecisionId   String?
   type           JobType
   status         JobStatus @default(QUEUED)
   queueName      String
@@ -1850,13 +1854,15 @@ model Job {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  client       Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  campaign     Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client       Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  campaign     Campaign?         @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  aiDecision   AiDecisionRecord? @relation("JobAiDecision", fields: [aiDecisionId], references: [id], onDelete: SetNull)
   runs         JobRun[]
 
   @@index([queueName, status, scheduledFor])
   @@index([organizationId, type, status])
+  @@index([aiDecisionId])
   @@index([dedupeKey])
 }
 
@@ -3142,6 +3148,8 @@ model AiDecisionRecord {
 
   supersededBy AiDecisionRecord?         @relation("AiDecisionSupersession", fields: [supersededById], references: [id], onDelete: SetNull)
   supersedes   AiDecisionRecord[]        @relation("AiDecisionSupersession")
+  workflows    WorkflowRun[]             @relation("WorkflowAiDecision")
+  jobs         Job[]                     @relation("JobAiDecision")
   links        AiDecisionEntityLink[]
   enforcements AiEnforcementRecord[]
   outcomes     AiDecisionOutcome[]

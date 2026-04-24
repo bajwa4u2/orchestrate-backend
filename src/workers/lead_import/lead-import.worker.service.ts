@@ -24,6 +24,8 @@ import { SignalDetectionService } from '../../signals/signal-detection.service';
 import { SourcePlannerService } from '../../sources/source-planner.service';
 import { StrategyService } from '../../strategy/strategy.service';
 import { DeliverabilityService } from '../../deliverability/deliverability.service';
+import { AiDecisionEnforcementService } from '../../ai/governance/ai-decision-enforcement.service';
+import { AiDecisionGatewayService } from '../../ai/governance/ai-decision-gateway.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
 @Injectable()
@@ -42,6 +44,8 @@ export class LeadImportWorkerService implements JobWorker {
     private readonly leadSourcesService: LeadSourcesService,
     private readonly providerFallbackService: ProviderFallbackService,
     private readonly deliverabilityService: DeliverabilityService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
   ) {}
 
   async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
@@ -363,11 +367,69 @@ export class LeadImportWorkerService implements JobWorker {
       });
       if (existing) continue;
 
+      const governance = await this.decisionGateway.decide({
+        scope: 'LEAD',
+        entity: {
+          organizationId: campaign.organizationId,
+          clientId: campaign.clientId,
+          campaignId: campaign.id,
+          leadId,
+          workflowRunId: context.workflowRunId ?? null,
+          jobId: job.id,
+        },
+        preferredAction: 'SEND_FIRST_OUTREACH',
+        proposedJobType: JobType.FIRST_SEND,
+        source: {
+          layer: 'worker',
+          service: LeadImportWorkerService.name,
+          method: 'run',
+          worker: LeadImportWorkerService.name,
+          reason: 'queue_first_send_from_lead_import',
+        },
+        enforcement: {
+          entityType: 'lead',
+          entityId: leadId,
+          operation: 'QUEUE',
+          workflowRunId: context.workflowRunId ?? null,
+          jobId: job.id,
+        },
+        metadata: {
+          parentJobId: job.id,
+          refillMode,
+        },
+      });
+
+      const enforcement = await this.decisionEnforcement.enforce({
+        decisionId: governance.decisionId,
+        organizationId: campaign.organizationId,
+        scope: 'LEAD',
+        action: 'SEND_FIRST_OUTREACH',
+        entity: governance.snapshot.entity,
+        serviceName: LeadImportWorkerService.name,
+        methodName: 'run',
+        entityType: 'lead',
+        entityId: leadId,
+        operation: 'QUEUE',
+        workflowRunId: context.workflowRunId ?? null,
+        jobId: job.id,
+        metadata: {
+          queueName: 'outreach',
+        },
+      });
+
+      if (!enforcement.allowed || !governance.decisionId) {
+        this.logger.warn(
+          `AI governance blocked first-send queue for lead ${leadId}: ${enforcement.reason}`,
+        );
+        continue;
+      }
+
       const sendJob = await this.prisma.job.create({
         data: {
           organizationId: campaign.organizationId,
           clientId: campaign.clientId,
           campaignId: campaign.id,
+          aiDecisionId: governance.decisionId,
           type: JobType.FIRST_SEND,
           status: JobStatus.QUEUED,
           queueName: 'outreach',
@@ -378,6 +440,7 @@ export class LeadImportWorkerService implements JobWorker {
             leadId,
             workflowRunId: context.workflowRunId,
             note: 'automatic launch from opportunity discovery pipeline',
+            aiDecisionId: governance.decisionId,
           }),
         },
       });

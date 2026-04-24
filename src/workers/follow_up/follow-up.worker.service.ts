@@ -1,6 +1,8 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, forwardRef } from '@nestjs/common';
 import { Job, JobStatus, JobType, LeadStatus } from '@prisma/client';
 import { toPrismaJson } from '../../common/utils/prisma-json';
+import { AiDecisionEnforcementService } from '../../ai/governance/ai-decision-enforcement.service';
+import { AiDecisionGatewayService } from '../../ai/governance/ai-decision-gateway.service';
 import { PrismaService } from '../../database/prisma.service';
 import { FirstSendWorkerService } from '../first_send/first-send.worker.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
@@ -11,6 +13,8 @@ export class FollowUpWorkerService implements JobWorker {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
     @Inject(forwardRef(() => FirstSendWorkerService))
     private readonly firstSendWorker: FirstSendWorkerService,
   ) {}
@@ -118,11 +122,67 @@ export class FollowUpWorkerService implements JobWorker {
       });
 
       if (!existing) {
+        const governance = await this.decisionGateway.decide({
+          scope: 'LEAD',
+          entity: {
+            organizationId: refreshedLead.organizationId,
+            clientId: refreshedLead.clientId,
+            campaignId: refreshedLead.campaignId,
+            leadId,
+            workflowRunId: context.workflowRunId ?? null,
+            jobId: job.id,
+          },
+          preferredAction: 'SEND_FOLLOW_UP',
+          proposedJobType: JobType.FOLLOWUP_SEND,
+          source: {
+            layer: 'worker',
+            service: FollowUpWorkerService.name,
+            method: 'run',
+            worker: FollowUpWorkerService.name,
+            reason: 'queue_next_sequence_follow_up',
+          },
+          enforcement: {
+            entityType: 'lead',
+            entityId: leadId,
+            operation: 'QUEUE',
+            workflowRunId: context.workflowRunId ?? null,
+            jobId: job.id,
+          },
+          metadata: {
+            sourceJobId: job.id,
+            nextStepOrder: nextStep.orderIndex,
+          },
+        });
+
+        const enforcement = await this.decisionEnforcement.enforce({
+          decisionId: governance.decisionId,
+          organizationId: refreshedLead.organizationId,
+          scope: 'LEAD',
+          action: 'SEND_FOLLOW_UP',
+          entity: governance.snapshot.entity,
+          serviceName: FollowUpWorkerService.name,
+          methodName: 'run',
+          entityType: 'lead',
+          entityId: leadId,
+          operation: 'QUEUE',
+          workflowRunId: context.workflowRunId ?? null,
+          jobId: job.id,
+          metadata: {
+            queueName: 'followup',
+            nextStepOrder: nextStep.orderIndex,
+          },
+        });
+
+        if (!enforcement.allowed || !governance.decisionId) {
+          throw new BadRequestException(enforcement.reason || `AI governance blocked follow-up queue for ${leadId}`);
+        }
+
         await this.prisma.job.create({
           data: {
             organizationId: refreshedLead.organizationId,
             clientId: refreshedLead.clientId,
             campaignId: refreshedLead.campaignId,
+            aiDecisionId: governance.decisionId,
             type: JobType.FOLLOWUP_SEND,
             status: JobStatus.QUEUED,
             queueName: 'followup',
@@ -133,6 +193,7 @@ export class FollowUpWorkerService implements JobWorker {
               leadId,
               workflowRunId: context.workflowRunId,
               note: 'sequence follow-up',
+              aiDecisionId: governance.decisionId,
             }),
           },
         });

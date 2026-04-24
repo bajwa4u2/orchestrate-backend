@@ -76,7 +76,7 @@ export interface AiDecisionGatewayResult {
 }
 
 export interface AiDecisionEnforcementRequest {
-  decisionId: string;
+  decisionId?: string | null;
   organizationId?: string | null;
   scope?: AiAuthorityScope;
   action?: AiAuthorityAction;

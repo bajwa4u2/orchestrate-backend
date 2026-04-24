@@ -16,6 +16,16 @@ export class AiDecisionEnforcementService {
   ) {}
 
   async enforce(input: AiDecisionEnforcementRequest): Promise<AiDecisionEnforcementResult> {
+    if (!input.decisionId) {
+      return this.persistAndReturn(input, {
+        allowed: false,
+        status: 'NOT_FOUND',
+        reason: 'AI decision id is required for governance enforcement.',
+        trustMode: null,
+        requiresHumanReview: true,
+      });
+    }
+
     const decision = await this.prisma.aiDecisionRecord.findUnique({
       where: { id: input.decisionId },
     });
@@ -136,9 +146,11 @@ export class AiDecisionEnforcementService {
     input: AiDecisionEnforcementRequest,
     result: Omit<AiDecisionEnforcementResult, 'ok' | 'decisionId'>,
   ): Promise<AiDecisionEnforcementResult> {
+    const decisionId = result.status === 'NOT_FOUND' ? null : (input.decisionId ?? null);
+
     await this.prisma.aiEnforcementRecord.create({
       data: {
-        decisionId: result.status === 'NOT_FOUND' ? null : input.decisionId,
+        decisionId,
         organizationId: input.organizationId ?? 'unknown_organization',
         clientId: input.entity?.clientId ?? null,
         campaignId: input.entity?.campaignId ?? null,
@@ -168,7 +180,7 @@ export class AiDecisionEnforcementService {
       allowed: result.allowed,
       status: result.status,
       reason: result.reason,
-      decisionId: result.status === 'NOT_FOUND' ? null : input.decisionId,
+      decisionId,
       trustMode: result.trustMode,
       requiresHumanReview: result.requiresHumanReview,
     };

@@ -16,6 +16,8 @@ import { toPrismaJson } from '../../common/utils/prisma-json';
 import { PrismaService } from '../../database/prisma.service';
 import { DeliverabilityService } from '../../deliverability/deliverability.service';
 import { EmailsService } from '../../emails/emails.service';
+import { AiDecisionEnforcementService } from '../../ai/governance/ai-decision-enforcement.service';
+import { AiDecisionGatewayService } from '../../ai/governance/ai-decision-gateway.service';
 import { MessageGenerationWorkerService } from '../message_generation/message-generation.worker.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
@@ -29,6 +31,8 @@ export class FirstSendWorkerService implements JobWorker {
     private readonly deliverabilityService: DeliverabilityService,
     private readonly emailsService: EmailsService,
     private readonly messageGenerationWorker: MessageGenerationWorkerService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
   ) {}
 
   async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
@@ -330,11 +334,66 @@ export class FirstSendWorkerService implements JobWorker {
       });
 
       if (!existingFollowUp) {
+        const followUpGovernance = await this.decisionGateway.decide({
+          scope: 'LEAD',
+          entity: {
+            organizationId: lead.organizationId,
+            clientId: lead.clientId,
+            campaignId: lead.campaignId,
+            leadId: lead.id,
+            workflowRunId: input.workflowRunId ?? null,
+            jobId: input.job.id,
+          },
+          preferredAction: 'SEND_FOLLOW_UP',
+          proposedJobType: JobType.FOLLOWUP_SEND,
+          source: {
+            layer: 'worker',
+            service: FirstSendWorkerService.name,
+            method: 'sendLeadMessage',
+            worker: FirstSendWorkerService.name,
+            reason: 'queue_follow_up_after_first_send',
+          },
+          enforcement: {
+            entityType: 'lead',
+            entityId: lead.id,
+            operation: 'QUEUE',
+            workflowRunId: input.workflowRunId ?? null,
+            jobId: input.job.id,
+          },
+          metadata: {
+            parentJobId: input.job.id,
+            sequenceStepOrder,
+          },
+        });
+
+        const followUpEnforcement = await this.decisionEnforcement.enforce({
+          decisionId: followUpGovernance.decisionId,
+          organizationId: lead.organizationId,
+          scope: 'LEAD',
+          action: 'SEND_FOLLOW_UP',
+          entity: followUpGovernance.snapshot.entity,
+          serviceName: FirstSendWorkerService.name,
+          methodName: 'sendLeadMessage',
+          entityType: 'lead',
+          entityId: lead.id,
+          operation: 'QUEUE',
+          workflowRunId: input.workflowRunId ?? null,
+          jobId: input.job.id,
+          metadata: {
+            queueName: 'followup',
+          },
+        });
+
+        if (!followUpEnforcement.allowed || !followUpGovernance.decisionId) {
+          throw new BadRequestException(followUpEnforcement.reason);
+        }
+
         await this.prisma.job.create({
           data: {
             organizationId: lead.organizationId,
             clientId: lead.clientId,
             campaignId: lead.campaignId,
+            aiDecisionId: followUpGovernance.decisionId,
             type: JobType.FOLLOWUP_SEND,
             status: JobStatus.QUEUED,
             queueName: 'followup',
@@ -345,6 +404,7 @@ export class FirstSendWorkerService implements JobWorker {
               leadId: lead.id,
               workflowRunId: input.workflowRunId,
               note: 'automatic follow-up after first send',
+              aiDecisionId: followUpGovernance.decisionId,
             }),
           },
         });

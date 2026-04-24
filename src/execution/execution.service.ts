@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import {
   ActivityVisibility,
+  AiDecisionOutcomeStatus,
   CommunicationType,
   ContactConsentStatus,
   ContactEmailStatus,
@@ -21,6 +22,14 @@ import {
   WorkflowType,
 } from '@prisma/client';
 import { toPrismaJson } from '../common/utils/prisma-json';
+import {
+  AiAuthorityAction,
+  AiAuthorityEntityRef,
+  AiAuthorityScope,
+} from '../ai/contracts/ai-authority.contract';
+import { AiDecisionEnforcementService } from '../ai/governance/ai-decision-enforcement.service';
+import { AiDecisionGatewayService } from '../ai/governance/ai-decision-gateway.service';
+import { AiDecisionOutcomeService } from '../ai/governance/ai-decision-outcome.service';
 import { PrismaService } from '../database/prisma.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { WorkflowsService } from '../workflows/workflows.service';
@@ -32,6 +41,15 @@ import { WorkersService } from '../workers/workers.service';
 
 @Injectable()
 export class ExecutionService implements OnModuleInit {
+  private static readonly GOVERNED_EXECUTION_JOB_TYPES = new Set<JobType>([
+    JobType.LEAD_IMPORT,
+    JobType.MESSAGE_GENERATION,
+    JobType.FIRST_SEND,
+    JobType.FOLLOWUP_SEND,
+    JobType.REPLY_CLASSIFICATION,
+    JobType.MEETING_HANDOFF,
+  ]);
+
   private dispatchTimer: NodeJS.Timeout | null = null;
   private dispatchInFlight = false;
   private continuityTimer: NodeJS.Timeout | null = null;
@@ -43,6 +61,9 @@ export class ExecutionService implements OnModuleInit {
     private readonly workflowsService: WorkflowsService,
     private readonly aiService: AiService,
     private readonly workersService: WorkersService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
+    private readonly decisionOutcome: AiDecisionOutcomeService,
   ) {}
 
   onModuleInit() {
@@ -415,8 +436,34 @@ export class ExecutionService implements OnModuleInit {
       };
     }
 
+    const governance = await this.decideAndEnforce({
+      scope: 'CAMPAIGN',
+      action: 'SOURCE_LEADS',
+      entity: {
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        campaignId: campaign.id,
+      },
+      entityType: 'campaign',
+      entityId: campaign.id,
+      operation: 'QUEUE',
+      source: {
+        layer: 'system',
+        service: ExecutionService.name,
+        method: 'evaluateCampaignContinuity',
+        reason: 'queue_continuity_refill',
+      },
+      proposedJobType: JobType.LEAD_IMPORT,
+      metadata: {
+        refillMode: 'continuity_refill',
+        targetSendableFloor,
+        maxRefillBatchSize,
+      },
+    });
+
     const workflow = await this.workflowsService.createWorkflowRun({
       clientId: campaign.clientId,
+      aiDecisionId: governance.decisionId,
       campaignId: campaign.id,
       lane: WorkflowLane.GROWTH,
       type: WorkflowType.CAMPAIGN_GENERATION,
@@ -442,6 +489,7 @@ export class ExecutionService implements OnModuleInit {
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
         campaignId: campaign.id,
+        aiDecisionId: governance.decisionId,
         type: JobType.LEAD_IMPORT,
         status: JobStatus.QUEUED,
         queueName: 'activation',
@@ -455,6 +503,7 @@ export class ExecutionService implements OnModuleInit {
           targetSendableFloor,
           maxLeadCount: maxRefillBatchSize,
           requestedAt: now.toISOString(),
+          aiDecisionId: governance.decisionId,
         } as Prisma.InputJsonValue,
       },
     });
@@ -588,8 +637,36 @@ export class ExecutionService implements OnModuleInit {
 
     const jobType = dto.jobType ?? JobType.FIRST_SEND;
     const scheduledFor = dto.scheduledFor ?? new Date();
+    const governanceConfig = this.governanceForQueue({
+      jobType,
+      organizationId: lead.organizationId,
+      clientId: lead.clientId,
+      campaignId: lead.campaignId,
+      leadId: lead.id,
+    });
+    const governance = await this.decideAndEnforce({
+      scope: governanceConfig.scope,
+      action: governanceConfig.action,
+      entity: governanceConfig.entity,
+      entityType: governanceConfig.entityType,
+      entityId: governanceConfig.entityId,
+      operation: 'QUEUE',
+      source: {
+        layer: 'service',
+        service: ExecutionService.name,
+        method: 'queueLeadSend',
+        reason: jobType,
+      },
+      proposedJobType: jobType,
+      metadata: {
+        simulateDeliveryOnly: dto.simulateDeliveryOnly ?? false,
+        scheduledFor: scheduledFor.toISOString(),
+      },
+    });
+
     const workflow = await this.workflowsService.createWorkflowRun({
       clientId: lead.clientId,
+      aiDecisionId: governance.decisionId,
       campaignId: lead.campaignId,
       lane: WorkflowLane.GROWTH,
       type: this.resolveWorkflowType(jobType),
@@ -631,6 +708,7 @@ export class ExecutionService implements OnModuleInit {
         organizationId: lead.organizationId,
         clientId: lead.clientId,
         campaignId: lead.campaignId,
+        aiDecisionId: governance.decisionId,
         type: jobType,
         status: JobStatus.QUEUED,
         queueName: jobType === JobType.FOLLOWUP_SEND ? 'followup' : 'outreach',
@@ -643,6 +721,7 @@ export class ExecutionService implements OnModuleInit {
           simulateDeliveryOnly: dto.simulateDeliveryOnly ?? false,
           note: dto.note,
           metadataJson: dto.metadataJson ?? null,
+          aiDecisionId: governance.decisionId,
         } as Prisma.InputJsonValue,
       },
     });
@@ -674,6 +753,7 @@ export class ExecutionService implements OnModuleInit {
       scheduledFor,
       type: job.type,
       queueName: job.queueName,
+      aiDecisionId: governance.decisionId,
     };
   }
 
@@ -720,6 +800,7 @@ export class ExecutionService implements OnModuleInit {
 
     const payload = ((job.payloadJson ?? {}) as Record<string, unknown>) || {};
     const workflowRunId = typeof payload.workflowRunId === 'string' ? payload.workflowRunId : undefined;
+    const governanceConfig = this.isGovernedExecutionJobType(job.type) ? this.governanceForExistingJob(job) : null;
 
     if (dto.dryRun) {
       return {
@@ -759,6 +840,83 @@ export class ExecutionService implements OnModuleInit {
     const claimedJob = await this.prisma.job.findUnique({ where: { id: job.id } });
     if (!claimedJob) {
       throw new NotFoundException(`Job ${job.id} not found after claim`);
+    }
+
+    if (governanceConfig) {
+      const enforcement = await this.decisionEnforcement.enforce({
+        decisionId: claimedJob.aiDecisionId,
+        organizationId: claimedJob.organizationId,
+        scope: governanceConfig.scope,
+        action: governanceConfig.action,
+        entity: governanceConfig.entity,
+        serviceName: ExecutionService.name,
+        methodName: 'runJob',
+        entityType: governanceConfig.entityType,
+        entityId: governanceConfig.entityId,
+        operation: 'RUN',
+        workflowRunId: workflowRunId ?? null,
+        jobId: claimedJob.id,
+        metadata: {
+          queueName: claimedJob.queueName,
+          attemptCount: claimedJob.attemptCount,
+        },
+      });
+
+      if (!enforcement.allowed) {
+        await this.prisma.job.update({
+          where: { id: claimedJob.id },
+          data: {
+            status: JobStatus.FAILED,
+            finishedAt: new Date(),
+            lastError: enforcement.reason,
+          },
+        });
+
+        await this.prisma.jobRun.create({
+          data: {
+            jobId: claimedJob.id,
+            workflowRunId,
+            runNumber: claimedJob.attemptCount || 1,
+            status: JobStatus.FAILED,
+            startedAt: claimedJob.startedAt ?? startedAt,
+            finishedAt: new Date(),
+            errorMessage: enforcement.reason,
+          },
+        });
+
+        if (workflowRunId) {
+          await this.workflowsService.failWorkflowRun(workflowRunId, {
+            jobId: claimedJob.id,
+            error: enforcement.reason,
+            aiDecisionId: claimedJob.aiDecisionId,
+          });
+        }
+
+        await this.recordGovernanceOutcome({
+          decisionId: claimedJob.aiDecisionId,
+          organizationId: claimedJob.organizationId,
+          clientId: claimedJob.clientId,
+          campaignId: claimedJob.campaignId,
+          workflowRunId,
+          jobId: claimedJob.id,
+          entityType: governanceConfig.entityType,
+          entityId: governanceConfig.entityId,
+          outcomeType: `${claimedJob.type}_run`,
+          status: 'FAILED',
+          summary: enforcement.reason,
+          metadata: {
+            phase: 'pre_worker_enforcement',
+          },
+        });
+
+        return {
+          ok: false,
+          jobId: claimedJob.id,
+          workflowRunId,
+          status: JobStatus.FAILED,
+          error: enforcement.reason,
+        };
+      }
     }
 
     if (workflowRunId) {
@@ -804,6 +962,23 @@ export class ExecutionService implements OnModuleInit {
           jobId: job.id,
           jobType: job.type,
           result,
+        });
+      }
+
+      if (governanceConfig) {
+        await this.recordGovernanceOutcome({
+          decisionId: claimedJob.aiDecisionId,
+          organizationId: claimedJob.organizationId,
+          clientId: claimedJob.clientId,
+          campaignId: claimedJob.campaignId,
+          workflowRunId,
+          jobId: claimedJob.id,
+          entityType: governanceConfig.entityType,
+          entityId: governanceConfig.entityId,
+          outcomeType: `${claimedJob.type}_run`,
+          status: 'SUCCEEDED',
+          summary: `${claimedJob.type} completed successfully.`,
+          metadata: result,
         });
       }
 
@@ -856,6 +1031,26 @@ export class ExecutionService implements OnModuleInit {
             error: message,
           });
         }
+      }
+
+      if (governanceConfig) {
+        await this.recordGovernanceOutcome({
+          decisionId: claimedJob.aiDecisionId,
+          organizationId: claimedJob.organizationId,
+          clientId: claimedJob.clientId,
+          campaignId: claimedJob.campaignId,
+          workflowRunId,
+          jobId: claimedJob.id,
+          entityType: governanceConfig.entityType,
+          entityId: governanceConfig.entityId,
+          outcomeType: `${claimedJob.type}_run`,
+          status: shouldRetry ? 'PARTIAL' : 'FAILED',
+          summary: message,
+          metadata: {
+            retryScheduled: shouldRetry,
+            retryAt: retryAt?.toISOString() ?? null,
+          },
+        });
       }
 
       return {
@@ -950,29 +1145,6 @@ export class ExecutionService implements OnModuleInit {
       note?: string;
     },
   ) {
-    const standaloneWorkflowRunId = input.workflowRunId
-      ? undefined
-      : (
-          await this.workflowsService.createWorkflowRun({
-            clientId: await this.resolveClientId(leadId),
-            lane: WorkflowLane.GROWTH,
-            type: this.resolveWorkflowType(input.jobType),
-            status: WorkflowStatus.RUNNING,
-            trigger: WorkflowTrigger.USER_ACTION,
-            source: RecordSource.SYSTEM_GENERATED,
-            title: `Immediate ${input.jobType === JobType.FOLLOWUP_SEND ? 'follow-up' : 'send'} for ${leadId}`,
-            inputJson: {
-              leadId,
-              jobType: input.jobType,
-              simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
-              note: input.note ?? null,
-            },
-            startedAt: new Date(),
-          })
-        ).id;
-
-    const workflowRunId = input.workflowRunId ?? standaloneWorkflowRunId;
-
     try {
       const lead = await this.prisma.lead.findUnique({
         where: { id: leadId },
@@ -986,6 +1158,63 @@ export class ExecutionService implements OnModuleInit {
       if (!lead) {
         throw new NotFoundException(`Lead ${leadId} not found`);
       }
+
+      const governanceConfig = this.governanceForQueue({
+        jobType: input.jobType,
+        organizationId: lead.organizationId,
+        clientId: lead.clientId,
+        campaignId: lead.campaignId,
+        leadId: lead.id,
+        workflowRunId: input.workflowRunId,
+        jobId: input.jobId,
+      });
+      const governance = await this.decideAndEnforce({
+        scope: governanceConfig.scope,
+        action: governanceConfig.action,
+        entity: governanceConfig.entity,
+        entityType: governanceConfig.entityType,
+        entityId: governanceConfig.entityId,
+        operation: 'RUN',
+        source: {
+          layer: 'service',
+          service: ExecutionService.name,
+          method: 'runImmediateSendForLead',
+          reason: input.jobType,
+        },
+        proposedJobType: input.jobType,
+        workflowRunId: input.workflowRunId ?? null,
+        jobId: input.jobId ?? null,
+        metadata: {
+          simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
+          immediate: true,
+        },
+      });
+
+      const standaloneWorkflowRunId = input.workflowRunId
+        ? undefined
+        : (
+            await this.workflowsService.createWorkflowRun({
+              clientId: lead.clientId,
+              aiDecisionId: governance.decisionId,
+              campaignId: lead.campaignId,
+              lane: WorkflowLane.GROWTH,
+              type: this.resolveWorkflowType(input.jobType),
+              status: WorkflowStatus.RUNNING,
+              trigger: WorkflowTrigger.USER_ACTION,
+              source: RecordSource.SYSTEM_GENERATED,
+              title: `Immediate ${input.jobType === JobType.FOLLOWUP_SEND ? 'follow-up' : 'send'} for ${leadId}`,
+              inputJson: {
+                leadId,
+                jobType: input.jobType,
+                simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
+                note: input.note ?? null,
+                aiDecisionId: governance.decisionId,
+              },
+              startedAt: new Date(),
+            })
+          ).id;
+
+      const workflowRunId = input.workflowRunId ?? standaloneWorkflowRunId;
 
       const email = lead.contact?.email?.trim().toLowerCase();
       if (!email) {
@@ -1125,6 +1354,24 @@ export class ExecutionService implements OnModuleInit {
         });
       }
 
+      await this.recordGovernanceOutcome({
+        decisionId: governance.decisionId,
+        organizationId: lead.organizationId,
+        clientId: lead.clientId,
+        campaignId: lead.campaignId,
+        workflowRunId,
+        jobId: input.jobId ?? null,
+        entityType: governanceConfig.entityType,
+        entityId: governanceConfig.entityId,
+        outcomeType: `${input.jobType}_immediate_run`,
+        status: 'SUCCEEDED',
+        summary: `${input.jobType} executed immediately.`,
+        metadata: {
+          messageId: message.id,
+          simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
+        },
+      });
+
       return {
         ok: true,
         leadId: lead.id,
@@ -1135,11 +1382,15 @@ export class ExecutionService implements OnModuleInit {
         status: input.jobType === JobType.FOLLOWUP_SEND ? LeadStatus.FOLLOWED_UP : LeadStatus.CONTACTED,
         simulateDeliveryOnly: input.simulateDeliveryOnly ?? false,
         jobId: input.jobId,
+        aiDecisionId: governance.decisionId,
       };
     } catch (error) {
-      if (standaloneWorkflowRunId) {
-        const message = error instanceof Error ? error.message : 'Unknown execution error';
-        await this.workflowsService.failWorkflowRun(standaloneWorkflowRunId, {
+      const message = error instanceof Error ? error.message : 'Unknown execution error';
+      const workflowRunId =
+        input.workflowRunId ??
+        (typeof (error as any)?.workflowRunId === 'string' ? (error as any).workflowRunId : undefined);
+      if (workflowRunId && !input.workflowRunId) {
+        await this.workflowsService.failWorkflowRun(workflowRunId, {
           leadId,
           error: message,
         });
@@ -1650,11 +1901,37 @@ export class ExecutionService implements OnModuleInit {
       return existing.id;
     }
 
+    const governanceConfig = this.governanceForQueue({
+      jobType: JobType.FOLLOWUP_SEND,
+      organizationId: lead.organizationId,
+      clientId: lead.clientId,
+      campaignId: lead.campaignId,
+      leadId: lead.id,
+      workflowRunId,
+    });
+    const governance = await this.decideAndEnforce({
+      scope: governanceConfig.scope,
+      action: governanceConfig.action,
+      entity: governanceConfig.entity,
+      entityType: governanceConfig.entityType,
+      entityId: governanceConfig.entityId,
+      operation: 'QUEUE',
+      source: {
+        layer: 'service',
+        service: ExecutionService.name,
+        method: 'ensureFollowUpQueued',
+        reason: 'automatic_follow_up_after_first_send',
+      },
+      proposedJobType: JobType.FOLLOWUP_SEND,
+      workflowRunId: workflowRunId ?? null,
+    });
+
     const job = await this.prisma.job.create({
       data: {
         organizationId: lead.organizationId,
         clientId: lead.clientId,
         campaignId: lead.campaignId,
+        aiDecisionId: governance.decisionId,
         type: JobType.FOLLOWUP_SEND,
         status: JobStatus.QUEUED,
         queueName: 'followup',
@@ -1665,6 +1942,7 @@ export class ExecutionService implements OnModuleInit {
           leadId: lead.id,
           workflowRunId,
           note: 'automatic follow-up after first send',
+          aiDecisionId: governance.decisionId,
         }),
       },
     });
@@ -1704,11 +1982,39 @@ export class ExecutionService implements OnModuleInit {
       throw new NotFoundException(`Reply ${replyId} not found`);
     }
 
+    const governanceConfig = this.governanceForQueue({
+      jobType: JobType.REPLY_CLASSIFICATION,
+      organizationId: reply.organizationId,
+      clientId: reply.clientId,
+      campaignId: reply.campaignId,
+      replyId: reply.id,
+      workflowRunId: input.workflowRunId,
+      jobId: input.jobId,
+    });
+    const governance = await this.decideAndEnforce({
+      scope: governanceConfig.scope,
+      action: governanceConfig.action,
+      entity: governanceConfig.entity,
+      entityType: governanceConfig.entityType,
+      entityId: governanceConfig.entityId,
+      operation: 'PROCESS',
+      source: {
+        layer: 'service',
+        service: ExecutionService.name,
+        method: 'runReplyClassification',
+        reason: 'reply_classification',
+      },
+      proposedJobType: JobType.REPLY_CLASSIFICATION,
+      workflowRunId: input.workflowRunId ?? null,
+      jobId: input.jobId ?? null,
+    });
+
     const standaloneWorkflowRunId = input.workflowRunId
       ? undefined
       : (
           await this.workflowsService.createWorkflowRun({
             clientId: reply.clientId,
+            aiDecisionId: governance.decisionId,
             campaignId: reply.campaignId,
             lane: WorkflowLane.GROWTH,
             type: WorkflowType.REPLY_PROCESSING,
@@ -1719,6 +2025,7 @@ export class ExecutionService implements OnModuleInit {
             inputJson: {
               replyId: reply.id,
               fromEmail: reply.fromEmail,
+              aiDecisionId: governance.decisionId,
             },
             startedAt: new Date(),
           })
@@ -1811,7 +2118,7 @@ export class ExecutionService implements OnModuleInit {
 
     let handoffJobId: string | null = null;
     if (classification.intent === ReplyIntent.INTERESTED || classification.intent === ReplyIntent.REFERRAL) {
-      const dedupeKey = `meeting_handoff:${reply.id}`;
+        const dedupeKey = `meeting_handoff:${reply.id}`;
       const existingJob = await this.prisma.job.findFirst({
         where: {
           dedupeKey,
@@ -1823,11 +2130,36 @@ export class ExecutionService implements OnModuleInit {
       });
 
       if (!existingJob) {
+        const handoffGovernanceConfig = this.governanceForQueue({
+          jobType: JobType.MEETING_HANDOFF,
+          organizationId: reply.organizationId,
+          clientId: reply.clientId,
+          campaignId: reply.campaignId,
+          replyId: reply.id,
+          workflowRunId,
+        });
+        const handoffGovernance = await this.decideAndEnforce({
+          scope: handoffGovernanceConfig.scope,
+          action: handoffGovernanceConfig.action,
+          entity: handoffGovernanceConfig.entity,
+          entityType: handoffGovernanceConfig.entityType,
+          entityId: handoffGovernanceConfig.entityId,
+          operation: 'QUEUE',
+          source: {
+            layer: 'service',
+            service: ExecutionService.name,
+            method: 'runReplyClassification',
+            reason: 'queue_meeting_handoff',
+          },
+          proposedJobType: JobType.MEETING_HANDOFF,
+          workflowRunId,
+        });
         const job = await this.prisma.job.create({
           data: {
             organizationId: reply.organizationId,
             clientId: reply.clientId,
             campaignId: reply.campaignId,
+            aiDecisionId: handoffGovernance.decisionId,
             type: JobType.MEETING_HANDOFF,
             status: JobStatus.QUEUED,
             queueName: 'meetings',
@@ -1837,6 +2169,7 @@ export class ExecutionService implements OnModuleInit {
             payloadJson: toPrismaJson({
               replyId: reply.id,
               workflowRunId,
+              aiDecisionId: handoffGovernance.decisionId,
             }),
           },
         });
@@ -1855,6 +2188,24 @@ export class ExecutionService implements OnModuleInit {
       });
     }
 
+    await this.recordGovernanceOutcome({
+      decisionId: governance.decisionId,
+      organizationId: reply.organizationId,
+      clientId: reply.clientId,
+      campaignId: reply.campaignId,
+      workflowRunId,
+      jobId: input.jobId ?? null,
+      entityType: governanceConfig.entityType,
+      entityId: governanceConfig.entityId,
+      outcomeType: 'REPLY_CLASSIFICATION_run',
+      status: 'SUCCEEDED',
+      summary: 'Reply classification completed.',
+      metadata: {
+        intent: classification.intent,
+        handoffJobId,
+      },
+    });
+
     return {
       ok: true,
       replyId: reply.id,
@@ -1864,6 +2215,7 @@ export class ExecutionService implements OnModuleInit {
       handoffJobId,
       workflowRunId,
       jobId: input.jobId,
+      aiDecisionId: governance.decisionId,
     };
   }
 
@@ -1908,11 +2260,39 @@ export class ExecutionService implements OnModuleInit {
       };
     }
 
+    const governanceConfig = this.governanceForQueue({
+      jobType: JobType.MEETING_HANDOFF,
+      organizationId: reply.organizationId,
+      clientId: reply.clientId,
+      campaignId: reply.campaignId,
+      replyId: reply.id,
+      workflowRunId: input.workflowRunId,
+      jobId: input.jobId,
+    });
+    const governance = await this.decideAndEnforce({
+      scope: governanceConfig.scope,
+      action: governanceConfig.action,
+      entity: governanceConfig.entity,
+      entityType: governanceConfig.entityType,
+      entityId: governanceConfig.entityId,
+      operation: 'RUN',
+      source: {
+        layer: 'service',
+        service: ExecutionService.name,
+        method: 'runMeetingHandoff',
+        reason: 'meeting_handoff',
+      },
+      proposedJobType: JobType.MEETING_HANDOFF,
+      workflowRunId: input.workflowRunId ?? null,
+      jobId: input.jobId ?? null,
+    });
+
     const standaloneWorkflowRunId = input.workflowRunId
       ? undefined
       : (
           await this.workflowsService.createWorkflowRun({
             clientId: reply.clientId,
+            aiDecisionId: governance.decisionId,
             campaignId: reply.campaignId,
             lane: WorkflowLane.GROWTH,
             type: WorkflowType.MEETING_CONVERSION,
@@ -1923,6 +2303,7 @@ export class ExecutionService implements OnModuleInit {
             inputJson: {
               replyId: reply.id,
               intent: reply.intent,
+              aiDecisionId: governance.decisionId,
             },
             startedAt: new Date(),
           })
@@ -1933,6 +2314,7 @@ export class ExecutionService implements OnModuleInit {
       reply.campaign?.bookingUrlOverride ||
       reply.lead?.client?.bookingUrl ||
       null;
+    const requiresHumanReview = !bookingUrl;
 
     const title = `Meeting request · ${reply.lead?.account?.companyName || reply.fromEmail || 'Prospect'}`;
 
@@ -2038,7 +2420,7 @@ export class ExecutionService implements OnModuleInit {
       where: { id: reply.id },
       data: {
         handledAt: new Date(),
-        requiresHumanReview: bookingUrl ? false : true,
+        requiresHumanReview,
         workflowRunId,
       },
     });
@@ -2074,6 +2456,26 @@ export class ExecutionService implements OnModuleInit {
       });
     }
 
+    await this.recordGovernanceOutcome({
+      decisionId: governance.decisionId,
+      organizationId: reply.organizationId,
+      clientId: reply.clientId,
+      campaignId: reply.campaignId,
+      workflowRunId,
+      jobId: input.jobId ?? null,
+      entityType: governanceConfig.entityType,
+      entityId: governanceConfig.entityId,
+      outcomeType: 'MEETING_HANDOFF_run',
+      status: requiresHumanReview ? 'PARTIAL' : 'SUCCEEDED',
+      summary: requiresHumanReview
+        ? 'Meeting handoff completed and requires human review.'
+        : 'Meeting handoff completed.',
+      metadata: {
+        meetingId: meeting.id,
+        responseMessageId,
+      },
+    });
+
     return {
       ok: true,
       replyId: reply.id,
@@ -2083,6 +2485,7 @@ export class ExecutionService implements OnModuleInit {
       requiresHumanReview: !bookingUrl,
       workflowRunId,
       jobId: input.jobId,
+      aiDecisionId: governance.decisionId,
     };
   }
 
@@ -2204,6 +2607,219 @@ Orchestrate`,
       'Best,',
       'Orchestrate',
     ].join('\n');
+  }
+
+  private isGovernedExecutionJobType(jobType: JobType) {
+    return ExecutionService.GOVERNED_EXECUTION_JOB_TYPES.has(jobType);
+  }
+
+  private governanceForQueue(input: {
+    jobType: JobType;
+    organizationId: string;
+    clientId?: string | null;
+    campaignId?: string | null;
+    leadId?: string | null;
+    replyId?: string | null;
+    workflowRunId?: string | null;
+    jobId?: string | null;
+  }) {
+    if (input.jobType === JobType.LEAD_IMPORT) {
+      return {
+        scope: 'CAMPAIGN' as AiAuthorityScope,
+        action: 'SOURCE_LEADS' as AiAuthorityAction,
+        entityType: 'campaign',
+        entityId: input.campaignId ?? 'unknown_campaign',
+        entity: {
+          organizationId: input.organizationId,
+          clientId: input.clientId ?? null,
+          campaignId: input.campaignId ?? null,
+          workflowRunId: input.workflowRunId ?? null,
+          jobId: input.jobId ?? null,
+        } satisfies AiAuthorityEntityRef,
+      };
+    }
+
+    if (input.jobType === JobType.REPLY_CLASSIFICATION) {
+      return {
+        scope: 'REPLY' as AiAuthorityScope,
+        action: 'PROCESS_REPLY' as AiAuthorityAction,
+        entityType: 'reply',
+        entityId: input.replyId ?? 'unknown_reply',
+        entity: {
+          organizationId: input.organizationId,
+          clientId: input.clientId ?? null,
+          campaignId: input.campaignId ?? null,
+          replyId: input.replyId ?? null,
+          workflowRunId: input.workflowRunId ?? null,
+          jobId: input.jobId ?? null,
+        } satisfies AiAuthorityEntityRef,
+      };
+    }
+
+    if (input.jobType === JobType.MEETING_HANDOFF) {
+      return {
+        scope: 'REPLY' as AiAuthorityScope,
+        action: 'HANDOFF_MEETING' as AiAuthorityAction,
+        entityType: 'reply',
+        entityId: input.replyId ?? 'unknown_reply',
+        entity: {
+          organizationId: input.organizationId,
+          clientId: input.clientId ?? null,
+          campaignId: input.campaignId ?? null,
+          replyId: input.replyId ?? null,
+          workflowRunId: input.workflowRunId ?? null,
+          jobId: input.jobId ?? null,
+        } satisfies AiAuthorityEntityRef,
+      };
+    }
+
+    if (input.jobType === JobType.FOLLOWUP_SEND) {
+      return {
+        scope: 'LEAD' as AiAuthorityScope,
+        action: 'SEND_FOLLOW_UP' as AiAuthorityAction,
+        entityType: 'lead',
+        entityId: input.leadId ?? 'unknown_lead',
+        entity: {
+          organizationId: input.organizationId,
+          clientId: input.clientId ?? null,
+          campaignId: input.campaignId ?? null,
+          leadId: input.leadId ?? null,
+          workflowRunId: input.workflowRunId ?? null,
+          jobId: input.jobId ?? null,
+        } satisfies AiAuthorityEntityRef,
+      };
+    }
+
+    return {
+      scope: 'LEAD' as AiAuthorityScope,
+      action: 'SEND_FIRST_OUTREACH' as AiAuthorityAction,
+      entityType: 'lead',
+      entityId: input.leadId ?? 'unknown_lead',
+      entity: {
+        organizationId: input.organizationId,
+        clientId: input.clientId ?? null,
+        campaignId: input.campaignId ?? null,
+        leadId: input.leadId ?? null,
+        workflowRunId: input.workflowRunId ?? null,
+        jobId: input.jobId ?? null,
+      } satisfies AiAuthorityEntityRef,
+    };
+  }
+
+  private governanceForExistingJob(job: {
+    id: string;
+    organizationId: string;
+    clientId?: string | null;
+    campaignId?: string | null;
+    type: JobType;
+    payloadJson?: Prisma.JsonValue | null;
+  }) {
+    const payload = this.asObject(job.payloadJson);
+    return this.governanceForQueue({
+      jobType: job.type,
+      organizationId: job.organizationId,
+      clientId: job.clientId ?? null,
+      campaignId: job.campaignId ?? this.readString(payload.campaignId),
+      leadId: this.readString(payload.leadId),
+      replyId: this.readString(payload.replyId),
+      workflowRunId: this.readString(payload.workflowRunId),
+      jobId: job.id,
+    });
+  }
+
+  private async decideAndEnforce(input: {
+    scope: AiAuthorityScope;
+    action: AiAuthorityAction;
+    entity: AiAuthorityEntityRef;
+    entityType: string;
+    entityId: string;
+    operation: 'CREATE' | 'QUEUE' | 'RUN' | 'PROCESS';
+    source: {
+      layer: 'service' | 'worker' | 'system';
+      service: string;
+      method: string;
+      reason?: string;
+    };
+    proposedJobType?: JobType | null;
+    metadata?: Record<string, unknown>;
+    workflowRunId?: string | null;
+    jobId?: string | null;
+  }) {
+    const decision = await this.decisionGateway.decide({
+      scope: input.scope,
+      entity: input.entity,
+      preferredAction: input.action,
+      proposedJobType: input.proposedJobType ?? null,
+      source: input.source,
+      enforcement: {
+        entityType: input.entityType,
+        entityId: input.entityId,
+        operation: input.operation,
+        workflowRunId: input.workflowRunId ?? null,
+        jobId: input.jobId ?? null,
+      },
+      metadata: input.metadata,
+    });
+
+    const enforcement = await this.decisionEnforcement.enforce({
+      decisionId: decision.decisionId,
+      organizationId: input.entity.organizationId ?? null,
+      scope: input.scope,
+      action: input.action,
+      entity: decision.snapshot.entity,
+      serviceName: input.source.service,
+      methodName: input.source.method,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      operation: input.operation,
+      workflowRunId: input.workflowRunId ?? null,
+      jobId: input.jobId ?? null,
+      metadata: input.metadata,
+    });
+
+    if (!enforcement.allowed || !decision.decisionId) {
+      throw new BadRequestException(enforcement.reason || 'AI governance blocked execution action.');
+    }
+
+    return {
+      decisionId: decision.decisionId,
+      decision,
+      enforcement,
+    };
+  }
+
+  private async recordGovernanceOutcome(input: {
+    decisionId?: string | null;
+    organizationId: string;
+    clientId?: string | null;
+    campaignId?: string | null;
+    workflowRunId?: string | null;
+    jobId?: string | null;
+    entityType: string;
+    entityId: string;
+    outcomeType: string;
+    status: AiDecisionOutcomeStatus;
+    summary: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    if (!input.decisionId) {
+      return;
+    }
+
+    await this.decisionOutcome.record({
+      decisionId: input.decisionId,
+      organizationId: input.organizationId,
+      clientId: input.clientId ?? null,
+      campaignId: input.campaignId ?? null,
+      workflowRunId: input.workflowRunId ?? null,
+      jobId: input.jobId ?? null,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      outcomeType: input.outcomeType,
+      status: input.status,
+      summary: input.summary,
+      metadata: input.metadata,
+    });
   }
 
   private resolveWorkflowType(jobType: JobType): WorkflowType {

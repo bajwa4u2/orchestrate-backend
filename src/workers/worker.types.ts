@@ -4,6 +4,7 @@ export type WorkerRunResult = Record<string, unknown>;
 
 export type WorkerContext = {
   workflowRunId?: string;
+  aiDecisionId?: string;
   payload: Record<string, unknown>;
 };
 

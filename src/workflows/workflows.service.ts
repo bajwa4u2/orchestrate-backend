@@ -9,6 +9,21 @@ import {
   WorkflowTrigger,
   WorkflowType,
 } from '@prisma/client';
+import {
+  AiDecisionGatewayService,
+} from '../ai/governance/ai-decision-gateway.service';
+import { AiDecisionEnforcementService } from '../ai/governance/ai-decision-enforcement.service';
+import { AiDecisionLinkService } from '../ai/governance/ai-decision-link.service';
+import {
+  AiGovernanceDecisionMode,
+  AiGovernanceEntityLinkInput,
+  AiGovernanceSourceRef,
+} from '../ai/governance/ai-governance.contract';
+import {
+  AiAuthorityAction,
+  AiAuthorityEntityRef,
+  AiAuthorityScope,
+} from '../ai/contracts/ai-authority.contract';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { buildExecutionReadSurface } from '../common/utils/execution-read-surface';
@@ -17,6 +32,7 @@ type DbClient = PrismaService | Prisma.TransactionClient;
 
 export interface WorkflowCreateInput {
   clientId: string;
+  aiDecisionId?: string | null;
   subscriptionId?: string | null;
   campaignId?: string | null;
   invoiceId?: string | null;
@@ -35,6 +51,20 @@ export interface WorkflowCreateInput {
   startedAt?: Date | null;
   completedAt?: Date | null;
   failedAt?: Date | null;
+  governance?: {
+    scope: AiAuthorityScope;
+    action: AiAuthorityAction;
+    entity: AiAuthorityEntityRef;
+    source: AiGovernanceSourceRef;
+    entityType: string;
+    entityId: string;
+    entityLinks?: AiGovernanceEntityLinkInput[];
+    mode?: AiGovernanceDecisionMode;
+    question?: string;
+    operatorNote?: string;
+    expiresInSeconds?: number;
+    metadata?: Record<string, unknown>;
+  };
 }
 
 export interface WorkflowSubjectUpdateInput {
@@ -50,10 +80,16 @@ export interface WorkflowSubjectUpdateInput {
 
 @Injectable()
 export class WorkflowsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly enforcement: AiDecisionEnforcementService,
+    private readonly decisionLinks: AiDecisionLinkService,
+  ) {}
 
   async createWorkflowRun(input: WorkflowCreateInput, db?: DbClient) {
-    const client = await this.getDb(db).client.findUnique({
+    const root = this.getDb(db);
+    const client = await root.client.findUnique({
       where: { id: input.clientId },
       select: { organizationId: true },
     });
@@ -62,10 +98,61 @@ export class WorkflowsService {
       throw new Error(`Client not found for workflow creation: ${input.clientId}`);
     }
 
-    return this.getDb(db).workflowRun.create({
+    let aiDecisionId = input.aiDecisionId ?? null;
+    if (input.governance && !aiDecisionId) {
+      const governanceDecision = await this.decisionGateway.decide({
+        scope: input.governance.scope,
+        entity: {
+          organizationId: client.organizationId,
+          clientId: input.clientId,
+          campaignId: input.campaignId ?? input.governance.entity.campaignId ?? null,
+          workflowRunId: null,
+          ...input.governance.entity,
+        },
+        preferredAction: input.governance.action,
+        source: input.governance.source,
+        mode: input.governance.mode ?? 'required',
+        enforcement: {
+          entityType: input.governance.entityType,
+          entityId: input.governance.entityId,
+          operation: 'CREATE',
+        },
+        entityLinks: input.governance.entityLinks,
+        expiresInSeconds: input.governance.expiresInSeconds,
+        metadata: input.governance.metadata,
+        question: input.governance.question,
+        operatorNote: input.governance.operatorNote,
+      });
+
+      const enforcement = await this.enforcement.enforce({
+        decisionId: governanceDecision.decisionId,
+        organizationId: client.organizationId,
+        scope: input.governance.scope,
+        action: input.governance.action,
+        entity: governanceDecision.snapshot.entity,
+        serviceName: WorkflowsService.name,
+        methodName: 'createWorkflowRun',
+        entityType: input.governance.entityType,
+        entityId: input.governance.entityId,
+        operation: 'CREATE',
+        metadata: {
+          workflowType: input.type,
+          workflowLane: input.lane,
+        },
+      });
+
+      if (!enforcement.allowed) {
+        throw new Error(`AI governance blocked workflow creation: ${enforcement.reason}`);
+      }
+
+      aiDecisionId = governanceDecision.decisionId;
+    }
+
+    const workflow = await root.workflowRun.create({
       data: {
         organizationId: client.organizationId,
         clientId: input.clientId,
+        aiDecisionId: aiDecisionId ?? undefined,
         subscriptionId: input.subscriptionId ?? undefined,
         campaignId: input.campaignId ?? undefined,
         invoiceId: input.invoiceId ?? undefined,
@@ -86,6 +173,43 @@ export class WorkflowsService {
         failedAt: input.failedAt ?? undefined,
       },
     });
+
+    if (aiDecisionId) {
+      await this.prisma.aiDecisionRecord.updateMany({
+        where: {
+          id: aiDecisionId,
+          workflowRunId: null,
+        },
+        data: {
+          workflowRunId: workflow.id,
+        },
+      });
+
+      await this.decisionLinks.createLinks({
+        decisionId: aiDecisionId,
+        organizationId: client.organizationId,
+        entity:
+          input.governance?.entity ?? {
+            organizationId: client.organizationId,
+            clientId: input.clientId,
+            campaignId: input.campaignId ?? null,
+          },
+        extraLinks: [
+          ...(input.governance?.entityLinks ?? []),
+          {
+            entityType: 'workflow_run',
+            entityId: workflow.id,
+            role: 'RELATED',
+            metadata: {
+              lane: input.lane,
+              type: input.type,
+            },
+          },
+        ],
+      });
+    }
+
+    return workflow;
   }
 
   async startWorkflowRun(workflowRunId: string, contextJson?: Record<string, unknown> | null, db?: DbClient) {

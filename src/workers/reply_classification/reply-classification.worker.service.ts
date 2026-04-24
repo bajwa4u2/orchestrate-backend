@@ -10,6 +10,8 @@ import {
   ReplyIntent,
 } from '@prisma/client';
 import { toPrismaJson } from '../../common/utils/prisma-json';
+import { AiDecisionEnforcementService } from '../../ai/governance/ai-decision-enforcement.service';
+import { AiDecisionGatewayService } from '../../ai/governance/ai-decision-gateway.service';
 import { PrismaService } from '../../database/prisma.service';
 import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 
@@ -17,7 +19,11 @@ import { JobWorker, WorkerContext, WorkerRunResult } from '../worker.types';
 export class ReplyClassificationWorkerService implements JobWorker {
   readonly jobTypes: JobType[] = [JobType.REPLY_CLASSIFICATION];
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
+  ) {}
 
   async run(job: Job, context: WorkerContext): Promise<WorkerRunResult> {
     const replyId = this.readString(context.payload.replyId);
@@ -128,11 +134,62 @@ export class ReplyClassificationWorkerService implements JobWorker {
       });
 
       if (!existingJob) {
+        const governance = await this.decisionGateway.decide({
+          scope: 'REPLY',
+          entity: {
+            organizationId: reply.organizationId,
+            clientId: reply.clientId,
+            campaignId: reply.campaignId,
+            replyId: reply.id,
+            workflowRunId: context.workflowRunId ?? null,
+            jobId: job.id,
+          },
+          preferredAction: 'HANDOFF_MEETING',
+          proposedJobType: JobType.MEETING_HANDOFF,
+          source: {
+            layer: 'worker',
+            service: ReplyClassificationWorkerService.name,
+            method: 'run',
+            worker: ReplyClassificationWorkerService.name,
+            reason: 'queue_meeting_handoff_from_reply_classification',
+          },
+          enforcement: {
+            entityType: 'reply',
+            entityId: reply.id,
+            operation: 'QUEUE',
+            workflowRunId: context.workflowRunId ?? null,
+            jobId: job.id,
+          },
+        });
+
+        const enforcement = await this.decisionEnforcement.enforce({
+          decisionId: governance.decisionId,
+          organizationId: reply.organizationId,
+          scope: 'REPLY',
+          action: 'HANDOFF_MEETING',
+          entity: governance.snapshot.entity,
+          serviceName: ReplyClassificationWorkerService.name,
+          methodName: 'run',
+          entityType: 'reply',
+          entityId: reply.id,
+          operation: 'QUEUE',
+          workflowRunId: context.workflowRunId ?? null,
+          jobId: job.id,
+          metadata: {
+            queueName: 'meetings',
+          },
+        });
+
+        if (!enforcement.allowed || !governance.decisionId) {
+          throw new BadRequestException(enforcement.reason || `AI governance blocked meeting handoff queue for ${reply.id}`);
+        }
+
         const handoffJob = await this.prisma.job.create({
           data: {
             organizationId: reply.organizationId,
             clientId: reply.clientId,
             campaignId: reply.campaignId,
+            aiDecisionId: governance.decisionId,
             type: JobType.MEETING_HANDOFF,
             status: JobStatus.QUEUED,
             queueName: 'meetings',
@@ -142,6 +199,7 @@ export class ReplyClassificationWorkerService implements JobWorker {
             payloadJson: toPrismaJson({
               replyId: reply.id,
               workflowRunId: context.workflowRunId,
+              aiDecisionId: governance.decisionId,
             }),
           },
         });

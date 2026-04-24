@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AiGovernanceModule } from '../../ai/governance/ai-governance.module';
 import { AdaptationModule } from '../../adaptation/adaptation.module';
 import { DatabaseModule } from '../../database/database.module';
 import { DeliverabilityModule } from '../../deliverability/deliverability.module';
@@ -13,6 +14,7 @@ import { LeadImportWorkerService } from './lead-import.worker.service';
 
 @Module({
   imports: [
+    AiGovernanceModule,
     DatabaseModule,
     DeliverabilityModule,
     LeadSourcesModule,
