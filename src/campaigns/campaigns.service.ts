@@ -12,7 +12,11 @@ import {
   WorkflowTrigger,
   WorkflowType,
 } from '@prisma/client';
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  AiDecisionGatewayService,
+} from '../ai/governance/ai-decision-gateway.service';
+import { AiDecisionEnforcementService } from '../ai/governance/ai-decision-enforcement.service';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { buildPagination } from '../common/utils/pagination';
 import { PrismaService } from '../database/prisma.service';
@@ -30,6 +34,8 @@ export class CampaignsService {
     private readonly prisma: PrismaService,
     private readonly workflowsService: WorkflowsService,
     private readonly deliverabilityService: DeliverabilityService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
   ) {}
 
   async create(dto: CreateCampaignDto) {
@@ -146,7 +152,6 @@ export class CampaignsService {
     return { items: enriched, meta: { page, limit, total } };
   }
 
-
   async restartCampaign(input: { campaignId: string; organizationId?: string }) {
     return this.activateCampaign(input);
   }
@@ -238,18 +243,34 @@ export class CampaignsService {
       };
     }
 
+    const governance = await this.decideAndEnforceLeadImportQueue({
+      campaign: {
+        id: campaign.id,
+        organizationId: campaign.organizationId,
+        clientId: campaign.clientId,
+        workflowRunId: campaign.workflowRunId,
+      },
+      activationVersion,
+      dedupeKey,
+      mailboxId: infra.mailbox.id,
+    });
+
     const job = await this.prisma.job.create({
       data: {
         organizationId: campaign.organizationId,
         clientId: campaign.clientId,
         campaignId: campaign.id,
+        aiDecisionId: governance.decisionId,
         type: JobType.LEAD_IMPORT,
         status: JobStatus.QUEUED,
         queueName: 'lead-import',
         dedupeKey,
         scheduledFor: new Date(),
         maxAttempts: 3,
-        payloadJson: toPrismaJson({ campaignId: campaign.id }),
+        payloadJson: toPrismaJson({
+          campaignId: campaign.id,
+          aiDecisionId: governance.decisionId,
+        }),
       },
     });
 
@@ -335,6 +356,76 @@ export class CampaignsService {
       blockedAtConsent: consentBlocked,
       execution,
       workflow: executionSurface,
+    };
+  }
+
+  private async decideAndEnforceLeadImportQueue(input: {
+    campaign: {
+      id: string;
+      organizationId: string;
+      clientId: string;
+      workflowRunId?: string | null;
+    };
+    activationVersion: number;
+    dedupeKey: string;
+    mailboxId?: string | null;
+  }) {
+    const decision = await this.decisionGateway.decide({
+      scope: 'CAMPAIGN',
+      entity: {
+        organizationId: input.campaign.organizationId,
+        clientId: input.campaign.clientId,
+        campaignId: input.campaign.id,
+        workflowRunId: input.campaign.workflowRunId ?? null,
+      },
+      preferredAction: 'SOURCE_LEADS',
+      proposedJobType: JobType.LEAD_IMPORT,
+      source: {
+        layer: 'service',
+        service: CampaignsService.name,
+        method: 'activateCampaign',
+        reason: 'queue_campaign_activation_lead_import',
+      },
+      enforcement: {
+        entityType: 'campaign',
+        entityId: input.campaign.id,
+        operation: 'QUEUE',
+        workflowRunId: input.campaign.workflowRunId ?? null,
+      },
+      metadata: {
+        queueName: 'lead-import',
+        dedupeKey: input.dedupeKey,
+        activationVersion: input.activationVersion,
+        mailboxId: input.mailboxId ?? null,
+      },
+    });
+
+    const enforcement = await this.decisionEnforcement.enforce({
+      decisionId: decision.decisionId,
+      organizationId: input.campaign.organizationId,
+      scope: 'CAMPAIGN',
+      action: 'SOURCE_LEADS',
+      entity: decision.snapshot.entity,
+      serviceName: CampaignsService.name,
+      methodName: 'activateCampaign',
+      entityType: 'campaign',
+      entityId: input.campaign.id,
+      operation: 'QUEUE',
+      workflowRunId: input.campaign.workflowRunId ?? null,
+      metadata: {
+        queueName: 'lead-import',
+        dedupeKey: input.dedupeKey,
+        activationVersion: input.activationVersion,
+        mailboxId: input.mailboxId ?? null,
+      },
+    });
+
+    if (!enforcement.allowed || !decision.decisionId) {
+      throw new BadRequestException(enforcement.reason || `AI governance blocked campaign activation queue for ${input.campaign.id}`);
+    }
+
+    return {
+      decisionId: decision.decisionId,
     };
   }
 

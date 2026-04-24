@@ -18,6 +18,10 @@ import {
   WorkflowTrigger,
   WorkflowType,
 } from '@prisma/client';
+import {
+  AiDecisionGatewayService,
+} from '../ai/governance/ai-decision-gateway.service';
+import { AiDecisionEnforcementService } from '../ai/governance/ai-decision-enforcement.service';
 import { toPrismaJson } from '../common/utils/prisma-json';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowsService } from '../workflows/workflows.service';
@@ -41,6 +45,8 @@ export class RepliesService {
     private readonly workflowsService: WorkflowsService,
     @Inject(forwardRef(() => ExecutionService))
     private readonly executionService: ExecutionService,
+    private readonly decisionGateway: AiDecisionGatewayService,
+    private readonly decisionEnforcement: AiDecisionEnforcementService,
   ) {}
 
   async ingestInboundReply(input: InboundReplyInput) {
@@ -138,11 +144,30 @@ export class RepliesService {
       },
     });
 
+    const governance = await this.decideAndEnforceReplyClassificationQueue({
+      reply: {
+        id: reply.id,
+        organizationId: matchedMessage.organizationId,
+        clientId: matchedMessage.clientId,
+        campaignId: matchedMessage.campaignId,
+      },
+      fromEmail,
+      workflowRunId: workflow.id,
+    });
+
+    await this.prisma.workflowRun.update({
+      where: { id: workflow.id },
+      data: {
+        aiDecisionId: governance.decisionId,
+      },
+    });
+
     const classificationJob = await this.prisma.job.create({
       data: {
         organizationId: matchedMessage.organizationId,
         clientId: matchedMessage.clientId,
         campaignId: matchedMessage.campaignId,
+        aiDecisionId: governance.decisionId,
         type: JobType.REPLY_CLASSIFICATION,
         status: JobStatus.QUEUED,
         queueName: 'replies',
@@ -152,6 +177,7 @@ export class RepliesService {
         payloadJson: toPrismaJson({
           replyId: reply.id,
           workflowRunId: workflow.id,
+          aiDecisionId: governance.decisionId,
         }),
       },
     });
@@ -484,5 +510,74 @@ export class RepliesService {
     if (!value) return new Date();
     const date = value instanceof Date ? value : new Date(value);
     return Number.isNaN(date.getTime()) ? new Date() : date;
+  }
+
+  private async decideAndEnforceReplyClassificationQueue(input: {
+    reply: {
+      id: string;
+      organizationId: string;
+      clientId: string;
+      campaignId: string | null;
+    };
+    fromEmail: string;
+    workflowRunId: string;
+  }) {
+    const dedupeKey = `reply_classification:${input.reply.id}`;
+    const decision = await this.decisionGateway.decide({
+      scope: 'REPLY',
+      entity: {
+        organizationId: input.reply.organizationId,
+        clientId: input.reply.clientId,
+        campaignId: input.reply.campaignId,
+        replyId: input.reply.id,
+        workflowRunId: input.workflowRunId,
+      },
+      preferredAction: 'PROCESS_REPLY',
+      proposedJobType: JobType.REPLY_CLASSIFICATION,
+      source: {
+        layer: 'service',
+        service: RepliesService.name,
+        method: 'ingestInboundReply',
+        reason: 'queue_inbound_reply_classification',
+      },
+      enforcement: {
+        entityType: 'reply',
+        entityId: input.reply.id,
+        operation: 'QUEUE',
+        workflowRunId: input.workflowRunId,
+      },
+      metadata: {
+        queueName: 'replies',
+        dedupeKey,
+        fromEmail: input.fromEmail,
+      },
+    });
+
+    const enforcement = await this.decisionEnforcement.enforce({
+      decisionId: decision.decisionId,
+      organizationId: input.reply.organizationId,
+      scope: 'REPLY',
+      action: 'PROCESS_REPLY',
+      entity: decision.snapshot.entity,
+      serviceName: RepliesService.name,
+      methodName: 'ingestInboundReply',
+      entityType: 'reply',
+      entityId: input.reply.id,
+      operation: 'QUEUE',
+      workflowRunId: input.workflowRunId,
+      metadata: {
+        queueName: 'replies',
+        dedupeKey,
+        fromEmail: input.fromEmail,
+      },
+    });
+
+    if (!enforcement.allowed || !decision.decisionId) {
+      throw new BadRequestException(enforcement.reason || `AI governance blocked reply classification queue for ${input.reply.id}`);
+    }
+
+    return {
+      decisionId: decision.decisionId,
+    };
   }
 }

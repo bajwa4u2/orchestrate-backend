@@ -1,5 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { AccessContextModule } from '../access-context/access-context.module';
+import { AiGovernanceModule } from '../ai/governance/ai-governance.module';
 import { DatabaseModule } from '../database/database.module';
 import { DeliverabilityModule } from '../deliverability/deliverability.module';
 import { WorkersModule } from '../workers/workers.module';
@@ -12,6 +13,7 @@ import { CampaignsService } from './campaigns.service';
     DatabaseModule,
     WorkflowsModule,
     AccessContextModule,
+    AiGovernanceModule,
     forwardRef(() => WorkersModule),
     forwardRef(() => DeliverabilityModule),
   ],
