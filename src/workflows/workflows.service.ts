@@ -273,28 +273,70 @@ export class WorkflowsService {
     });
   }
 
-  async getCampaignExecutionSurface(campaignId: string, db?: DbClient) {
+  async getCampaignExecutionSurface(
+    campaignId: string,
+    scopeOrDb?: { organizationId?: string; clientId?: string } | DbClient,
+    maybeDb?: DbClient,
+  ) {
     const activeJobStatuses = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED];
-    const root = this.getDb(db);
-    const campaign = await root.campaign.findUnique({
-      where: { id: campaignId },
-      select: { clientId: true, metadataJson: true },
+    const hasScope = scopeOrDb && ('organizationId' in scopeOrDb || 'clientId' in scopeOrDb);
+    const scope = hasScope ? scopeOrDb as { organizationId?: string; clientId?: string } : {};
+    const root = this.getDb(hasScope ? maybeDb : scopeOrDb as DbClient | undefined);
+    const campaign = await root.campaign.findFirst({
+      where: {
+        id: campaignId,
+        ...(scope.organizationId ? { organizationId: scope.organizationId } : {}),
+        ...(scope.clientId ? { clientId: scope.clientId } : {}),
+      },
+      select: { id: true, organizationId: true, clientId: true, metadataJson: true },
     });
 
-    const [workflow, queuedMessages, queuedSends, activeImports, waitingOnMailbox, sent, failed, replies, meetings, suppressionBlocked, consentBlocked] = await Promise.all([
-      root.workflowRun.findFirst({ where: { campaignId }, orderBy: [{ createdAt: 'desc' }] }),
-      root.job.count({ where: { campaignId, type: JobType.MESSAGE_GENERATION, status: { in: activeJobStatuses } } }),
-      root.job.count({ where: { campaignId, type: { in: [JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] }, status: { in: activeJobStatuses } } }),
-      root.job.count({ where: { campaignId, type: JobType.LEAD_IMPORT, status: { in: activeJobStatuses } } }),
-      root.outreachMessage.count({ where: { campaignId, status: 'QUEUED', OR: [{ mailboxId: null }, { sentAt: null }] } }),
-      root.outreachMessage.count({ where: { campaignId, status: 'SENT' } }),
-      root.job.count({ where: { campaignId, status: JobStatus.FAILED } }),
-      root.reply.count({ where: { campaignId } }),
-      root.meeting.count({ where: { campaignId } }),
-      root.lead.count({ where: { campaignId, status: 'SUPPRESSED' } }),
-      campaign?.clientId
-        ? root.contactConsent.count({ where: { clientId: campaign.clientId, communication: 'OUTREACH', status: 'BLOCKED' } })
-        : Promise.resolve(0),
+    if (!campaign) {
+      return {
+        workflowRunId: null,
+        workflowType: null,
+        startedAt: null,
+        completedAt: null,
+        failedAt: null,
+        state: 'NOT_FOUND',
+        summary: 'Campaign was not found in the authorized scope.',
+        failedJobs: [],
+      };
+    }
+
+    const scopedWhere = {
+      campaignId,
+      organizationId: campaign.organizationId,
+      clientId: campaign.clientId,
+    };
+
+    const [workflow, queuedMessages, queuedSends, activeImports, waitingOnMailbox, sent, failed, replies, meetings, suppressionBlocked, consentBlocked, failedJobs] = await Promise.all([
+      root.workflowRun.findFirst({ where: scopedWhere, orderBy: [{ createdAt: 'desc' }] }),
+      root.job.count({ where: { ...scopedWhere, type: JobType.MESSAGE_GENERATION, status: { in: activeJobStatuses } } }),
+      root.job.count({ where: { ...scopedWhere, type: { in: [JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] }, status: { in: activeJobStatuses } } }),
+      root.job.count({ where: { ...scopedWhere, type: JobType.LEAD_IMPORT, status: { in: activeJobStatuses } } }),
+      root.outreachMessage.count({ where: { ...scopedWhere, status: 'QUEUED', OR: [{ mailboxId: null }, { sentAt: null }] } }),
+      root.outreachMessage.count({ where: { ...scopedWhere, status: 'SENT' } }),
+      root.job.count({ where: { ...scopedWhere, status: JobStatus.FAILED } }),
+      root.reply.count({ where: scopedWhere }),
+      root.meeting.count({ where: scopedWhere }),
+      root.lead.count({ where: { ...scopedWhere, status: 'SUPPRESSED' } }),
+      root.contactConsent.count({ where: { organizationId: campaign.organizationId, clientId: campaign.clientId, communication: 'OUTREACH', status: 'BLOCKED' } }),
+      root.job.findMany({
+        where: { ...scopedWhere, status: JobStatus.FAILED },
+        orderBy: [{ updatedAt: 'desc' }],
+        take: 5,
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          queueName: true,
+          lastError: true,
+          attemptCount: true,
+          maxAttempts: true,
+          updatedAt: true,
+        },
+      }),
     ]);
 
     const metadata = campaign && campaign.metadataJson && typeof campaign.metadataJson === 'object' && !Array.isArray(campaign.metadataJson)
@@ -325,6 +367,7 @@ export class WorkflowsService {
       startedAt: workflow?.startedAt ?? null,
       completedAt: workflow?.completedAt ?? null,
       failedAt: workflow?.failedAt ?? null,
+      failedJobs,
       ...execution,
     };
   }

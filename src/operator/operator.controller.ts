@@ -41,8 +41,10 @@ export class OperatorController {
     @Headers() headers: Record<string, unknown>,
     @Param('campaignId') campaignId: string,
   ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.workflowsService.getCampaignExecutionSurface(campaignId);
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.workflowsService.getCampaignExecutionSurface(campaignId, {
+      organizationId: context.organizationId!,
+    });
   }
 
   @Get('revenue/overview')

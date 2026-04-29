@@ -308,7 +308,10 @@ export class CampaignsService {
   async getCampaignOperationalView(campaignId: string, organizationId: string, clientId: string) {
     const activeJobStatuses = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_SCHEDULED];
     const [campaign, messageGeneration, sendQueue, activeImports, mailbox, sent, failed, replies, meetings, suppressionBlocked, consentBlocked, executionSurface] = await Promise.all([
-      this.prisma.campaign.findUnique({ where: { id: campaignId }, select: { metadataJson: true, generationState: true, status: true, dailySendCap: true } }),
+      this.prisma.campaign.findFirst({
+        where: { id: campaignId, organizationId, clientId },
+        select: { metadataJson: true, generationState: true, status: true, dailySendCap: true },
+      }),
       this.prisma.job.count({ where: { organizationId, clientId, campaignId, type: JobType.MESSAGE_GENERATION, status: { in: activeJobStatuses } } }),
       this.prisma.job.count({ where: { organizationId, clientId, campaignId, type: { in: [JobType.FIRST_SEND, JobType.FOLLOWUP_SEND] }, status: { in: activeJobStatuses } } }),
       this.prisma.job.count({ where: { organizationId, clientId, campaignId, type: JobType.LEAD_IMPORT, status: { in: activeJobStatuses } } }),
@@ -319,7 +322,7 @@ export class CampaignsService {
       this.prisma.meeting.count({ where: { organizationId, clientId, campaignId } }),
       this.prisma.lead.count({ where: { organizationId, clientId, campaignId, status: LeadStatus.SUPPRESSED } }),
       this.prisma.contactConsent.count({ where: { organizationId, clientId, communication: 'OUTREACH', status: 'BLOCKED' } }),
-      this.workflowsService.getCampaignExecutionSurface(campaignId),
+      this.workflowsService.getCampaignExecutionSurface(campaignId, { organizationId, clientId }),
     ]);
     const metadata = this.asObject(campaign?.metadataJson);
     const activation = this.asObject(metadata.activation);

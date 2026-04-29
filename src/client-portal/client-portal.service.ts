@@ -108,6 +108,8 @@ export class ClientPortalService {
         contactId: true,
         campaignId: true,
         leadSourceId: true,
+        metadataJson: true,
+        suppressionReason: true,
         createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
@@ -182,6 +184,8 @@ export class ClientPortalService {
         status: lead.status,
         qualificationState: lead.qualificationState,
         source: leadSource?.name ?? String(lead.source),
+        suppressionReason: lead.suppressionReason ?? null,
+        metadataJson: lead.metadataJson ?? null,
         createdAt: lead.createdAt,
       };
     });

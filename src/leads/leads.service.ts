@@ -220,11 +220,12 @@ export class LeadsService {
     return lead;
   }
 
-  async launchTestSend(leadId: string) {
+  async launchTestSend(leadId: string, organizationId?: string) {
     return this.executionService.runImmediateSendForLead(leadId, {
       jobType: JobType.FIRST_SEND,
       note: 'manual test-send endpoint',
       simulateDeliveryOnly: false,
+      organizationId,
     });
   }
 

@@ -626,8 +626,11 @@ export class ExecutionService implements OnModuleInit {
   }
 
   async queueLeadSend(leadId: string, dto: QueueLeadSendDto) {
-    const lead = await this.prisma.lead.findUnique({
-      where: { id: leadId },
+    const lead = await this.prisma.lead.findFirst({
+      where: {
+        id: leadId,
+        ...(dto.organizationId ? { organizationId: dto.organizationId } : {}),
+      },
       include: { campaign: true, client: true, contact: true, account: true },
     });
 
@@ -793,7 +796,12 @@ export class ExecutionService implements OnModuleInit {
   }
 
   async runJob(jobId: string, dto: RunJobDto = {}) {
-    const job = await this.prisma.job.findUnique({ where: { id: jobId } });
+    const job = await this.prisma.job.findFirst({
+      where: {
+        id: jobId,
+        ...(dto.organizationId ? { organizationId: dto.organizationId } : {}),
+      },
+    });
     if (!job) {
       throw new NotFoundException(`Job ${jobId} not found`);
     }
@@ -1143,11 +1151,15 @@ export class ExecutionService implements OnModuleInit {
       jobType: JobType;
       simulateDeliveryOnly?: boolean;
       note?: string;
+      organizationId?: string;
     },
   ) {
     try {
-      const lead = await this.prisma.lead.findUnique({
-        where: { id: leadId },
+      const lead = await this.prisma.lead.findFirst({
+        where: {
+          id: leadId,
+          ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+        },
         include: {
           account: true,
           contact: true,

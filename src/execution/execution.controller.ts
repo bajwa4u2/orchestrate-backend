@@ -19,10 +19,11 @@ export class ExecutionController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    await this.accessContextService.requireOperator(headers);
+    const context = await this.accessContextService.requireOperator(headers);
     return this.executionService.queueLeadSend(leadId, {
       ...dto,
       jobType: 'FIRST_SEND',
+      organizationId: context.organizationId!,
     });
   }
 
@@ -32,10 +33,11 @@ export class ExecutionController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    await this.accessContextService.requireOperator(headers);
+    const context = await this.accessContextService.requireOperator(headers);
     return this.executionService.queueLeadSend(leadId, {
       ...dto,
       jobType: 'FOLLOWUP_SEND',
+      organizationId: context.organizationId!,
     });
   }
 
@@ -50,8 +52,11 @@ export class ExecutionController {
 
   @Post('jobs/:jobId/run')
   async runJob(@Headers() headers: Record<string, unknown>, @Param('jobId') jobId: string, @Body() dto: RunJobDto) {
-    await this.accessContextService.requireOperator(headers);
-    return this.executionService.runJob(jobId, dto);
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.executionService.runJob(jobId, {
+      ...dto,
+      organizationId: context.organizationId!,
+    });
   }
 
   @Post('leads/:leadId/run-first-send-now')
@@ -59,8 +64,11 @@ export class ExecutionController {
     @Headers() headers: Record<string, unknown>,
     @Param('leadId') leadId: string,
   ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.executionService.runImmediateSendForLead(leadId, { jobType: JobType.FIRST_SEND });
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.executionService.runImmediateSendForLead(leadId, {
+      jobType: JobType.FIRST_SEND,
+      organizationId: context.organizationId!,
+    });
   }
 
   @Post('leads/:leadId/run-follow-up-now')
@@ -68,7 +76,10 @@ export class ExecutionController {
     @Headers() headers: Record<string, unknown>,
     @Param('leadId') leadId: string,
   ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.executionService.runImmediateSendForLead(leadId, { jobType: JobType.FOLLOWUP_SEND });
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.executionService.runImmediateSendForLead(leadId, {
+      jobType: JobType.FOLLOWUP_SEND,
+      organizationId: context.organizationId!,
+    });
   }
 }

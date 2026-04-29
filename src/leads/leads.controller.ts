@@ -32,8 +32,8 @@ export class LeadsController {
 
   @Post(':leadId/test-send')
   async testSend(@Headers() headers: Record<string, unknown>, @Param('leadId') leadId: string) {
-    await this.accessContextService.requireOperator(headers);
-    return this.leadsService.launchTestSend(leadId);
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.leadsService.launchTestSend(leadId, context.organizationId!);
   }
 
   @Post(':leadId/queue-first-send')
@@ -42,8 +42,11 @@ export class LeadsController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.leadsService.queueFirstSend(leadId, dto);
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.leadsService.queueFirstSend(leadId, {
+      ...dto,
+      organizationId: context.organizationId!,
+    });
   }
 
   @Post(':leadId/queue-follow-up')
@@ -52,7 +55,10 @@ export class LeadsController {
     @Param('leadId') leadId: string,
     @Body() dto: QueueLeadSendDto,
   ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.leadsService.queueFollowUp(leadId, dto);
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.leadsService.queueFollowUp(leadId, {
+      ...dto,
+      organizationId: context.organizationId!,
+    });
   }
 }

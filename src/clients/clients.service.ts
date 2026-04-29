@@ -800,7 +800,8 @@ export class ClientsService {
     }
 
     const activation = await this.campaignsService.activateCampaign({
-      campaignId: campaign.id,      
+      campaignId: campaign.id,
+      organizationId: client.organizationId,
     });
 
     const refreshedCampaign = await this.findPrimaryCampaignSnapshot(client.organizationId, client.id);

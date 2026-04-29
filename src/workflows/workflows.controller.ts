@@ -14,7 +14,9 @@ export class WorkflowsController {
     @Headers() headers: Record<string, unknown>,
     @Param('campaignId') campaignId: string,
   ) {
-    await this.accessContextService.requireOperator(headers);
-    return this.workflowsService.getCampaignExecutionSurface(campaignId);
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.workflowsService.getCampaignExecutionSurface(campaignId, {
+      organizationId: context.organizationId!,
+    });
   }
 }
