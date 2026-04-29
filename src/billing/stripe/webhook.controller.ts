@@ -1,4 +1,5 @@
 import { BadRequestException, Controller, Headers, Post, Req } from '@nestjs/common';
+import { structuredLog } from '../../common/observability/structured-logger';
 import { PrismaService } from '../../database/prisma.service';
 import { Request } from 'express';
 import { BillingService } from '../billing.service';
@@ -18,16 +19,19 @@ export class WebhookController {
     @Headers('stripe-signature') stripeSignature?: string,
   ) {
     if (!stripeSignature) {
+      this.logWebhookFailure(req, 'missing_signature');
       throw new BadRequestException('Missing Stripe signature');
     }
 
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
     if (!webhookSecret) {
+      this.logWebhookFailure(req, 'missing_secret_config');
       throw new BadRequestException('Missing STRIPE_WEBHOOK_SECRET environment variable');
     }
 
     const rawBody = req.rawBody;
     if (!rawBody) {
+      this.logWebhookFailure(req, 'missing_raw_body');
       throw new BadRequestException('Missing raw request body for Stripe webhook verification');
     }
 
@@ -38,6 +42,7 @@ export class WebhookController {
         .getClient()
         .webhooks.constructEvent(rawBody, stripeSignature, webhookSecret);
     } catch {
+      this.logWebhookFailure(req, 'invalid_signature');
       throw new BadRequestException('Invalid Stripe webhook signature');
     }
 
@@ -117,5 +122,14 @@ export class WebhookController {
     }
 
     return { received: true, type: event.type };
+  }
+
+  private logWebhookFailure(req: Request & { requestId?: string; correlationId?: string }, reason: string) {
+    structuredLog('warn', 'webhook.failure', {
+      provider: 'stripe',
+      reason,
+      requestId: req.requestId,
+      correlationId: req.correlationId,
+    });
   }
 }

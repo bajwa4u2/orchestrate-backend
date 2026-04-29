@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { IntakeAiResult, NormalizedIntakeInput } from '../intake/intake.types';
+import { structuredLog } from '../common/observability/structured-logger';
 import { SupportCaseRepository } from './support-case.repository';
 
 @Injectable()
@@ -7,11 +8,31 @@ export class SupportCaseService {
   constructor(private readonly repository: SupportCaseRepository) {}
 
   async createFollowUpSession(input: NormalizedIntakeInput, ai: IntakeAiResult, reply: string, questions: string[]) {
-    return this.repository.createFollowUpSession({ input, ai, reply, questions });
+    const created = await this.repository.createFollowUpSession({ input, ai, reply, questions });
+    structuredLog('info', 'support.session.created', {
+      mode: 'follow_up',
+      source: input.source,
+      inquiryId: created.inquiryId,
+      sessionId: created.sessionId,
+      clientId: input.clientId ?? null,
+      category: ai.category,
+      priority: ai.priority,
+    });
+    return created;
   }
 
   async createEscalatedCase(input: NormalizedIntakeInput, ai: IntakeAiResult, reply: string) {
-    return this.repository.createEscalatedCase({ input, ai, reply });
+    const created = await this.repository.createEscalatedCase({ input, ai, reply });
+    structuredLog('info', 'support.session.created', {
+      mode: 'escalated',
+      source: input.source,
+      inquiryId: created.inquiryId,
+      sessionId: created.sessionId,
+      clientId: input.clientId ?? null,
+      category: ai.category,
+      priority: ai.priority,
+    });
+    return created;
   }
 
   async getBySessionId(sessionId: string) {
@@ -32,6 +53,12 @@ export class SupportCaseService {
       email: inquiry.email,
       source: inquiry.sourceKind as 'PUBLIC' | 'CLIENT',
       history: this.asArray(followUpState?.history),
+    });
+    structuredLog('info', 'support.reply.received', {
+      inquiryId: inquiry.id,
+      sessionId,
+      source: inquiry.sourceKind,
+      clientId: inquiry.clientId ?? null,
     });
     return inquiry;
   }
@@ -99,6 +126,11 @@ export class SupportCaseService {
   ) {
     if (inquiry.sourceKind === 'CLIENT') {
       if (!ownership.clientId || ownership.clientId !== inquiry.clientId) {
+        structuredLog('warn', 'support.ownership.denied', {
+          source: 'CLIENT',
+          inquiryClientId: inquiry.clientId,
+          requesterClientId: ownership.clientId ?? null,
+        });
         throw new ForbiddenException('Support session is not available for this client');
       }
       return;
@@ -106,6 +138,10 @@ export class SupportCaseService {
 
     const token = ownership.publicSessionToken?.trim();
     if (!token) {
+      structuredLog('warn', 'support.ownership.denied', {
+        source: 'PUBLIC',
+        reason: 'missing_public_session_token',
+      });
       throw new UnauthorizedException('Missing public support session token');
     }
 
@@ -117,6 +153,10 @@ export class SupportCaseService {
         : null;
 
     if (!expectedHash || this.repository.hashPublicSessionToken(token) !== expectedHash) {
+      structuredLog('warn', 'support.ownership.denied', {
+        source: 'PUBLIC',
+        reason: 'invalid_public_session_token',
+      });
       throw new ForbiddenException('Support session is not available for this requester');
     }
   }

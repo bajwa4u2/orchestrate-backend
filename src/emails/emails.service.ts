@@ -5,6 +5,7 @@ import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RepliesService } from '../replies/replies.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
+import { structuredLog } from '../common/observability/structured-logger';
 import { SendTemplatedEmailDto } from './dto/send-templated-email.dto';
 import { renderBaseEmail } from './templates/base.template';
 
@@ -1570,6 +1571,13 @@ export class EmailsService {
           },
         });
       }
+      structuredLog('warn', 'webhook.failure', {
+        provider: 'resend',
+        eventType,
+        eventId,
+        emailId,
+        reason: error instanceof Error ? error.name : 'unknown',
+      });
       throw error;
     }
   }
@@ -1832,6 +1840,10 @@ export class EmailsService {
     const secret = process.env.RESEND_WEBHOOK_SECRET?.trim();
     if (!secret) {
       if (process.env.NODE_ENV === 'production') {
+        structuredLog('warn', 'webhook.failure', {
+          provider: 'resend',
+          reason: 'missing_secret_config',
+        });
         throw new UnauthorizedException('Webhook signature secret is required');
       }
       return false;
@@ -1842,6 +1854,10 @@ export class EmailsService {
     const svixSignature = this.readHeader(headers, 'svix-signature');
 
     if (!svixId || !svixTimestamp || !svixSignature) {
+      structuredLog('warn', 'webhook.failure', {
+        provider: 'resend',
+        reason: 'missing_signature_headers',
+      });
       throw new UnauthorizedException('Missing webhook signature headers');
     }
 
@@ -1861,6 +1877,10 @@ export class EmailsService {
 
     const matched = candidates.some((value) => this.safeCompareBase64(value, expected));
     if (!matched) {
+      structuredLog('warn', 'webhook.failure', {
+        provider: 'resend',
+        reason: 'invalid_signature',
+      });
       throw new UnauthorizedException('Invalid webhook signature');
     }
 

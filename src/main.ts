@@ -10,6 +10,7 @@ import { NestFactory } from '@nestjs/core';
 import helmet from 'helmet';
 import { randomUUID } from 'crypto';
 import { AppModule } from './app.module';
+import { structuredLog } from './common/observability/structured-logger';
 
 function resolveAllowedOrigins() {
   const configured = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || process.env.APP_BASE_URL || '')
@@ -80,9 +81,14 @@ function createLaunchProtectionMiddleware() {
   const buckets = new Map<string, { count: number; resetAt: number }>();
 
   return (req: any, res: any, next: () => void) => {
-    const requestId = randomUUID();
+    const inboundCorrelationId = readRequestHeader(req.headers, 'x-correlation-id');
+    const inboundRequestId = readRequestHeader(req.headers, 'x-request-id');
+    const requestId = sanitizeExternalId(inboundRequestId) ?? randomUUID();
+    const correlationId = sanitizeExternalId(inboundCorrelationId) ?? requestId;
     res.setHeader('x-request-id', requestId);
+    res.setHeader('x-correlation-id', correlationId);
     req.requestId = requestId;
+    req.correlationId = correlationId;
 
     const path = String(req.originalUrl || req.url || '');
     const matchedRule = rules.find((rule) => rule.pattern.test(path));
@@ -109,10 +115,17 @@ function createLaunchProtectionMiddleware() {
 
     if (current.count >= matchedRule.limit) {
       res.setHeader('Retry-After', Math.max(1, Math.ceil((current.resetAt - now) / 1000)).toString());
+      structuredLog('warn', 'rate_limit.blocked', {
+        requestId,
+        correlationId,
+        path,
+        ip,
+      });
       res.status(429).json({
         ok: false,
         error: 'Too many requests',
         requestId,
+        correlationId,
       });
       return;
     }
@@ -121,6 +134,21 @@ function createLaunchProtectionMiddleware() {
     buckets.set(bucketKey, current);
     next();
   };
+}
+
+function readRequestHeader(headers: Record<string, unknown> | undefined, key: string) {
+  const raw = headers?.[key] ?? headers?.[key.toLowerCase()];
+  if (Array.isArray(raw)) return raw[0] ? String(raw[0]).trim() : undefined;
+  if (raw == null) return undefined;
+  const value = String(raw).trim();
+  return value.length ? value : undefined;
+}
+
+function sanitizeExternalId(value?: string) {
+  if (!value) return undefined;
+  const clean = value.trim();
+  if (!/^[a-zA-Z0-9._:-]{8,120}$/.test(clean)) return undefined;
+  return clean;
 }
 
 @Catch()
@@ -133,14 +161,24 @@ class SafeExceptionFilter implements ExceptionFilter {
       ? exception.getStatus()
       : HttpStatus.INTERNAL_SERVER_ERROR;
     const requestId = request?.requestId || response?.getHeader?.('x-request-id') || randomUUID();
+    const correlationId = request?.correlationId || response?.getHeader?.('x-correlation-id') || requestId;
     const body = exception instanceof HttpException ? exception.getResponse() : null;
     const message = this.safeMessage(status, body);
+    structuredLog(status >= 500 ? 'error' : 'warn', 'api.error', {
+      requestId,
+      correlationId,
+      statusCode: status,
+      method: request?.method,
+      path: request?.originalUrl || request?.url,
+      errorName: exception instanceof Error ? exception.name : 'UnknownError',
+    });
 
     response.status(status).json({
       ok: false,
       statusCode: status,
       error: message,
       requestId,
+      correlationId,
     });
   }
 

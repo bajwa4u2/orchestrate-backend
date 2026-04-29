@@ -8,6 +8,7 @@ import { ReplyIntakeDto } from '../src/intake/dto/reply-intake.dto';
 import { SupportCaseService } from '../src/support/support-case.service';
 import { RepliesController } from '../src/replies/replies.controller';
 import { AccessContextService } from '../src/access-context/access-context.service';
+import { AUTHORIZATION_MATRIX } from '../src/common/security/authorization-matrix';
 
 async function expectRejectsWith(
   action: () => Promise<unknown>,
@@ -125,12 +126,32 @@ async function testOperatorAndClientAuthRejection() {
   await expectRejectsWith(() => access.requireOperator({}), UnauthorizedException);
 }
 
+function testAuthorizationMatrixCoverage() {
+  const paths = AUTHORIZATION_MATRIX.map((entry) => entry.path);
+  for (const required of [
+    '/v1/client/*',
+    '/v1/operator/*',
+    '/v1/billing/webhook',
+    '/v1/replies/inbound',
+    '/v1/health/authorization-matrix',
+  ]) {
+    assert(paths.includes(required), `authorization matrix missing ${required}`);
+  }
+
+  const unsafe = AUTHORIZATION_MATRIX.filter((entry) =>
+    (entry.path.includes('/operator/') || entry.path.includes('/client/')) &&
+    entry.guard === 'none'
+  );
+  assert.strictEqual(unsafe.length, 0, 'client/operator matrix entries must not be public');
+}
+
 async function main() {
   await testPublicIntakeValidation();
   await testCrossClientSupportReplyRejection();
   await testPublicSupportTokenRejection();
   await testWebhookSecretEnforcement();
   await testOperatorAndClientAuthRejection();
+  testAuthorizationMatrixCoverage();
   console.log('security-hardening tests passed');
 }
 

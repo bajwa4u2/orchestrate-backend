@@ -3,6 +3,7 @@ import { MemberRole } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../database/prisma.service';
 import { RequestContext } from '../common/types/request-context.type';
+import { structuredLog } from '../common/observability/structured-logger';
 
 const MEMBER_ROLE_VALUES = ['OWNER', 'ADMIN', 'OPERATOR', 'ANALYST', 'BILLING', 'VIEWER'] satisfies MemberRole[];
 
@@ -27,6 +28,7 @@ export class AccessContextService {
     const session = this.readSession(headers);
 
     if ((surface === 'operator' || surface === 'client') && !session) {
+      this.logAuthFailure('missing_signed_session', headers, surface);
       throw new UnauthorizedException('Missing signed session');
     }
 
@@ -60,6 +62,7 @@ export class AccessContextService {
     });
 
     if (!membership) {
+      this.logAuthFailure('inactive_membership', headers, surface, { userId, organizationId });
       throw new UnauthorizedException('User is not an active member of the requested organization');
     }
 
@@ -91,9 +94,11 @@ export class AccessContextService {
   async requireOperator(headers: Record<string, unknown>) {
     const context = await this.buildFromHeaders(headers, 'operator');
     if (!context.userId || !context.organizationId) {
+      this.logAuthFailure('missing_operator_context', headers, 'operator');
       throw new UnauthorizedException('Missing operator session context');
     }
     if (!context.memberRole || !['OWNER', 'ADMIN', 'OPERATOR', 'ANALYST', 'BILLING'].includes(context.memberRole)) {
+      this.logAuthFailure('operator_role_denied', headers, 'operator', { memberRole: context.memberRole });
       throw new UnauthorizedException('Operator access is not allowed for the current membership role');
     }
     return context;
@@ -102,6 +107,7 @@ export class AccessContextService {
   async requireClient(headers: Record<string, unknown>) {
     const context = await this.buildFromHeaders(headers, 'client');
     if (!context.userId || !context.organizationId || !context.clientId) {
+      this.logAuthFailure('missing_client_context', headers, 'client');
       throw new UnauthorizedException('Missing client session context');
     }
 
@@ -111,6 +117,10 @@ export class AccessContextService {
     });
 
     if (!client) {
+      this.logAuthFailure('client_org_mismatch', headers, 'client', {
+        clientId: context.clientId,
+        organizationId: context.organizationId,
+      });
       throw new BadRequestException('Requested client does not belong to the active organization');
     }
 
@@ -158,5 +168,20 @@ export class AccessContextService {
     if (raw == null) return undefined;
     const value = String(raw).trim();
     return value.length ? value : undefined;
+  }
+
+  private logAuthFailure(
+    reason: string,
+    headers: Record<string, unknown>,
+    surface: AccessSurface,
+    extra: Record<string, unknown> = {},
+  ) {
+    structuredLog('warn', 'auth.failure', {
+      reason,
+      surface,
+      requestId: this.readHeader(headers, 'x-request-id'),
+      correlationId: this.readHeader(headers, 'x-correlation-id'),
+      ...extra,
+    });
   }
 }

@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module';
+import { AccessContextModule } from '../access-context/access-context.module';
 import { HealthController } from './health.controller';
 import { HealthService } from './health.service';
 
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, AccessContextModule],
   controllers: [HealthController],
   providers: [HealthService],
 })

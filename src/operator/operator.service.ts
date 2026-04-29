@@ -21,6 +21,7 @@ import { CampaignsService } from '../campaigns/campaigns.service';
 import { EmailsService } from '../emails/emails.service';
 import { DeliverabilityService } from '../deliverability/deliverability.service';
 import { buildExecutionReadSurface } from '../common/utils/execution-read-surface';
+import { structuredLog } from '../common/observability/structured-logger';
 import { AssignInquiryDto } from './dto/assign-inquiry.dto';
 import { CreateInquiryNoteDto } from './dto/create-inquiry-note.dto';
 import { CreateInquiryReplyDto } from './dto/create-inquiry-reply.dto';
@@ -449,9 +450,13 @@ export class OperatorService {
         closedAt: item.closedAt,
         assignedToUserId: item.assignedToUserId,
         assignedToName: item.assignedTo?.fullName ?? '',
-        isEscalated: item.isEscalated,
-        lastActivityAt: item.lastActivityAt,
-      })),
+      isEscalated: item.isEscalated,
+      escalationState: this.escalationState(item),
+      slaState: this.slaState(item),
+      firstResponseDueAt: item.firstResponseDueAt,
+      nextResponseDueAt: item.nextResponseDueAt,
+      lastActivityAt: item.lastActivityAt,
+    })),
       summary,
     };
   }
@@ -477,7 +482,9 @@ export class OperatorService {
       assignedToName: inquiry.assignedTo?.fullName ?? '',
       assignedAt: inquiry.assignedAt,
       isEscalated: inquiry.isEscalated,
+      escalationState: this.escalationState(inquiry),
       escalatedAt: inquiry.escalatedAt,
+      slaState: this.slaState(inquiry),
       firstResponseDueAt: inquiry.firstResponseDueAt,
       nextResponseDueAt: inquiry.nextResponseDueAt,
       firstRespondedAt: inquiry.firstRespondedAt,
@@ -548,6 +555,11 @@ export class OperatorService {
         bodyText: `Status changed to ${this.humanizeStatus(status)}.`,
         createdByUserId: actorUserId,
       },
+    });
+    structuredLog('info', 'support.status.changed', {
+      inquiryId,
+      actorUserId,
+      status,
     });
 
     return {
@@ -623,6 +635,11 @@ export class OperatorService {
         bodyText: assignmentText,
         createdByUserId: actorUserId,
       },
+    });
+    structuredLog('info', 'support.assignment.changed', {
+      inquiryId,
+      actorUserId,
+      assignedToUserId,
     });
 
     return {
@@ -757,6 +774,10 @@ export class OperatorService {
         createdByUserId: actorUserId,
       },
     });
+    structuredLog('info', 'support.note.created', {
+      inquiryId,
+      actorUserId,
+    });
 
     return {
       id: note.id,
@@ -823,6 +844,12 @@ export class OperatorService {
         isEscalated: false,
         escalatedAt: null,
       },
+    });
+    structuredLog('info', 'support.operator.reply.created', {
+      inquiryId,
+      actorUserId,
+      sendEmail: dto.sendEmail ?? false,
+      status: nextStatus,
     });
 
     return {
@@ -935,9 +962,12 @@ export class OperatorService {
   }
 
   private async requireInquiry(organizationId: string, inquiryId: string) {
-    void organizationId;
-    const inquiry = await this.prisma.publicInquiry.findUnique({
-      where: { id: inquiryId },
+    const scopeOrganizationId = await this.resolveOperatorScope(organizationId);
+    const inquiry = await this.prisma.publicInquiry.findFirst({
+      where: {
+        id: inquiryId,
+        ...this.buildInquiryWhere(scopeOrganizationId),
+      },
       include: {
         assignedTo: {
           select: {
@@ -1082,6 +1112,38 @@ export class OperatorService {
       .filter(Boolean)
       .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
       .join(' ');
+  }
+
+  private escalationState(inquiry: {
+    isEscalated?: boolean | null;
+    escalatedAt?: Date | null;
+    assignedToUserId?: string | null;
+    status?: PublicInquiryStatus | string | null;
+  }) {
+    if (inquiry.status === PublicInquiryStatus.CLOSED || inquiry.status === PublicInquiryStatus.SPAM) {
+      return 'cleared';
+    }
+    if (inquiry.isEscalated && inquiry.assignedToUserId) return 'assigned_escalation';
+    if (inquiry.isEscalated) return 'unassigned_escalation';
+    return 'standard';
+  }
+
+  private slaState(inquiry: {
+    status?: PublicInquiryStatus | string | null;
+    firstResponseDueAt?: Date | null;
+    nextResponseDueAt?: Date | null;
+    firstRespondedAt?: Date | null;
+  }) {
+    if (inquiry.status === PublicInquiryStatus.CLOSED || inquiry.status === PublicInquiryStatus.SPAM) {
+      return 'closed';
+    }
+    const now = Date.now();
+    const dueAt = inquiry.firstRespondedAt ? inquiry.nextResponseDueAt : inquiry.firstResponseDueAt;
+    if (!dueAt) return 'not_set';
+    const ms = new Date(dueAt).getTime() - now;
+    if (ms < 0) return 'breached';
+    if (ms <= 60 * 60 * 1000) return 'due_soon';
+    return 'on_track';
   }
 
   private timelineType(message: {
