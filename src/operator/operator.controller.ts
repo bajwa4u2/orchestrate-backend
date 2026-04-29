@@ -59,6 +59,25 @@ export class OperatorController {
     return this.operatorService.recordsOverview(context.organizationId!);
   }
 
+  @Get('activity')
+  async activity(
+    @Headers() headers: Record<string, unknown>,
+    @Query('limit') limit?: string,
+    @Query('q') q?: string,
+  ) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.operatorService.activityStream(context.organizationId!, { limit, q });
+  }
+
+  @Get('execution')
+  async execution(
+    @Headers() headers: Record<string, unknown>,
+    @Query('limit') limit?: string,
+  ) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.operatorService.executionWorkspace(context.organizationId!, { limit });
+  }
+
   @Get('inquiries')
   async inquiries(
     @Headers() headers: Record<string, unknown>,

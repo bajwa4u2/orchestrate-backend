@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { structuredLog } from '../common/observability/structured-logger';
 import { RepliesService } from './replies.service';
@@ -52,11 +52,11 @@ export class RepliesController {
       const clientContext = await this.accessContextService.requireClient(headers);
       return this.repliesService.listForClient(clientContext.clientId!);
     } catch {
-      await this.accessContextService.requireOperator(headers);
-      if (!clientId) {
-        throw new BadRequestException('clientId is required for operator reply listing');
+      const operatorContext = await this.accessContextService.requireOperator(headers);
+      if (clientId?.trim()) {
+        return this.repliesService.listForClientInOrganization(operatorContext.organizationId!, clientId.trim());
       }
-      return this.repliesService.listForClient(clientId);
+      return this.repliesService.listForOrganization(operatorContext.organizationId!);
     }
   }
 

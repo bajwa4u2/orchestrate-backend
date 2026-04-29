@@ -11,6 +11,7 @@ import {
   ContactConsentStatus,
   JobStatus,
   JobType,
+  Prisma,
   RecordSource,
   SuppressionType,
   WorkflowLane,
@@ -215,8 +216,23 @@ export class RepliesService {
   }
 
   async listForClient(clientId: string) {
+    return this.listForScope({ clientId }, { clientId });
+  }
+
+  async listForClientInOrganization(organizationId: string, clientId: string) {
+    return this.listForScope({ organizationId, clientId }, { organizationId, clientId });
+  }
+
+  async listForOrganization(organizationId: string) {
+    return this.listForScope({ organizationId }, { organizationId });
+  }
+
+  private async listForScope(
+    where: Prisma.ReplyWhereInput,
+    relationScope: { organizationId?: string; clientId?: string },
+  ) {
     const replies = await this.prisma.reply.findMany({
-      where: { clientId },
+      where,
       select: {
         id: true,
         organizationId: true,
@@ -242,7 +258,8 @@ export class RepliesService {
       take: 100,
     });
 
-    const organizationId = replies[0]?.organizationId;
+    const organizationId = relationScope.organizationId ?? replies[0]?.organizationId;
+    const clientId = relationScope.clientId;
     const leadIds = Array.from(new Set(replies.map((reply) => reply.leadId).filter(Boolean))) as string[];
     const campaignIds = Array.from(new Set(replies.map((reply) => reply.campaignId).filter(Boolean))) as string[];
     const messageIds = Array.from(new Set(replies.map((reply) => reply.messageId).filter(Boolean))) as string[];
@@ -251,7 +268,7 @@ export class RepliesService {
     const [leads, campaigns, messages, meetings] = await Promise.all([
       organizationId && leadIds.length
         ? this.safeValue(() => this.prisma.lead.findMany({
-            where: { organizationId, clientId, id: { in: leadIds } },
+            where: { organizationId, ...(clientId ? { clientId } : {}), id: { in: leadIds } },
             select: {
               id: true,
               status: true,
@@ -261,19 +278,19 @@ export class RepliesService {
         : [],
       organizationId && campaignIds.length
         ? this.safeValue(() => this.prisma.campaign.findMany({
-            where: { organizationId, clientId, id: { in: campaignIds } },
+            where: { organizationId, ...(clientId ? { clientId } : {}), id: { in: campaignIds } },
             select: { id: true, name: true, status: true },
           }), [])
         : [],
       organizationId && messageIds.length
         ? this.safeValue(() => this.prisma.outreachMessage.findMany({
-            where: { organizationId, clientId, id: { in: messageIds } },
+            where: { organizationId, ...(clientId ? { clientId } : {}), id: { in: messageIds } },
             select: { id: true, subjectLine: true, status: true, sentAt: true },
           }), [])
         : [],
       organizationId && replyIds.length
         ? this.safeValue(() => this.prisma.meeting.findMany({
-            where: { organizationId, clientId, replyId: { in: replyIds } },
+            where: { organizationId, ...(clientId ? { clientId } : {}), replyId: { in: replyIds } },
             select: { id: true, replyId: true, status: true, scheduledAt: true, title: true, bookingUrl: true },
           }), [])
         : [],

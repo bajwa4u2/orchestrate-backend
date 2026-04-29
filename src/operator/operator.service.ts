@@ -529,6 +529,177 @@ export class OperatorService {
     };
   }
 
+  async activityStream(
+    organizationId: string,
+    filters: { limit?: string; q?: string } = {},
+  ) {
+    const scopeOrganizationId = await this.resolveOperatorScope(organizationId);
+    const parsedLimit = Number.parseInt(filters.limit ?? '', 10);
+    const take = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(parsedLimit, 1), 100)
+      : 50;
+    const q = filters.q?.trim();
+    const where: Prisma.ActivityEventWhereInput = {
+      ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}),
+      ...(q
+        ? {
+            OR: [
+              { summary: { contains: q, mode: 'insensitive' } },
+              { subjectType: { contains: q, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const [items, kindCounts, visibilityCounts] = await Promise.all([
+      this.prisma.activityEvent.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }],
+        take,
+        include: {
+          client: { select: { id: true, displayName: true, legalName: true } },
+          campaign: { select: { id: true, name: true, status: true } },
+          actor: { select: { id: true, fullName: true, email: true } },
+        },
+      }),
+      this.safeValue(() => this.prisma.activityEvent.groupBy({
+        by: ['kind'],
+        where,
+        _count: { _all: true },
+      }), []),
+      this.safeValue(() => this.prisma.activityEvent.groupBy({
+        by: ['visibility'],
+        where,
+        _count: { _all: true },
+      }), []),
+    ]);
+
+    return {
+      items: items.map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        visibility: item.visibility,
+        subjectType: item.subjectType,
+        subjectId: item.subjectId,
+        summary: item.summary,
+        createdAt: item.createdAt,
+        clientId: item.clientId,
+        campaignId: item.campaignId,
+        workflowRunId: item.workflowRunId,
+        actorUserId: item.actorUserId,
+        clientName: item.client?.displayName ?? item.client?.legalName ?? '',
+        campaignName: item.campaign?.name ?? '',
+        campaignStatus: item.campaign?.status ?? '',
+        actorName: item.actor?.fullName ?? item.actor?.email ?? '',
+      })),
+      summary: {
+        total: items.length,
+        byKind: this.countRowsToMap(kindCounts, 'kind'),
+        byVisibility: this.countRowsToMap(visibilityCounts, 'visibility'),
+        lastUpdatedAt: new Date(),
+      },
+    };
+  }
+
+  async executionWorkspace(
+    organizationId: string,
+    filters: { limit?: string } = {},
+  ) {
+    const scopeOrganizationId = await this.resolveOperatorScope(organizationId);
+    const parsedLimit = Number.parseInt(filters.limit ?? '', 10);
+    const take = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(parsedLimit, 1), 100)
+      : 50;
+    const where: Prisma.JobWhereInput = scopeOrganizationId ? { organizationId: scopeOrganizationId } : {};
+
+    const [jobs, statusCounts, queueCounts, typeCounts, recentRuns] = await Promise.all([
+      this.prisma.job.findMany({
+        where,
+        orderBy: [{ updatedAt: 'desc' }],
+        take,
+        include: {
+          client: { select: { id: true, displayName: true, legalName: true } },
+          campaign: { select: { id: true, name: true, status: true } },
+        },
+      }),
+      this.safeValue(() => this.prisma.job.groupBy({
+        by: ['status'],
+        where,
+        _count: { _all: true },
+      }), []),
+      this.safeValue(() => this.prisma.job.groupBy({
+        by: ['queueName'],
+        where,
+        _count: { _all: true },
+      }), []),
+      this.safeValue(() => this.prisma.job.groupBy({
+        by: ['type'],
+        where,
+        _count: { _all: true },
+      }), []),
+      this.safeValue(() => this.prisma.jobRun.findMany({
+        where: {
+          job: { is: where },
+        },
+        orderBy: [{ startedAt: 'desc' }],
+        take: 20,
+        include: {
+          job: {
+            select: {
+              id: true,
+              type: true,
+              queueName: true,
+              client: { select: { displayName: true, legalName: true } },
+              campaign: { select: { name: true } },
+            },
+          },
+        },
+      }), []),
+    ]);
+
+    return {
+      items: jobs.map((job) => ({
+        id: job.id,
+        type: job.type,
+        status: job.status,
+        queueName: job.queueName,
+        scheduledFor: job.scheduledFor,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        attemptCount: job.attemptCount,
+        maxAttempts: job.maxAttempts,
+        lastError: job.lastError,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        clientId: job.clientId,
+        campaignId: job.campaignId,
+        clientName: job.client?.displayName ?? job.client?.legalName ?? '',
+        campaignName: job.campaign?.name ?? '',
+        campaignStatus: job.campaign?.status ?? '',
+      })),
+      recentRuns: recentRuns.map((run) => ({
+        id: run.id,
+        jobId: run.jobId,
+        runNumber: run.runNumber,
+        status: run.status,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+        errorMessage: run.errorMessage,
+        type: run.job?.type,
+        queueName: run.job?.queueName,
+        clientName: run.job?.client?.displayName ?? run.job?.client?.legalName ?? '',
+        campaignName: run.job?.campaign?.name ?? '',
+      })),
+      summary: {
+        totalVisible: jobs.length,
+        byStatus: this.countRowsToMap(statusCounts, 'status'),
+        byQueue: this.countRowsToMap(queueCounts, 'queueName'),
+        byType: this.countRowsToMap(typeCounts, 'type'),
+        lastUpdatedAt: new Date(),
+      },
+    };
+  }
+
   async listPublicInquiries(
     organizationId?: string,
     filters: { limit?: string; status?: string; q?: string } = {},
@@ -1132,6 +1303,14 @@ export class OperatorService {
       console.warn('[OperatorService] operator truth query failed', error);
       return fallback;
     }
+  }
+
+  private countRowsToMap(rows: Array<Record<string, any>>, key: string) {
+    return rows.reduce((result, row) => {
+      const name = String(row[key] ?? 'UNKNOWN');
+      result[name] = row._count?._all ?? 0;
+      return result;
+    }, {} as Record<string, number>);
   }
 
   private emptyControlOverview() {

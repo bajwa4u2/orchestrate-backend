@@ -120,6 +120,40 @@ async function testWebhookSecretEnforcement() {
   process.env.NODE_ENV = previousNodeEnv;
 }
 
+async function testOperatorRepliesAllowOrgWideListing() {
+  const calls: string[] = [];
+  const controller = new RepliesController(
+    {
+      listForClient: async () => {
+        calls.push('client');
+        return [];
+      },
+      listForClientInOrganization: async (organizationId: string, clientId: string) => {
+        calls.push(`operator-client:${organizationId}:${clientId}`);
+        return [];
+      },
+      listForOrganization: async (organizationId: string) => {
+        calls.push(`operator-org:${organizationId}`);
+        return [];
+      },
+    } as any,
+    {
+      requireClient: async () => {
+        throw new UnauthorizedException('not client');
+      },
+      requireOperator: async () => ({ organizationId: 'org_1', userId: 'user_1' }),
+    } as any,
+  );
+
+  await controller.list({}, undefined);
+  await controller.list({}, 'client_1');
+
+  assert.deepStrictEqual(calls, [
+    'operator-org:org_1',
+    'operator-client:org_1:client_1',
+  ]);
+}
+
 async function testOperatorAndClientAuthRejection() {
   const access = new AccessContextService({} as any);
   await expectRejectsWith(() => access.requireClient({}), UnauthorizedException);
@@ -150,6 +184,7 @@ async function main() {
   await testCrossClientSupportReplyRejection();
   await testPublicSupportTokenRejection();
   await testWebhookSecretEnforcement();
+  await testOperatorRepliesAllowOrgWideListing();
   await testOperatorAndClientAuthRejection();
   testAuthorizationMatrixCoverage();
   console.log('security-hardening tests passed');
