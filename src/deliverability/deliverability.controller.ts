@@ -77,6 +77,12 @@ export class DeliverabilityController {
     return this.deliverabilityService.refreshMailboxHealth(mailboxId);
   }
 
+  @Post('mailboxes/:mailboxId/reconnect')
+  async reconnectMailbox(@Headers() headers: Record<string, unknown>, @Param('mailboxId') mailboxId: string) {
+    const context = await this.accessContextService.requireOperator(headers);
+    return this.deliverabilityService.prepareMailboxReconnect(mailboxId, context.organizationId!);
+  }
+
   @Get('overview')
   async overview(
     @Headers() headers: Record<string, unknown>,

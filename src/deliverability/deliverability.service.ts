@@ -379,6 +379,56 @@ export class DeliverabilityService {
     return { ok: true, complaint, health };
   }
 
+  async prepareMailboxReconnect(mailboxId: string, organizationId: string) {
+    const mailbox = await this.prisma.mailbox.findFirst({
+      where: { id: mailboxId, organizationId },
+    });
+    if (!mailbox) throw new NotFoundException(`Mailbox ${mailboxId} not found`);
+
+    const metadata = this.asObject(mailbox.metadataJson);
+    const reconnectRequestedAt = new Date();
+    const authUrl = this.buildMailboxReconnectUrl(mailbox);
+    const updated = await this.prisma.mailbox.update({
+      where: { id: mailbox.id },
+      data: {
+        connectionState:
+          mailbox.connectionState === MailboxConnectionState.REVOKED
+            ? MailboxConnectionState.REQUIRES_REAUTH
+            : MailboxConnectionState.PENDING_AUTH,
+        status:
+          mailbox.status === MailboxStatus.ACTIVE
+            ? MailboxStatus.CONNECTING
+            : mailbox.status,
+        disconnectedAt: mailbox.disconnectedAt ?? reconnectRequestedAt,
+        metadataJson: toPrismaJson({
+          ...metadata,
+          reconnect: {
+            ...(this.asObject(metadata.reconnect) as Record<string, unknown>),
+            requestedAt: reconnectRequestedAt.toISOString(),
+            status: 'ACTION_REQUIRED',
+            authUrl,
+          },
+        }),
+      },
+    });
+
+    return {
+      ok: true,
+      mailboxId: updated.id,
+      emailAddress: updated.emailAddress,
+      status: updated.status,
+      connectionState: updated.connectionState,
+      reconnect: {
+        status: 'ACTION_REQUIRED',
+        authUrl,
+        requestedAt: reconnectRequestedAt,
+        message: authUrl
+          ? 'Open the provider authorization URL to reconnect this mailbox.'
+          : 'Provider authorization URL is not configured for this mailbox. Update provider credentials or reconnect manually.',
+      },
+    };
+  }
+
   async refreshMailboxHealth(mailboxId: string) {
     const mailbox = await this.prisma.mailbox.findUnique({ where: { id: mailboxId } });
     if (!mailbox) throw new NotFoundException(`Mailbox ${mailboxId} not found`);
@@ -801,6 +851,30 @@ export class DeliverabilityService {
       return value as Record<string, unknown>;
     }
     return {};
+  }
+
+  private buildMailboxReconnectUrl(mailbox: Mailbox) {
+    const metadata = this.asObject(mailbox.metadataJson);
+    const configuredUrl =
+      this.readString(metadata.reconnectUrl) ??
+      this.readString(metadata.authUrl) ??
+      process.env.MAILBOX_RECONNECT_URL?.trim() ??
+      process.env.EMAIL_PROVIDER_AUTH_URL?.trim();
+    if (!configuredUrl) return null;
+
+    try {
+      const url = new URL(configuredUrl);
+      url.searchParams.set('mailboxId', mailbox.id);
+      url.searchParams.set('email', mailbox.emailAddress);
+      url.searchParams.set('provider', mailbox.provider);
+      return url.toString();
+    } catch (_) {
+      return configuredUrl;
+    }
+  }
+
+  private readString(value: unknown) {
+    return typeof value === 'string' && value.trim().length ? value.trim() : null;
   }
 }
 
