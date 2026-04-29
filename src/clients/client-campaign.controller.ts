@@ -13,7 +13,8 @@ export class ClientCampaignController {
   ) {}
 
   @Get()
-  getCampaignProfile(@Headers() headers: Record<string, unknown>) {
+  async getCampaignProfile(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.getCampaignProfile(headers);
   }
 
@@ -41,20 +42,23 @@ export class ClientCampaignController {
   }
 
   @Patch()
-  updateCampaignProfile(
+  async updateCampaignProfile(
     @Headers() headers: Record<string, unknown>,
     @Body() dto: UpdateCampaignProfileDto,
   ) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.updateCampaignProfile(headers, dto);
   }
 
   @Post('start')
-  startCampaign(@Headers() headers: Record<string, unknown>) {
+  async startCampaign(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.startCampaign(headers);
   }
 
   @Post('restart')
-  restartCampaign(@Headers() headers: Record<string, unknown>) {
+  async restartCampaign(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
     return this.clientsService.restartCampaign(headers);
   }
 }

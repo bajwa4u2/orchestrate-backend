@@ -37,10 +37,8 @@ export class WebhookController {
       event = this.stripeService
         .getClient()
         .webhooks.constructEvent(rawBody, stripeSignature, webhookSecret);
-    } catch (error) {
-      throw new BadRequestException(
-        error instanceof Error ? `Invalid Stripe webhook signature: ${error.message}` : 'Invalid Stripe webhook signature',
-      );
+    } catch {
+      throw new BadRequestException('Invalid Stripe webhook signature');
     }
 
     const existing = await this.prisma.webhookEventReceipt.findUnique({

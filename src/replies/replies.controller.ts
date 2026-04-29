@@ -25,6 +25,9 @@ export class RepliesController {
     },
   ) {
     const configuredSecret = process.env.INBOUND_REPLY_SECRET?.trim();
+    if (!configuredSecret && process.env.NODE_ENV === 'production') {
+      throw new UnauthorizedException('Inbound reply secret is required');
+    }
     if (configuredSecret) {
       const providedSecret = String(headers['x-orchestrate-inbound-secret'] ?? headers['X-Orchestrate-Inbound-Secret'] ?? '').trim();
       if (!providedSecret || providedSecret !== configuredSecret) {

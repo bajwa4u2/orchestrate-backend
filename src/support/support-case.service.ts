@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { IntakeAiResult, NormalizedIntakeInput } from '../intake/intake.types';
 import { SupportCaseRepository } from './support-case.repository';
 
@@ -18,8 +18,13 @@ export class SupportCaseService {
     return this.repository.getBySessionId(sessionId);
   }
 
-  async appendInboundReply(sessionId: string, message: string) {
+  async appendInboundReply(
+    sessionId: string,
+    message: string,
+    ownership: { clientId?: string; publicSessionToken?: string } = {},
+  ) {
     const inquiry = await this.repository.getBySessionId(sessionId);
+    this.assertReplyOwnership(inquiry, ownership);
     const followUpState = this.asObject(inquiry.followUpStateJson);
     await this.repository.appendInboundReply({
       inquiryId: inquiry.id,
@@ -82,5 +87,37 @@ export class SupportCaseService {
 
   private asArray(value: unknown): unknown[] {
     return Array.isArray(value) ? value : [];
+  }
+
+  private assertReplyOwnership(
+    inquiry: {
+      sourceKind: unknown;
+      clientId: string | null;
+      metadataJson?: unknown;
+    },
+    ownership: { clientId?: string; publicSessionToken?: string },
+  ) {
+    if (inquiry.sourceKind === 'CLIENT') {
+      if (!ownership.clientId || ownership.clientId !== inquiry.clientId) {
+        throw new ForbiddenException('Support session is not available for this client');
+      }
+      return;
+    }
+
+    const token = ownership.publicSessionToken?.trim();
+    if (!token) {
+      throw new UnauthorizedException('Missing public support session token');
+    }
+
+    const metadata = this.asObject(inquiry.metadataJson);
+    const intake = this.asObject(metadata?.intake);
+    const expectedHash =
+      typeof intake?.publicSessionTokenHash === 'string'
+        ? intake.publicSessionTokenHash
+        : null;
+
+    if (!expectedHash || this.repository.hashPublicSessionToken(token) !== expectedHash) {
+      throw new ForbiddenException('Support session is not available for this requester');
+    }
   }
 }

@@ -1,6 +1,8 @@
 import { Body, Controller, Headers, Param, Post } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
+import { CreatePublicIntakeDto } from '../intake/dto/create-public-intake.dto';
+import { ReplyIntakeDto } from '../intake/dto/reply-intake.dto';
 import { IntakeService } from '../intake/intake.service';
 import { NormalizedIntakeInput } from '../intake/intake.types';
 
@@ -15,7 +17,7 @@ export class ClientSupportController {
   @Post('intake')
   async intakeRequest(
     @Headers() headers: Record<string, unknown>,
-    @Body() body: { message: string; sourcePage?: string | null; inquiryTypeHint?: string | null },
+    @Body() body: CreatePublicIntakeDto,
   ) {
     const context = await this.accessContextService.requireClient(headers);
     const user = await this.prisma.user.findUnique({
@@ -51,9 +53,11 @@ export class ClientSupportController {
   async replyToSession(
     @Headers() headers: Record<string, unknown>,
     @Param('sessionId') sessionId: string,
-    @Body() body: { message: string },
+    @Body() body: ReplyIntakeDto,
   ) {
-    await this.accessContextService.requireClient(headers);
-    return this.intake.replyPublic(sessionId, body.message);
+    const context = await this.accessContextService.requireClient(headers);
+    return this.intake.replyPublic(sessionId, body.message, {
+      clientId: context.clientId!,
+    });
   }
 }

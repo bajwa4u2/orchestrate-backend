@@ -1,4 +1,6 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { CreatePublicIntakeDto } from '../intake/dto/create-public-intake.dto';
+import { ReplyIntakeDto } from '../intake/dto/reply-intake.dto';
 import { CreatePublicContactDto } from './dto/create-public-contact.dto';
 import { PublicService } from './public.service';
 
@@ -22,25 +24,15 @@ export class PublicController {
   }
 
   @Post('intake')
-  async submitIntake(
-    @Body()
-    body: {
-      message: string;
-      name?: string | null;
-      email?: string | null;
-      company?: string | null;
-      sourcePage?: string | null;
-      inquiryTypeHint?: string | null;
-    },
-  ) {
+  async submitIntake(@Body() body: CreatePublicIntakeDto) {
     return this.publicService.submitIntake(body);
   }
 
   @Post('intake/:sessionId/reply')
   async replyToSession(
     @Param('sessionId') sessionId: string,
-    @Body() body: { message: string },
+    @Body() body: ReplyIntakeDto,
   ) {
-    return this.publicService.replyToIntakeSession(sessionId, body.message);
+    return this.publicService.replyToIntakeSession(sessionId, body.message, body.sessionToken);
   }
 }

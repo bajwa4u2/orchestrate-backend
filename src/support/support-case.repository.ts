@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { IntakeAiResult, NormalizedIntakeInput } from '../intake/intake.types';
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 
 @Injectable()
 export class SupportCaseRepository {
@@ -12,8 +12,9 @@ export class SupportCaseRepository {
     ai: IntakeAiResult;
     reply: string;
     questions: string[];
-  }): Promise<{ inquiryId: string; sessionId: string }> {
+  }): Promise<{ inquiryId: string; sessionId: string; sessionToken: string | null }> {
     const sessionId = this.buildSessionId();
+    const sessionToken = params.input.source === 'PUBLIC' ? this.buildPublicSessionToken() : null;
     const now = new Date();
     const reply = params.reply ?? params.ai.suggestedReply ?? '';
 
@@ -30,6 +31,7 @@ export class SupportCaseRepository {
           intake: {
             mode: 'follow_up',
             persistedAt: now.toISOString(),
+            publicSessionTokenHash: sessionToken ? this.hashPublicSessionToken(sessionToken) : null,
           },
         } as any,
         sourceKind: params.input.source,
@@ -88,6 +90,7 @@ export class SupportCaseRepository {
     return {
       inquiryId: inquiry.id,
       sessionId: inquiry.intakeSessionId || sessionId,
+      sessionToken,
     };
   }
 
@@ -95,8 +98,9 @@ export class SupportCaseRepository {
     input: NormalizedIntakeInput;
     ai: IntakeAiResult;
     reply: string;
-  }): Promise<{ inquiryId: string; sessionId: string }> {
+  }): Promise<{ inquiryId: string; sessionId: string; sessionToken: string | null }> {
     const sessionId = this.buildSessionId();
+    const sessionToken = params.input.source === 'PUBLIC' ? this.buildPublicSessionToken() : null;
     const now = new Date();
     const reply = params.reply ?? params.ai.suggestedReply ?? '';
 
@@ -113,6 +117,7 @@ export class SupportCaseRepository {
           intake: {
             mode: 'escalated',
             persistedAt: now.toISOString(),
+            publicSessionTokenHash: sessionToken ? this.hashPublicSessionToken(sessionToken) : null,
           },
         } as any,
         sourceKind: params.input.source,
@@ -153,6 +158,7 @@ export class SupportCaseRepository {
     return {
       inquiryId: inquiry.id,
       sessionId: inquiry.intakeSessionId || sessionId,
+      sessionToken,
     };
   }
 
@@ -173,6 +179,7 @@ export class SupportCaseRepository {
         clientId: true,
         category: true,
         followUpStateJson: true,
+        metadataJson: true,
       },
     });
 
@@ -181,6 +188,10 @@ export class SupportCaseRepository {
     }
 
     return inquiry;
+  }
+
+  hashPublicSessionToken(token: string) {
+    return createHash('sha256').update(token).digest('hex');
   }
 
   async appendInboundReply(params: {
@@ -371,7 +382,11 @@ export class SupportCaseRepository {
   }
 
   private buildSessionId(): string {
-    return `sess_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    return `sess_${randomUUID().replace(/-/g, '')}`;
+  }
+
+  private buildPublicSessionToken(): string {
+    return `pst_${randomBytes(32).toString('base64url')}`;
   }
 
   private resolveSource(source: 'PUBLIC' | 'CLIENT'): string {

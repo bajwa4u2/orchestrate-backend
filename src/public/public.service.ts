@@ -317,8 +317,10 @@ export class PublicService {
     });
   }
 
-  async replyToIntakeSession(sessionId: string, message: string) {
-    return this.intakeService.replyPublic(sessionId, message.trim());
+  async replyToIntakeSession(sessionId: string, message: string, sessionToken?: string | null) {
+    return this.intakeService.replyPublic(sessionId, message.trim(), {
+      publicSessionToken: sessionToken ?? undefined,
+    });
   }
 
   private resolveContactRoute(inquiryType: PublicInquiryTypeDto) {

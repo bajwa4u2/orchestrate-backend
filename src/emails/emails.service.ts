@@ -1831,6 +1831,9 @@ export class EmailsService {
   private verifyResendWebhook(rawPayload: string, headers: Record<string, unknown>) {
     const secret = process.env.RESEND_WEBHOOK_SECRET?.trim();
     if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new UnauthorizedException('Webhook signature secret is required');
+      }
       return false;
     }
 

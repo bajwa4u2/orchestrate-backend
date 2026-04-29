@@ -64,6 +64,7 @@ export class IntakeService {
         caseCreated: false,
         caseId: null,
         sessionId: persisted.sessionId,
+        sessionToken: persisted.sessionToken,
         category: ai.category,
         priority: ai.priority,
       };
@@ -83,13 +84,18 @@ export class IntakeService {
       caseCreated: true,
       caseId: persisted.inquiryId,
       sessionId: persisted.sessionId,
+      sessionToken: persisted.sessionToken,
       category: ai.category,
       priority: ai.priority,
     };
   }
 
-  async replyPublic(sessionId: string, message: string): Promise<IntakeResponse> {
-    const inquiry = await this.supportCases.appendInboundReply(sessionId, message);
+  async replyPublic(
+    sessionId: string,
+    message: string,
+    ownership: { clientId?: string; publicSessionToken?: string } = {},
+  ): Promise<IntakeResponse> {
+    const inquiry = await this.supportCases.appendInboundReply(sessionId, message, ownership);
     const combinedMessage = this.buildReplyContext(
       inquiry.message,
       inquiry.followUpStateJson,
@@ -124,6 +130,7 @@ export class IntakeService {
         caseCreated: false,
         caseId: null,
         sessionId,
+        sessionToken: null,
         category: ai.category,
         priority: ai.priority,
       };
@@ -150,6 +157,7 @@ export class IntakeService {
         caseCreated: false,
         caseId: null,
         sessionId,
+        sessionToken: null,
         category: ai.category,
         priority: ai.priority,
       };
@@ -182,6 +190,7 @@ export class IntakeService {
       caseCreated: true,
       caseId: escalated.id,
       sessionId,
+      sessionToken: null,
       category: ai.category,
       priority: ai.priority,
     };
@@ -304,6 +313,7 @@ export class IntakeService {
       caseCreated: false,
       caseId: null,
       sessionId: persisted.sessionId,
+      sessionToken: persisted.sessionToken,
       category: ai.category,
       priority: ai.priority,
     };
@@ -323,6 +333,7 @@ export class IntakeService {
       caseCreated: true,
       caseId: persisted.inquiryId,
       sessionId: persisted.sessionId,
+      sessionToken: persisted.sessionToken,
       category: ai.category,
       priority: ai.priority,
     };

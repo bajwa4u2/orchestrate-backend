@@ -51,6 +51,7 @@ export interface IntakeResponse {
   caseCreated: boolean;
   caseId: string | null;
   sessionId: string | null;
+  sessionToken?: string | null;
   category: string;
   priority: string;
 }

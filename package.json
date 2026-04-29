@@ -6,6 +6,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "npm run prisma:generate && nest build && find dist -maxdepth 3 -type f | sort",
+    "test": "ts-node --transpile-only test/security-hardening.spec.ts",
     "start": "node dist/src/main.js",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",

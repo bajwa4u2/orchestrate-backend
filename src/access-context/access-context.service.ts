@@ -30,7 +30,7 @@ export class AccessContextService {
       throw new UnauthorizedException('Missing signed session');
     }
 
-    const allowHeaderFallback = surface === 'system' && this.allowSystemHeaderFallback();
+    const allowHeaderFallback = surface === 'system' && this.allowSystemHeaderFallback(headers);
 
     const userId = session?.sub || (allowHeaderFallback ? this.readHeader(headers, 'x-user-id') : undefined);
     const organizationId =
@@ -117,8 +117,17 @@ export class AccessContextService {
     return context;
   }
 
-  private allowSystemHeaderFallback() {
-    return (process.env.ALLOW_SYSTEM_HEADER_CONTEXT?.trim() || '').toLowerCase() === 'true';
+  private allowSystemHeaderFallback(headers: Record<string, unknown>) {
+    const enabled = (process.env.ALLOW_SYSTEM_HEADER_CONTEXT?.trim() || '').toLowerCase() === 'true';
+    if (!enabled) return false;
+
+    const configuredSecret = process.env.SYSTEM_HEADER_CONTEXT_SECRET?.trim();
+    if (configuredSecret) {
+      const providedSecret = this.readHeader(headers, 'x-orchestrate-internal-secret');
+      return providedSecret === configuredSecret;
+    }
+
+    return process.env.NODE_ENV !== 'production';
   }
 
   private readSession(headers: Record<string, unknown>) {

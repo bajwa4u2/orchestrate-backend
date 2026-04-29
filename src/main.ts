@@ -1,23 +1,66 @@
-import { ValidationPipe } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+  ValidationPipe,
+} from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import helmet from 'helmet';
 import { randomUUID } from 'crypto';
 import { AppModule } from './app.module';
 
 function resolveAllowedOrigins() {
-  return [
-    'http://localhost:3001',
-    'https://orchestrateops.com',
-    'https://www.orchestrateops.com',
-    'https://app.orchestrateops.com',
-    /^http:\/\/localhost:\d+$/,
-  ];
+  const configured = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || process.env.APP_BASE_URL || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  const origins: Array<string | RegExp> = configured.length
+    ? configured
+    : [
+        'https://orchestrateops.com',
+        'https://www.orchestrateops.com',
+        'https://app.orchestrateops.com',
+      ];
+
+  if (process.env.NODE_ENV !== 'production') {
+    origins.push(/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/);
+  }
+
+  return origins;
 }
 
 function validateCriticalEnvironment() {
   const hasTokenSecret = Boolean(process.env.AUTH_TOKEN_SECRET?.trim() || process.env.APP_SECRET?.trim());
   if (!hasTokenSecret) {
     throw new Error('Missing AUTH_TOKEN_SECRET or APP_SECRET');
+  }
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  const allowsSystemHeaders = (process.env.ALLOW_SYSTEM_HEADER_CONTEXT?.trim() || '').toLowerCase() === 'true';
+
+  if (isProduction && allowsSystemHeaders && !process.env.SYSTEM_HEADER_CONTEXT_SECRET?.trim()) {
+    throw new Error('ALLOW_SYSTEM_HEADER_CONTEXT requires SYSTEM_HEADER_CONTEXT_SECRET in production');
+  }
+
+  if (isProduction && !process.env.INBOUND_REPLY_SECRET?.trim()) {
+    throw new Error('INBOUND_REPLY_SECRET is required in production');
+  }
+
+  if (isProduction && !process.env.RESEND_WEBHOOK_SECRET?.trim()) {
+    throw new Error('RESEND_WEBHOOK_SECRET is required in production');
+  }
+
+  if (isProduction && !process.env.STRIPE_WEBHOOK_SECRET?.trim()) {
+    throw new Error('STRIPE_WEBHOOK_SECRET is required in production');
+  }
+
+  const rateLimitStore = (process.env.RATE_LIMIT_STORE?.trim() || 'memory').toLowerCase();
+  const allowMemoryFallback = (process.env.ALLOW_IN_MEMORY_RATE_LIMITER?.trim() || '').toLowerCase() === 'true';
+  if (isProduction && rateLimitStore === 'memory' && !allowMemoryFallback) {
+    throw new Error('RATE_LIMIT_STORE=memory requires ALLOW_IN_MEMORY_RATE_LIMITER=true in production');
   }
 }
 
@@ -80,6 +123,41 @@ function createLaunchProtectionMiddleware() {
   };
 }
 
+@Catch()
+class SafeExceptionFilter implements ExceptionFilter {
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse();
+    const request = ctx.getRequest();
+    const status = exception instanceof HttpException
+      ? exception.getStatus()
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+    const requestId = request?.requestId || response?.getHeader?.('x-request-id') || randomUUID();
+    const body = exception instanceof HttpException ? exception.getResponse() : null;
+    const message = this.safeMessage(status, body);
+
+    response.status(status).json({
+      ok: false,
+      statusCode: status,
+      error: message,
+      requestId,
+    });
+  }
+
+  private safeMessage(status: number, body: unknown) {
+    if (status >= 500) return 'Internal server error';
+    if (typeof body === 'string') return body;
+    if (body && typeof body === 'object') {
+      const record = body as Record<string, unknown>;
+      const message = record.message;
+      if (Array.isArray(message)) return message.join('; ');
+      if (typeof message === 'string') return message;
+      if (typeof record.error === 'string') return record.error;
+    }
+    return 'Request failed';
+  }
+}
+
 async function bootstrap() {
   validateCriticalEnvironment();
 
@@ -93,6 +171,7 @@ async function bootstrap() {
   app.enableCors({
     origin: resolveAllowedOrigins(),
     credentials: true,
+    maxAge: Number(process.env.CORS_MAX_AGE_SECONDS || 600),
   });
 
   app.getHttpAdapter().getInstance().set('trust proxy', 1);
@@ -106,6 +185,7 @@ async function bootstrap() {
       transformOptions: { enableImplicitConversion: true },
     }),
   );
+  app.useGlobalFilters(new SafeExceptionFilter());
 
   const port = Number(process.env.PORT || 3000);
   await app.listen(port);
