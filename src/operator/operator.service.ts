@@ -10,8 +10,11 @@ import {
   Prisma,
   PublicInquiryStatus,
   AlertStatus,
+  ContactEmailStatus,
   JobStatus,
+  MailboxConnectionState,
   MailboxHealthStatus,
+  MailboxStatus,
 } from '@prisma/client';
 import { BillingService } from '../billing/billing.service';
 import { ControlService } from '../control/control.service';
@@ -44,7 +47,7 @@ export class OperatorService {
 
   async commandOverview(organizationId: string) {
     const scopeOrganizationId = await this.resolveOperatorScope(organizationId);
-    const [overview, deliverability, imports, consent, activeJobs, messageStatuses, replies, meetings, suppressed] = await Promise.all([
+    const [overview, deliverability, imports, consent, activeJobs, messageStatuses, replies, meetings, suppressed, suppressionTypes, invalidContacts, bouncedContacts] = await Promise.all([
       this.safeValue(() => this.controlService.overview(scopeOrganizationId), this.emptyControlOverview()),
       this.safeValue(() => this.deliverabilityService.overview(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), this.emptyDeliverabilityOverview()),
       this.safeValue(() => this.prisma.importBatch.aggregate({
@@ -73,14 +76,52 @@ export class OperatorService {
       this.safeValue(() => this.prisma.reply.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }), 0),
       this.safeValue(() => this.prisma.meeting.count({ where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined }), 0),
       this.safeValue(() => this.prisma.lead.count({ where: { ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), status: 'SUPPRESSED' } }), 0),
+      this.safeValue(() => this.prisma.suppressionEntry.groupBy({
+        by: ['type'],
+        where: scopeOrganizationId ? { organizationId: scopeOrganizationId } : undefined,
+        _count: { _all: true },
+      }), []),
+      this.safeValue(() => this.prisma.contact.count({
+        where: { ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), emailStatus: ContactEmailStatus.INVALID },
+      }), 0),
+      this.safeValue(() => this.prisma.contact.count({
+        where: { ...(scopeOrganizationId ? { organizationId: scopeOrganizationId } : {}), emailStatus: ContactEmailStatus.BOUNCED },
+      }), 0),
     ]);
 
     const mailboxes = Array.isArray((deliverability as any)?.mailboxes) ? (deliverability as any).mailboxes : [];
-    const connected = mailboxes.filter((item: any) => item.connectionState === 'AUTHORIZED' || item.connectionState === 'BOOTSTRAPPED').length;
-    const needsAttention = mailboxes.filter((item: any) => item.connectionState === 'REQUIRES_REAUTH' || item.connectionState === 'REVOKED' || item.healthStatus === MailboxHealthStatus.CRITICAL).length;
+    const mailboxSummary = this.buildMailboxDebugSummary(mailboxes);
+    const needsAttention = mailboxSummary.needsAttention;
     const findJobCount = (type: string) => activeJobs.find((item: any) => item.type === type)?._count?._all ?? 0;
     const findMessageCount = (status: string) => messageStatuses.find((item: any) => item.status === status)?._count?._all ?? 0;
     const outreachBlocked = consent.find((item: any) => item.communication === 'OUTREACH' && item.status === 'BLOCKED')?._count?._all ?? 0;
+    const importDuplicates = imports._sum.duplicateRows ?? 0;
+    const importInvalid = imports._sum.invalidRows ?? 0;
+    const suppressionAudit = this.buildSuppressionDebugSummary({
+      suppressedLeads: suppressed,
+      suppressionTypes,
+      outreachBlocked,
+      invalidContacts,
+      bouncedContacts,
+      importDuplicates,
+      importInvalid,
+    });
+    const executionCounts = {
+      waitingOnImport: findJobCount('LEAD_IMPORT'),
+      waitingOnMessageGeneration: findJobCount('MESSAGE_GENERATION'),
+      queuedForSend: findJobCount('FIRST_SEND') + findJobCount('FOLLOWUP_SEND'),
+      waitingOnMailbox: needsAttention,
+      blockedAtConsent: outreachBlocked,
+      blockedAtSuppression: suppressed,
+      sent: findMessageCount('SENT'),
+      failed: findMessageCount('FAILED'),
+      replies,
+      meetings,
+    };
+    const execution = buildExecutionReadSurface({
+      ...executionCounts,
+      mailboxReady: mailboxSummary.sendCapable > 0 && needsAttention === 0,
+    });
 
     return {
       ...overview,
@@ -94,24 +135,122 @@ export class OperatorService {
         failed: imports._sum.failedRows ?? 0,
       },
       permissions: consent.map((item) => ({ communication: item.communication, status: item.status, total: item._count._all })),
-      mailboxes: {
-        total: mailboxes.length,
-        connected,
-        needsAttention,
+      permissionSummary: this.buildPermissionDebugSummary(consent),
+      mailboxes: mailboxSummary,
+      suppressionAudit,
+      execution: {
+        ...execution,
+        aggregate: this.buildExecutionDebugAggregate(execution.stage, executionCounts),
       },
-      execution: buildExecutionReadSurface({
-        waitingOnImport: findJobCount('LEAD_IMPORT'),
-        waitingOnMessageGeneration: findJobCount('MESSAGE_GENERATION'),
-        queuedForSend: findJobCount('FIRST_SEND') + findJobCount('FOLLOWUP_SEND'),
-        waitingOnMailbox: needsAttention,
-        blockedAtConsent: outreachBlocked,
-        blockedAtSuppression: suppressed,
-        sent: findMessageCount('SENT'),
-        failed: findMessageCount('FAILED'),
-        replies,
-        meetings,
-        mailboxReady: needsAttention === 0,
-      }),
+    };
+  }
+
+  private buildMailboxDebugSummary(mailboxes: any[]) {
+    const countBy = (predicate: (item: any) => boolean) => mailboxes.filter(predicate).length;
+    const authorized = countBy((item) => item.connectionState === MailboxConnectionState.AUTHORIZED);
+    const bootstrapped = countBy((item) => item.connectionState === MailboxConnectionState.BOOTSTRAPPED);
+    const pendingAuth = countBy((item) => item.connectionState === MailboxConnectionState.PENDING_AUTH);
+    const requiresReauth = countBy((item) => item.connectionState === MailboxConnectionState.REQUIRES_REAUTH);
+    const revoked = countBy((item) => item.connectionState === MailboxConnectionState.REVOKED);
+    const active = countBy((item) => item.status === MailboxStatus.ACTIVE);
+    const critical = countBy((item) => item.healthStatus === MailboxHealthStatus.CRITICAL);
+    const degraded = countBy((item) => item.healthStatus === MailboxHealthStatus.DEGRADED);
+    const sendCapable = countBy((item) =>
+      item.status === MailboxStatus.ACTIVE &&
+      [MailboxConnectionState.AUTHORIZED, MailboxConnectionState.BOOTSTRAPPED].includes(item.connectionState) &&
+      ![MailboxHealthStatus.DEGRADED, MailboxHealthStatus.CRITICAL].includes(item.healthStatus),
+    );
+    const needsAttention = pendingAuth + requiresReauth + revoked + critical;
+
+    return {
+      total: mailboxes.length,
+      connected: authorized + bootstrapped,
+      authorized,
+      bootstrapped,
+      pendingAuth,
+      requiresReauth,
+      revoked,
+      active,
+      degraded,
+      critical,
+      sendCapable,
+      needsAttention,
+      status:
+        mailboxes.length === 0
+          ? 'NO_MAILBOX'
+          : sendCapable > 0
+            ? 'SEND_CAPABLE'
+            : pendingAuth > 0
+              ? 'AUTH_PENDING'
+              : requiresReauth > 0 || revoked > 0
+                ? 'RECONNECT_REQUIRED'
+                : critical > 0
+                  ? 'CRITICAL_HEALTH'
+                  : 'NOT_SEND_CAPABLE',
+    };
+  }
+
+  private buildSuppressionDebugSummary(input: {
+    suppressedLeads: number;
+    suppressionTypes: Array<{ type: string; _count: { _all: number } }>;
+    outreachBlocked: number;
+    invalidContacts: number;
+    bouncedContacts: number;
+    importDuplicates: number;
+    importInvalid: number;
+  }) {
+    const typeCount = (type: string) => input.suppressionTypes.find((item) => item.type === type)?._count?._all ?? 0;
+    const causes = {
+      unsubscribed: typeCount('UNSUBSCRIBE'),
+      bounced: typeCount('HARD_BOUNCE') + input.bouncedContacts,
+      duplicate: input.importDuplicates,
+      invalid: input.importInvalid + input.invalidContacts,
+      consent: input.outreachBlocked,
+      policy: typeCount('COMPLAINT') + typeCount('MANUAL_BLOCK'),
+    };
+
+    return {
+      totalSuppressedLeads: input.suppressedLeads,
+      causes,
+      sourceCounts: {
+        suppressionEntries: input.suppressionTypes.reduce((total, item) => total + (item._count?._all ?? 0), 0),
+        consentBlocks: input.outreachBlocked,
+        invalidContacts: input.invalidContacts,
+        bouncedContacts: input.bouncedContacts,
+        duplicateImportRows: input.importDuplicates,
+        invalidImportRows: input.importInvalid,
+      },
+    };
+  }
+
+  private buildPermissionDebugSummary(consent: Array<{ communication: string; status: string; _count: { _all: number } }>) {
+    const total = consent.reduce((sum, item) => sum + (item._count?._all ?? 0), 0);
+    const blocked = consent
+      .filter((item) => item.status === 'BLOCKED' || item.status === 'UNSUBSCRIBED')
+      .reduce((sum, item) => sum + (item._count?._all ?? 0), 0);
+    const allowed = consent
+      .filter((item) => item.status === 'ALLOWED' || item.status === 'SUBSCRIBED')
+      .reduce((sum, item) => sum + (item._count?._all ?? 0), 0);
+    return {
+      total,
+      allowed,
+      blocked,
+      status: total === 0 ? 'NO_CONSENT_RECORDS' : blocked > 0 ? 'HAS_BLOCKS' : 'CLEAR',
+    };
+  }
+
+  private buildExecutionDebugAggregate(stage: string, counts: Record<string, number>) {
+    const signals = Object.entries(counts)
+      .filter(([, value]) => value > 0)
+      .map(([key, value]) => ({ key, value }));
+    return {
+      mixed: signals.length > 1,
+      displayStage: signals.length > 1 ? 'MIXED_ACTIVITY' : stage,
+      signals,
+      summary:
+        signals.length > 1
+          ? 'Multiple lifecycle signals are active; read the counts together instead of treating the stage as the only state.'
+          : 'A single dominant lifecycle signal is active.',
     };
   }
 
