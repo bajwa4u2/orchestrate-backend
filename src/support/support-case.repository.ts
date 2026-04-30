@@ -190,6 +190,109 @@ export class SupportCaseRepository {
     return inquiry;
   }
 
+  async listForClient(clientId: string) {
+    return this.prisma.publicInquiry.findMany({
+      where: {
+        clientId,
+        sourceKind: 'CLIENT' as any,
+      },
+      select: {
+        id: true,
+        intakeSessionId: true,
+        inquiryType: true,
+        status: true,
+        category: true,
+        intent: true,
+        priority: true,
+        requiresHuman: true,
+        resolvedByAi: true,
+        isEscalated: true,
+        name: true,
+        email: true,
+        message: true,
+        aiSummary: true,
+        submittedAt: true,
+        firstResponseDueAt: true,
+        nextResponseDueAt: true,
+        lastInboundAt: true,
+        lastOutboundAt: true,
+        lastActivityAt: true,
+        closedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: {
+          select: {
+            messages: true,
+            notes: true,
+          },
+        },
+      },
+      orderBy: [{ lastActivityAt: 'desc' }, { submittedAt: 'desc' }],
+      take: 50,
+    });
+  }
+
+  async getThreadForClient(clientId: string, inquiryId: string) {
+    const inquiry = await this.prisma.publicInquiry.findFirst({
+      where: {
+        id: inquiryId,
+        clientId,
+        sourceKind: 'CLIENT' as any,
+      },
+      select: {
+        id: true,
+        intakeSessionId: true,
+        inquiryType: true,
+        status: true,
+        category: true,
+        intent: true,
+        priority: true,
+        requiresHuman: true,
+        resolvedByAi: true,
+        isEscalated: true,
+        name: true,
+        email: true,
+        message: true,
+        aiSummary: true,
+        aiSuggestedReply: true,
+        submittedAt: true,
+        firstResponseDueAt: true,
+        nextResponseDueAt: true,
+        lastInboundAt: true,
+        lastOutboundAt: true,
+        lastActivityAt: true,
+        closedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        messages: {
+          where: { visibility: 'PUBLIC_THREAD' as any },
+          select: {
+            id: true,
+            direction: true,
+            channel: true,
+            messageType: true,
+            authorType: true,
+            subjectLine: true,
+            bodyText: true,
+            fromEmail: true,
+            toEmail: true,
+            sentAt: true,
+            receivedAt: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+          orderBy: [{ createdAt: 'asc' }],
+        },
+      },
+    });
+
+    if (!inquiry) {
+      throw new NotFoundException('Support inquiry not found for this client');
+    }
+
+    return inquiry;
+  }
+
   hashPublicSessionToken(token: string) {
     return createHash('sha256').update(token).digest('hex');
   }

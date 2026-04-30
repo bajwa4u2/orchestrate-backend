@@ -39,6 +39,82 @@ export class SupportCaseService {
     return this.repository.getBySessionId(sessionId);
   }
 
+  async listForClient(clientId: string) {
+    const inquiries = await this.repository.listForClient(clientId);
+    return {
+      items: inquiries.map((inquiry: any) => ({
+        id: inquiry.id,
+        sessionId: inquiry.intakeSessionId,
+        type: inquiry.inquiryType,
+        status: inquiry.status,
+        category: inquiry.category,
+        intent: inquiry.intent,
+        priority: inquiry.priority,
+        requiresHuman: inquiry.requiresHuman,
+        resolvedByAi: inquiry.resolvedByAi,
+        isEscalated: inquiry.isEscalated,
+        subject: inquiry.message,
+        aiSummary: inquiry.aiSummary,
+        submittedAt: inquiry.submittedAt,
+        firstResponseDueAt: inquiry.firstResponseDueAt,
+        nextResponseDueAt: inquiry.nextResponseDueAt,
+        lastInboundAt: inquiry.lastInboundAt,
+        lastOutboundAt: inquiry.lastOutboundAt,
+        lastActivityAt: inquiry.lastActivityAt,
+        closedAt: inquiry.closedAt,
+        createdAt: inquiry.createdAt,
+        updatedAt: inquiry.updatedAt,
+        counts: {
+          messages: inquiry._count?.messages ?? 0,
+          notes: inquiry._count?.notes ?? 0,
+        },
+      })),
+    };
+  }
+
+  async getThreadForClient(clientId: string, inquiryId: string) {
+    const inquiry = await this.repository.getThreadForClient(clientId, inquiryId);
+    return {
+      id: inquiry.id,
+      sessionId: inquiry.intakeSessionId,
+      type: inquiry.inquiryType,
+      status: inquiry.status,
+      category: inquiry.category,
+      intent: inquiry.intent,
+      priority: inquiry.priority,
+      requiresHuman: inquiry.requiresHuman,
+      resolvedByAi: inquiry.resolvedByAi,
+      isEscalated: inquiry.isEscalated,
+      subject: inquiry.message,
+      aiSummary: inquiry.aiSummary,
+      aiSuggestedReply: inquiry.aiSuggestedReply,
+      submittedAt: inquiry.submittedAt,
+      firstResponseDueAt: inquiry.firstResponseDueAt,
+      nextResponseDueAt: inquiry.nextResponseDueAt,
+      lastInboundAt: inquiry.lastInboundAt,
+      lastOutboundAt: inquiry.lastOutboundAt,
+      lastActivityAt: inquiry.lastActivityAt,
+      closedAt: inquiry.closedAt,
+      createdAt: inquiry.createdAt,
+      updatedAt: inquiry.updatedAt,
+      messages: inquiry.messages.map((message: any) => ({
+        id: message.id,
+        direction: message.direction,
+        channel: message.channel,
+        messageType: message.messageType,
+        authorType: message.authorType,
+        subjectLine: message.subjectLine,
+        bodyText: message.bodyText,
+        fromEmail: message.fromEmail,
+        toEmail: message.toEmail,
+        sentAt: message.sentAt,
+        receivedAt: message.receivedAt,
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt,
+      })),
+    };
+  }
+
   async appendInboundReply(
     sessionId: string,
     message: string,

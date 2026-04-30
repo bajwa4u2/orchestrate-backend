@@ -1,10 +1,11 @@
-import { Body, Controller, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
 import { AccessContextService } from '../access-context/access-context.service';
 import { PrismaService } from '../database/prisma.service';
 import { CreatePublicIntakeDto } from '../intake/dto/create-public-intake.dto';
 import { ReplyIntakeDto } from '../intake/dto/reply-intake.dto';
 import { IntakeService } from '../intake/intake.service';
 import { NormalizedIntakeInput } from '../intake/intake.types';
+import { SupportCaseService } from './support-case.service';
 
 @Controller('client/support')
 export class ClientSupportController {
@@ -12,7 +13,23 @@ export class ClientSupportController {
     private readonly intake: IntakeService,
     private readonly accessContextService: AccessContextService,
     private readonly prisma: PrismaService,
+    private readonly supportCases: SupportCaseService,
   ) {}
+
+  @Get('inquiries')
+  async listInquiries(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.supportCases.listForClient(context.clientId!);
+  }
+
+  @Get('inquiries/:id/thread')
+  async getInquiryThread(
+    @Headers() headers: Record<string, unknown>,
+    @Param('id') inquiryId: string,
+  ) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.supportCases.getThreadForClient(context.clientId!, inquiryId);
+  }
 
   @Post('intake')
   async intakeRequest(

@@ -34,6 +34,30 @@ export class ClientPortalController {
     };
   }
 
+  @Get('outreach')
+  async outreach(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.clientPortalService.outreach(context.organizationId!, context.clientId!);
+  }
+
+  @Get('replies')
+  async replies(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.clientPortalService.replies(context.organizationId!, context.clientId!);
+  }
+
+  @Get('meetings')
+  async meetings(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.clientPortalService.meetings(context.organizationId!, context.clientId!);
+  }
+
+  @Get('records')
+  async records(@Headers() headers: Record<string, unknown>) {
+    const context = await this.accessContextService.requireClient(headers);
+    return this.clientPortalService.records(context.organizationId!, context.clientId!);
+  }
+
   @Get('leads')
   async leads(@Headers() headers: Record<string, unknown>) {
     const context = await this.accessContextService.requireClient(headers);

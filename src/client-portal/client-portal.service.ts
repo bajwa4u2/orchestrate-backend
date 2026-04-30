@@ -252,6 +252,453 @@ export class ClientPortalService {
     });
   }
 
+  async outreach(organizationId: string, clientId: string) {
+    const [client, campaigns, messages, replies, meetings, mailbox, imports, execution, authorization] = await Promise.all([
+      this.prisma.client.findFirst({
+        where: { id: clientId, organizationId },
+        select: { id: true, setupCompletedAt: true, selectedPlan: true, bookingUrl: true },
+      }),
+      this.prisma.campaign.findMany({
+        where: { organizationId, clientId, archivedAt: null },
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          generationState: true,
+          channel: true,
+          objective: true,
+          offerSummary: true,
+          bookingUrlOverride: true,
+          startAt: true,
+          endAt: true,
+          createdAt: true,
+          updatedAt: true,
+          _count: {
+            select: {
+              leads: true,
+              outreachMessages: true,
+              replies: true,
+              meetings: true,
+            },
+          },
+        },
+        orderBy: [{ updatedAt: 'desc' }],
+        take: 12,
+      }),
+      this.prisma.outreachMessage.findMany({
+        where: { organizationId, clientId },
+        select: {
+          id: true,
+          campaignId: true,
+          leadId: true,
+          mailboxId: true,
+          status: true,
+          lifecycle: true,
+          messageClass: true,
+          subjectLine: true,
+          sentAt: true,
+          deliveredAt: true,
+          openedAt: true,
+          clickedAt: true,
+          failedAt: true,
+          errorMessage: true,
+          createdAt: true,
+          updatedAt: true,
+          campaign: { select: { id: true, name: true, status: true } },
+          lead: {
+            select: {
+              id: true,
+              status: true,
+              contact: { select: { fullName: true, email: true, title: true } },
+              account: { select: { companyName: true } },
+            },
+          },
+          mailbox: { select: { id: true, emailAddress: true, status: true, connectionState: true, healthStatus: true } },
+        },
+        orderBy: [{ sentAt: 'desc' }, { createdAt: 'desc' }],
+        take: 25,
+      }),
+      this.prisma.reply.count({ where: { organizationId, clientId } }),
+      this.prisma.meeting.count({ where: { organizationId, clientId } }),
+      this.safeValue(() => this.getMailboxSummary(organizationId, clientId), this.emptyMailboxSummary()),
+      this.safeValue(() => this.getImportSummary(organizationId, clientId), this.emptyImportSummary()),
+      this.safeValue(() => this.getExecutionSummary(organizationId, clientId), null),
+      this.latestRepresentationAuth(organizationId, clientId),
+    ]);
+
+    if (!client) {
+      throw new NotFoundException('Client not found in active organization');
+    }
+
+    const statusCounts = messages.reduce<Record<string, number>>((counts, message) => {
+      const key = String(message.status);
+      counts[key] = (counts[key] ?? 0) + 1;
+      return counts;
+    }, {});
+
+    const blockers: Array<{ code: string; label: string; detail: string }> = [];
+    if (!client.setupCompletedAt) {
+      blockers.push({
+        code: 'SETUP_INCOMPLETE',
+        label: 'Setup incomplete',
+        detail: 'Finish setup before outreach can run.',
+      });
+    }
+    if (!authorization) {
+      blockers.push({
+        code: 'REPRESENTATION_AUTH_MISSING',
+        label: 'Authorization required',
+        detail: 'Representation authorization is required before Orchestrate can send outreach on your behalf.',
+      });
+    }
+    if (!mailbox.ready) {
+      blockers.push({
+        code: 'MAILBOX_NOT_READY',
+        label: 'Mailbox not ready',
+        detail: mailbox.primary
+          ? 'The connected mailbox is not ready for sending.'
+          : 'No client-ready mailbox is available yet.',
+      });
+    }
+
+    const hasRunnableCampaign = campaigns.some((campaign) =>
+      ['READY', 'DRAFT', 'PAUSED'].includes(String(campaign.status)),
+    );
+
+    return {
+      readiness: {
+        setupComplete: Boolean(client.setupCompletedAt),
+        mailboxReady: mailbox.ready,
+        representationAuthorized: Boolean(authorization),
+        canStartCampaign: blockers.length === 0 && hasRunnableCampaign,
+        canRetryCampaign: blockers.length === 0 && campaigns.some((campaign) => ['ERROR', 'PAUSED'].includes(String(campaign.status))),
+        canPauseCampaign: false,
+        canReconnectMailbox: false,
+        blockers,
+      },
+      mailbox,
+      execution,
+      imports,
+      summary: {
+        campaigns: campaigns.length,
+        messages: messages.length,
+        queued: statusCounts.QUEUED ?? 0,
+        scheduled: statusCounts.SCHEDULED ?? 0,
+        sent: statusCounts.SENT ?? 0,
+        delivered: statusCounts.DELIVERED ?? 0,
+        failed: statusCounts.FAILED ?? 0,
+        replies,
+        meetings,
+      },
+      campaigns: campaigns.map((campaign) => ({
+        id: campaign.id,
+        name: campaign.name,
+        status: campaign.status,
+        generationState: campaign.generationState,
+        channel: campaign.channel,
+        objective: campaign.objective,
+        offerSummary: campaign.offerSummary,
+        bookingUrl: campaign.bookingUrlOverride ?? client.bookingUrl ?? null,
+        startAt: campaign.startAt,
+        endAt: campaign.endAt,
+        createdAt: campaign.createdAt,
+        updatedAt: campaign.updatedAt,
+        counts: {
+          leads: campaign._count.leads,
+          messages: campaign._count.outreachMessages,
+          replies: campaign._count.replies,
+          meetings: campaign._count.meetings,
+        },
+      })),
+      recentMessages: messages.map((message) => ({
+        id: message.id,
+        campaignId: message.campaignId,
+        leadId: message.leadId,
+        mailboxId: message.mailboxId,
+        status: message.status,
+        lifecycle: message.lifecycle,
+        messageClass: message.messageClass,
+        subjectLine: message.subjectLine,
+        sentAt: message.sentAt,
+        deliveredAt: message.deliveredAt,
+        openedAt: message.openedAt,
+        clickedAt: message.clickedAt,
+        failedAt: message.failedAt,
+        errorMessage: message.errorMessage,
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt,
+        campaign: message.campaign,
+        contact: {
+          name: message.lead?.contact?.fullName ?? '',
+          email: message.lead?.contact?.email ?? '',
+          title: message.lead?.contact?.title ?? '',
+          company: message.lead?.account?.companyName ?? '',
+          leadStatus: message.lead?.status ?? null,
+        },
+        mailbox: message.mailbox,
+      })),
+      actions: {
+        startCampaign: blockers.length === 0 && hasRunnableCampaign
+          ? { method: 'POST', path: '/client/campaign-profile/start' }
+          : null,
+        retryCampaign: blockers.length === 0 && campaigns.some((campaign) => ['ERROR', 'PAUSED'].includes(String(campaign.status)))
+          ? { method: 'POST', path: '/client/campaign-profile/restart' }
+          : null,
+        pauseCampaign: null,
+        reconnectMailbox: null,
+      },
+    };
+  }
+
+  async replies(organizationId: string, clientId: string) {
+    const replies = await this.prisma.reply.findMany({
+      where: { organizationId, clientId },
+      select: {
+        id: true,
+        intent: true,
+        source: true,
+        confidence: true,
+        fromEmail: true,
+        subjectLine: true,
+        bodyText: true,
+        receivedAt: true,
+        requiresHumanReview: true,
+        handledAt: true,
+        createdAt: true,
+        updatedAt: true,
+        campaign: { select: { id: true, name: true, status: true } },
+        lead: {
+          select: {
+            id: true,
+            status: true,
+            contact: { select: { fullName: true, email: true, title: true } },
+            account: { select: { companyName: true, domain: true } },
+          },
+        },
+        message: { select: { id: true, subjectLine: true, bodyText: true, status: true, sentAt: true } },
+        meeting: { select: { id: true, status: true, scheduledAt: true, title: true, bookingUrl: true } },
+      },
+      orderBy: [{ receivedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 100,
+    });
+
+    return {
+      summary: {
+        total: replies.length,
+        needsReview: replies.filter((reply) => reply.requiresHumanReview).length,
+        interested: replies.filter((reply) => String(reply.intent) === 'INTERESTED').length,
+        meetings: replies.filter((reply) => Boolean(reply.meeting)).length,
+      },
+      items: replies.map((reply) => this.replyDto(reply)),
+    };
+  }
+
+  async meetings(organizationId: string, clientId: string) {
+    const [meetings, mailbox] = await Promise.all([
+      this.prisma.meeting.findMany({
+        where: { organizationId, clientId },
+        select: {
+          id: true,
+          status: true,
+          scheduledAt: true,
+          completedAt: true,
+          title: true,
+          bookingUrl: true,
+          notesText: true,
+          createdAt: true,
+          updatedAt: true,
+          campaign: { select: { id: true, name: true, status: true } },
+          lead: {
+            select: {
+              id: true,
+              status: true,
+              contact: { select: { fullName: true, email: true, title: true } },
+              account: { select: { companyName: true, domain: true } },
+            },
+          },
+          reply: {
+            select: {
+              id: true,
+              intent: true,
+              fromEmail: true,
+              subjectLine: true,
+              bodyText: true,
+              receivedAt: true,
+              message: { select: { id: true, subjectLine: true, sentAt: true } },
+            },
+          },
+        },
+        orderBy: [{ scheduledAt: 'desc' }, { createdAt: 'desc' }],
+        take: 100,
+      }),
+      this.safeValue(() => this.getMailboxSummary(organizationId, clientId), this.emptyMailboxSummary()),
+    ]);
+
+    return {
+      provider: {
+        calendarConnected: null,
+        mailboxReady: mailbox.ready,
+        mailbox: mailbox.primary,
+      },
+      summary: {
+        total: meetings.length,
+        openHandoffs: meetings.filter((meeting) => String(meeting.status) === 'PROPOSED').length,
+        booked: meetings.filter((meeting) => ['BOOKED', 'SCHEDULED'].includes(String(meeting.status))).length,
+        completed: meetings.filter((meeting) => String(meeting.status) === 'COMPLETED').length,
+        missed: meetings.filter((meeting) => ['MISSED', 'CANCELED'].includes(String(meeting.status))).length,
+      },
+      items: meetings.map((meeting) => ({
+        id: meeting.id,
+        status: meeting.status,
+        scheduledAt: meeting.scheduledAt,
+        completedAt: meeting.completedAt,
+        title: meeting.title,
+        bookingUrl: meeting.bookingUrl,
+        notesText: meeting.notesText,
+        createdAt: meeting.createdAt,
+        updatedAt: meeting.updatedAt,
+        campaign: meeting.campaign,
+        contact: {
+          name: meeting.lead?.contact?.fullName ?? '',
+          email: meeting.lead?.contact?.email ?? meeting.reply?.fromEmail ?? '',
+          title: meeting.lead?.contact?.title ?? '',
+          company: meeting.lead?.account?.companyName ?? '',
+          domain: meeting.lead?.account?.domain ?? '',
+          leadStatus: meeting.lead?.status ?? null,
+        },
+        reply: meeting.reply
+          ? {
+              id: meeting.reply.id,
+              intent: meeting.reply.intent,
+              fromEmail: meeting.reply.fromEmail,
+              subjectLine: meeting.reply.subjectLine,
+              bodyText: meeting.reply.bodyText,
+              receivedAt: meeting.reply.receivedAt,
+              message: meeting.reply.message,
+            }
+          : null,
+      })),
+    };
+  }
+
+  async records(organizationId: string, clientId: string) {
+    const [agreements, statements, reminders, invoices, receipts, authorizations, imports] = await Promise.all([
+      this.agreements(organizationId, clientId),
+      this.statements(organizationId, clientId),
+      this.reminders(organizationId, clientId),
+      this.invoices(organizationId, clientId),
+      this.prisma.receipt.findMany({
+        where: { organizationId, clientId },
+        select: {
+          id: true,
+          receiptNumber: true,
+          amountCents: true,
+          currencyCode: true,
+          issuedAt: true,
+          createdAt: true,
+          invoice: { select: { id: true, invoiceNumber: true, status: true } },
+        },
+        orderBy: [{ issuedAt: 'desc' }, { createdAt: 'desc' }],
+        take: 50,
+      }),
+      this.prisma.clientRepresentationAuth.findMany({
+        where: { organizationId, clientId },
+        select: {
+          id: true,
+          version: true,
+          acceptedByName: true,
+          acceptedByEmail: true,
+          acceptedAt: true,
+          createdAt: true,
+        },
+        orderBy: [{ acceptedAt: 'desc' }],
+      }),
+      this.prisma.importBatch.findMany({
+        where: { organizationId, clientId },
+        select: {
+          id: true,
+          campaignId: true,
+          sourceLabel: true,
+          status: true,
+          totalRows: true,
+          processedRows: true,
+          createdRows: true,
+          duplicateRows: true,
+          invalidRows: true,
+          failedRows: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+        orderBy: [{ createdAt: 'desc' }],
+        take: 25,
+      }),
+    ]);
+
+    return {
+      agreements,
+      billingDocuments: {
+        invoices,
+        receipts,
+        statements,
+        reminders,
+      },
+      authorizations,
+      sourceRecords: {
+        imports,
+      },
+    };
+  }
+
+  private async latestRepresentationAuth(organizationId: string, clientId: string) {
+    return this.prisma.clientRepresentationAuth.findFirst({
+      where: { organizationId, clientId },
+      orderBy: [{ acceptedAt: 'desc' }],
+      select: {
+        id: true,
+        version: true,
+        acceptedAt: true,
+        acceptedByName: true,
+        acceptedByEmail: true,
+      },
+    });
+  }
+
+  private replyDto(reply: any) {
+    return {
+      id: reply.id,
+      intent: reply.intent,
+      source: reply.source,
+      confidence: this.toNumber(reply.confidence),
+      fromEmail: reply.fromEmail,
+      subjectLine: reply.subjectLine,
+      bodyText: reply.bodyText,
+      receivedAt: reply.receivedAt,
+      requiresHumanReview: reply.requiresHumanReview,
+      handledAt: reply.handledAt,
+      createdAt: reply.createdAt,
+      updatedAt: reply.updatedAt,
+      campaign: reply.campaign,
+      contact: {
+        name: reply.lead?.contact?.fullName ?? '',
+        email: reply.lead?.contact?.email ?? reply.fromEmail ?? '',
+        title: reply.lead?.contact?.title ?? '',
+        company: reply.lead?.account?.companyName ?? '',
+        domain: reply.lead?.account?.domain ?? '',
+        leadStatus: reply.lead?.status ?? null,
+      },
+      message: reply.message,
+      meeting: reply.meeting,
+    };
+  }
+
+  private toNumber(value: unknown) {
+    if (value == null) return null;
+    if (typeof value === 'number') return value;
+    const text = String(value);
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   private async safeValue<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
     try {
       return await loader();

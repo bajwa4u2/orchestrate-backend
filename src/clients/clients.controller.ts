@@ -78,4 +78,10 @@ export class ClientsController {
     await this.accessContextService.requireClient(headers);
     return this.clientsService.acceptRepresentationAuth(headers);
   }
+
+  @Get('me/representation-auth')
+  async getRepresentationAuth(@Headers() headers: Record<string, unknown>) {
+    await this.accessContextService.requireClient(headers);
+    return this.clientsService.getRepresentationAuth(headers);
+  }
 }

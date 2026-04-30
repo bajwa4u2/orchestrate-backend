@@ -627,6 +627,32 @@ export class ClientsService {
     };
   }
 
+  async getRepresentationAuth(headers: Record<string, unknown>) {
+    const client = await this.resolveClientForRequest(headers);
+    const records = await this.prisma.clientRepresentationAuth.findMany({
+      where: {
+        organizationId: client.organizationId,
+        clientId: client.id,
+      },
+      select: {
+        id: true,
+        version: true,
+        acceptedByName: true,
+        acceptedByEmail: true,
+        acceptedAt: true,
+        createdAt: true,
+      },
+      orderBy: [{ acceptedAt: 'desc' }],
+    });
+
+    return {
+      requiredVersion: CURRENT_REPRESENTATION_AUTH_VERSION,
+      authorized: records.some((record) => record.version === CURRENT_REPRESENTATION_AUTH_VERSION),
+      latest: records[0] ?? null,
+      records,
+    };
+  }
+
   private async ensureRepresentationAuth(client: any) {
     const existing = await this.prisma.clientRepresentationAuth.findUnique({
       where: {
